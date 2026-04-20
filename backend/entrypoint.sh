@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null 2>&1; then
+if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
     echo "[startup] GPU detected, CUDA acceleration available"
     export DEVICE="cuda"
 else

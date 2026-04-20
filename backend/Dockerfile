@@ -24,7 +24,7 @@ RUN useradd -m -u 1000 -s /bin/bash appuser && \
     mkdir -p /app/uploads /data && \
     chown -R appuser:appuser /app /data
 
-COPY --from=builder /root/.local /home/appuser/.local
+COPY --from=builder --chown=appuser:appuser /root/.local /home/appuser/.local
 ENV PATH=/home/appuser/.local/bin:$PATH \
     PYTHONPATH=/app \
     PYTHONUNBUFFERED=1 \

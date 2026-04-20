@@ -47,11 +47,17 @@ INSTALL="/opt/ebook-tts-reader"
 DB_DIR="$HOME/.local/share/ebook-tts-reader"
 mkdir -p "$DB_DIR"
 
+cleanup() {
+    kill "$BACKEND_PID" "$FRONTEND_PID" 2>/dev/null || true
+    wait "$BACKEND_PID" "$FRONTEND_PID" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
 # Backend
 cd "$INSTALL/backend"
 if [ ! -d .venv ]; then
-    uv venv .venv --python python3
-    uv pip install -r requirements.txt
+    python3 -m venv .venv
+    .venv/bin/pip install --quiet -r requirements.txt
 fi
 DB_PATH="$DB_DIR/ebook_reader.db" .venv/bin/uvicorn main:app \
     --host 127.0.0.1 --port 8000 &
@@ -96,7 +102,8 @@ Section: misc
 Priority: optional
 Architecture: $ARCH
 Installed-Size: $INSTALLED_SIZE
-Depends: python3 (>= 3.11), python3-pip, nodejs (>= 18)
+Depends: python3 (>= 3.11), python3-pip, ffmpeg, libsndfile1, libgl1-mesa-glx, libglib2.0-0
+Recommends: nodejs (>= 18)
 Maintainer: $MAINTAINER
 Description: $DESCRIPTION
  Local ebook TTS reader with Kokoro neural text-to-speech, sentence-level
