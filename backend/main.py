@@ -44,3 +44,8 @@ app.include_router(library.router)
 app.include_router(tts_router.router)
 
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}

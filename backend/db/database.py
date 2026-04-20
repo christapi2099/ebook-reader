@@ -1,8 +1,9 @@
+import os
 from pathlib import Path
 from sqlmodel import SQLModel, create_engine, Session
 
-# Absolute path next to this file — reliable regardless of CWD at startup
-_DEFAULT_DB = str(Path(__file__).parent.parent / "ebook_reader.db")
+# DB_PATH env var allows Docker volume override; falls back to local file
+_DEFAULT_DB = os.environ.get("DB_PATH") or str(Path(__file__).parent.parent / "ebook_reader.db")
 
 engine = None
 
