@@ -1,0 +1,16 @@
+fastapi>=0.115
+uvicorn[standard]
+sqlmodel
+pymupdf
+ebooklib
+beautifulsoup4
+spacy
+easyocr
+python-multipart
+soundfile
+numpy
+httpx
+pytest
+pytest-asyncio
+pytest-cov
+httpx
