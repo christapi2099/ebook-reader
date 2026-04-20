@@ -57,7 +57,10 @@ class TTSEngine:
         except TypeError:
             results = self.kokoro(job.text)
 
-        for audio, sample_rate in results:
+        # Kokoro KPipeline yields (graphemes, phonemes, audio) tuples; sample rate is always 24 kHz
+        sample_rate = 24000
+        for result in results:
+            audio = result[-1]  # last element is always the audio ndarray
             if job.sentence_index in self.cancelled:
                 return
 

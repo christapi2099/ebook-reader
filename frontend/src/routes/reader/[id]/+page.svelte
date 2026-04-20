@@ -7,6 +7,7 @@
   import PDFViewer from '$lib/components/PDFViewer.svelte'
   import MediaBar from '$lib/components/MediaBar.svelte'
   import TopToolbar from '$lib/components/TopToolbar.svelte'
+  import AudioProgressBar from '$lib/components/AudioProgressBar.svelte'
 
   const bookId = $page.params.id as string
 
@@ -67,23 +68,32 @@
 </script>
 
 <div class="flex flex-col h-full">
-  <!-- Top bar: stacks vertically on mobile -->
-  <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between px-3 py-2 border-b border-slate-200 bg-white gap-2">
-    <MediaBar
+  <!-- Top bar -->
+  <div class="border-b border-slate-200 bg-white">
+    <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between px-3 py-2 gap-2">
+      <MediaBar
+        isPlaying={reader.isPlaying}
+        speed={reader.speed}
+        onPlay={handlePlay}
+        onPause={handlePause}
+        onRewind={handleRewind}
+        onForward={handleForward}
+        onSpeedChange={handleSpeedChange}
+      />
+      <TopToolbar
+        onToggleCC={() => {}}
+        onCopyText={() => {}}
+        onSave={() => seek(reader.currentIndex)}
+        onSearch={() => {}}
+        onSettings={() => {}}
+      />
+    </div>
+    <!-- Progress bar sits below controls, full width -->
+    <AudioProgressBar
+      sentences={reader.sentences}
+      currentIndex={reader.currentIndex}
       isPlaying={reader.isPlaying}
       speed={reader.speed}
-      onPlay={handlePlay}
-      onPause={handlePause}
-      onRewind={handleRewind}
-      onForward={handleForward}
-      onSpeedChange={handleSpeedChange}
-    />
-    <TopToolbar
-      onToggleCC={() => {}}
-      onCopyText={() => {}}
-      onSave={() => seek(reader.currentIndex)}
-      onSearch={() => {}}
-      onSettings={() => {}}
     />
   </div>
 
@@ -92,7 +102,6 @@
     {#if reader.sentences.length > 0}
       <PDFViewer
         {bookId}
-        filePath=""
         sentences={reader.sentences}
         currentIndex={reader.currentIndex}
         onSentenceClick={handleSeek}
