@@ -10,13 +10,15 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --user -r requirements.txt && \
     python -m spacy download en_core_web_sm
 
-# Production stage
-FROM python:3.12-slim
+# Production stage: CUDA 12.4 runtime for GPU acceleration
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
 
 RUN apt-get update && apt-get install -y \
+    python3.12 python3.12-venv python3-pip \
     libgl1-mesa-glx libglib2.0-0 libsm6 libxext6 libxrender-dev \
     ffmpeg libsndfile1 curl \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3.12 /usr/bin/python3
 
 WORKDIR /app
 
@@ -31,14 +33,14 @@ ENV PATH=/home/appuser/.local/bin:$PATH \
     DB_PATH=/data/ebook_reader.db
 
 COPY --chown=appuser:appuser . .
-COPY --chown=appuser:appuser entrypoint.sh /entrypoint.sh
+COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 USER appuser
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -fs http://localhost:8000/health || exit 1
 
 ENTRYPOINT ["/entrypoint.sh"]
