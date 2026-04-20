@@ -56,8 +56,8 @@ trap cleanup EXIT INT TERM
 # Backend
 cd "$INSTALL/backend"
 if [ ! -d .venv ]; then
-    python3 -m venv .venv
-    .venv/bin/pip install --quiet -r requirements.txt
+    uv venv .venv --python python3
+    uv pip install --quiet -r requirements.txt
 fi
 DB_PATH="$DB_DIR/ebook_reader.db" .venv/bin/uvicorn main:app \
     --host 127.0.0.1 --port 8000 &
