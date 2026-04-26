@@ -65,9 +65,9 @@ export class TTSSocket {
   private maxReconnectAttempts = 5
 
   onAudioChunk: (bytes: ArrayBuffer) => void = () => {}
-  onSentenceStart: (index: number) => void = () => {}
-  onSentenceEnd: (index: number, durationMs: number) => void = () => {}
-  onComplete: () => void = () => {}
+  onSentenceStart: (index: number, sessionId: number) => void = () => {}
+  onSentenceEnd: (index: number, durationMs: number, sessionId: number) => void = () => {}
+  onComplete: (sessionId: number) => void = () => {}
 
   constructor(bookId: string) {
     this.bookId = bookId
@@ -85,9 +85,10 @@ export class TTSSocket {
       } else {
         try {
           const msg = JSON.parse(event.data)
-          if (msg.type === 'sentence_start') this.onSentenceStart(msg.index)
-          else if (msg.type === 'sentence_end') this.onSentenceEnd(msg.index, msg.duration_ms)
-          else if (msg.type === 'complete') this.onComplete()
+          const sid = typeof msg.session_id === 'number' ? msg.session_id : 0
+          if (msg.type === 'sentence_start') this.onSentenceStart(msg.index, sid)
+          else if (msg.type === 'sentence_end') this.onSentenceEnd(msg.index, msg.duration_ms, sid)
+          else if (msg.type === 'complete') this.onComplete(sid)
         } catch {}
       }
     }
@@ -103,12 +104,12 @@ export class TTSSocket {
     }, delay)
   }
 
-  play(fromIndex: number, voice = 'af_heart'): void {
-    this._send({ action: 'play', from_index: fromIndex, voice })
+  play(fromIndex: number, voice = 'af_heart', speed = 1.0, sessionId = 0): void {
+    this._send({ action: 'play', from_index: fromIndex, voice, speed, session_id: sessionId })
   }
 
-  seek(toIndex: number): void {
-    this._send({ action: 'seek', to_index: toIndex })
+  seek(toIndex: number, voice = 'af_heart', speed = 1.0, sessionId = 0): void {
+    this._send({ action: 'seek', to_index: toIndex, voice, speed, session_id: sessionId })
   }
 
   pause(): void {

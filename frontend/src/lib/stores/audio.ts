@@ -22,19 +22,36 @@ function createAudioStore() {
   let socket: TTSSocket | null = null
   let cancelled = false
 
-  // Serialized decode queue — each chunk waits for the previous to finish scheduling
-  // so nextStartTime is always updated in arrival order, preventing marble effect.
+  // Generation counter — bumped on every stopAll(). Captured by scheduleChunk()
+  // closures so stale decode tails and onended callbacks from stopped sources
+  // become no-ops instead of advancing currentIndex (which would clobber a
+  // seek-backward target).
+  let generation = 0
+
+  // Session counter — bumped on every play/seek/resume/setSpeed. Sent with the
+  // action to the backend, which echoes it in every sentence_start/sentence_end/
+  // complete message. Also gates audio chunks via activeSessionId (see below).
+  // This is how we reject messages that are still draining from a previously
+  // cancelled session — neither the frontend reset nor backend cancellation can
+  // flush the WebSocket RX buffer, so we must filter by tag.
+  let sessionId = 0
+  // Set to the current sessionId when a sentence_start with a matching sessionId
+  // arrives — audio chunks (binary, untagged) are only accepted while this
+  // equals sessionId. Reset to -1 in stopAll() so we always require a fresh
+  // matching sentence_start before accepting chunks in a new session.
+  let activeSessionId = -1
+
+  // Serialized decode queue — each chunk waits for the previous to finish
+  // scheduling so nextStartTime updates in arrival order (no marble effect).
   let decodeChain: Promise<void> = Promise.resolve()
   let nextStartTime = 0
 
-  // Active nodes keyed by their scheduled start time for speed-change updates
   let activeNodes: { node: AudioBufferSourceNode; startAt: number; duration: number }[] = []
 
-  // Sentence timing: maps sentence index → AudioContext time when it will start playing.
-  // Updated as chunks arrive and get scheduled. Used by the rAF loop to sync highlight.
+  // Sentence timing: sentence index → AudioContext time when it starts playing.
+  // rAF polls this to advance currentIndex in audio-time, not receive-time.
   let sentenceTimings: Map<number, number> = new Map()
-  let receivingSentenceIndex = -1   // sentence whose chunks are currently arriving
-  let sentenceStartRecorded = false // whether we've recorded the timing for current sentence
+  let receivingSentenceIndex = -1
 
   let rafId: number | null = null
 
@@ -43,28 +60,30 @@ function createAudioStore() {
     return ctx
   }
 
-  // rAF loop: advances currentIndex when AudioContext time crosses each sentence's
-  // scheduled start time, so the highlight moves in audio time not receive time.
   function startRaf() {
     if (rafId !== null) return
     function tick() {
       const ac = ctx
       if (!ac || cancelled) { rafId = null; return }
+      const s = get({ subscribe })
+      if (!s.isPlaying || s.buffering) { rafId = requestAnimationFrame(tick); return }
       const now = ac.currentTime
 
-      // Find the latest sentence whose scheduled start is <= now
+      // Find the latest sentence whose scheduled start is <= now.
+      // Taking the max (not the min) lets us catch up if several very short
+      // sentences elapsed within a single rAF frame — the alternative would
+      // show an even more visibly out-of-date highlight.
       let latestReady = -1
       for (const [idx, startTime] of sentenceTimings) {
         if (startTime <= now && idx > latestReady) latestReady = idx
       }
       if (latestReady >= 0) {
         update(s => {
-          if (latestReady > s.currentIndex) return { ...s, currentIndex: latestReady }
+          if (latestReady >= s.currentIndex) return { ...s, currentIndex: latestReady }
           return s
         })
-        // Prune timings we've passed
         for (const [idx] of sentenceTimings) {
-          if (idx < latestReady) sentenceTimings.delete(idx)
+          if (idx <= latestReady) sentenceTimings.delete(idx)
         }
       }
 
@@ -77,10 +96,15 @@ function createAudioStore() {
     if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null }
   }
 
-  function scheduleChunk(bytes: ArrayBuffer) {
-    // Chain decode+schedule so they execute strictly in order
+  function scheduleChunk(bytes: ArrayBuffer, idx: number) {
+    // Capture generation at schedule time. Both the post-decode guard and the
+    // onended callback check that generation hasn't advanced since — without
+    // this, a seek-backward would see onended callbacks from the STOPPED nodes
+    // of the previous session fire and re-advance currentIndex forward past
+    // the seek target (onended runs even when the source is stopped early).
+    const myGen = generation
     decodeChain = decodeChain.then(async () => {
-      if (cancelled) return
+      if (cancelled || myGen !== generation) return
       const ac = getCtx()
       let buffer: AudioBuffer
       try {
@@ -88,34 +112,49 @@ function createAudioStore() {
       } catch {
         return // skip corrupt/partial chunks
       }
-      if (cancelled) return
+      if (cancelled || myGen !== generation) return
 
-      const speed = get({ subscribe }).speed
       const source = ac.createBufferSource()
       source.buffer = buffer
-      source.playbackRate.value = speed
+      source.playbackRate.value = 1.0 // backend handles speed via Kokoro native param
       source.connect(ac.destination)
 
-      const startAt = Math.max(nextStartTime, ac.currentTime + 0.04)
+      if (nextStartTime > 0 && nextStartTime < ac.currentTime - 0.1) nextStartTime = 0
+      // Always add the scheduling buffer so the highlight never outruns the
+      // actual audio output — without it, the rAF can fire the highlight ~80-300ms
+      // before the audio reaches the speakers when nextStartTime dominates.
+      const startAt = Math.max(ac.currentTime, nextStartTime) + 0.08
 
-      // Record sentence timing on the FIRST chunk of each sentence
-      if (!sentenceStartRecorded && receivingSentenceIndex >= 0) {
-        sentenceTimings.set(receivingSentenceIndex, startAt)
-        sentenceStartRecorded = true
+      // Record timing on the FIRST chunk of each sentence. Use the CAPTURED idx
+      // (not receivingSentenceIndex) because receivingSentenceIndex may have
+      // advanced to the next sentence before this decode promise executes.
+      if (idx >= 0 && !sentenceTimings.has(idx)) {
+        sentenceTimings.set(idx, startAt)
       }
 
       source.start(startAt)
       const entry = { node: source, startAt, duration: buffer.duration }
       activeNodes.push(entry)
-      source.onended = () => { activeNodes = activeNodes.filter(e => e !== entry) }
+      source.onended = () => {
+        activeNodes = activeNodes.filter(e => e !== entry)
+        // If we've stopped and restarted since this node was created, do NOT
+        // touch currentIndex — the new session owns that state now.
+        if (myGen !== generation) return
+        // Fallback: advance highlight if rAF missed this sentence's window
+        // (very short sentences that completed between two rAF ticks).
+        update(s => s.currentIndex <= idx ? { ...s, currentIndex: idx } : s)
+      }
 
-      nextStartTime = startAt + buffer.duration / speed
+      nextStartTime = startAt + buffer.duration
+      const ahead = nextStartTime - ac.currentTime
+      update(s => ({ ...s, buffering: ahead < 0.3 }))
 
-      if (ac.state === 'suspended') ac.resume()
+      try { if (ac.state === 'suspended') await ac.resume() } catch (e) { console.warn('AudioContext resume failed:', e) }
     })
   }
 
   function stopAll() {
+    generation++
     cancelled = true
     stopRaf()
     for (const { node } of activeNodes) {
@@ -125,16 +164,18 @@ function createAudioStore() {
     sentenceTimings.clear()
     nextStartTime = 0
     receivingSentenceIndex = -1
-    sentenceStartRecorded = false
-    // Drain the chain by replacing it
+    activeSessionId = -1 // force a fresh sentence_start before we accept any chunks
     decodeChain = Promise.resolve()
   }
 
   function resetForPlay() {
     stopAll()
     cancelled = false
+    // New session — any in-flight messages tagged with the old sessionId will
+    // be rejected by the onSentenceStart / onAudioChunk guards below.
+    sessionId++
     const ac = getCtx()
-    if (ac.state === 'suspended') ac.resume()
+    try { if (ac.state === 'suspended') void ac.resume() } catch (e) { console.warn('AudioContext resume failed:', e) }
     startRaf()
   }
 
@@ -145,20 +186,25 @@ function createAudioStore() {
       socket = new TTSSocket(bid)
 
       socket.onAudioChunk = (bytes: ArrayBuffer) => {
-        update(s => ({ ...s, buffering: false }))
-        scheduleChunk(bytes)
+        // Binary chunks can't carry a session_id tag themselves — we gate them
+        // via activeSessionId, which only matches after a sentence_start from
+        // the current session has armed us.
+        if (activeSessionId !== sessionId) return
+        scheduleChunk(bytes, receivingSentenceIndex)
       }
 
-      socket.onSentenceStart = (index: number) => {
-        // Mark which sentence is now sending chunks; don't update currentIndex here —
-        // the rAF loop will do that when the audio actually reaches playback time.
+      socket.onSentenceStart = (index: number, sid: number) => {
+        // A stale sentence_start from a cancelled session would otherwise arm
+        // activeSessionId and let stale chunks through — drop it here.
+        if (sid !== sessionId) return
+        activeSessionId = sid
         receivingSentenceIndex = index
-        sentenceStartRecorded = false
       }
 
-      socket.onSentenceEnd = (_index: number, _durationMs: number) => {}
+      socket.onSentenceEnd = (_index: number, _durationMs: number, _sid: number) => {}
 
-      socket.onComplete = () => {
+      socket.onComplete = (sid: number) => {
+        if (sid !== sessionId) return
         update(s => ({ ...s, isPlaying: false, buffering: false }))
         stopRaf()
       }
@@ -170,14 +216,17 @@ function createAudioStore() {
       if (!socket) return
       resetForPlay()
       update(s => ({ ...s, isPlaying: true, buffering: true, currentIndex: fromIndex }))
-      socket.play(fromIndex, get({ subscribe }).voice)
+      const state = get({ subscribe })
+      socket.play(fromIndex, state.voice, state.speed, sessionId)
     },
 
     pause() {
       if (!socket) return
       socket.pause()
       stopAll()
-      update(s => ({ ...s, isPlaying: false }))
+      // Clear buffering too — otherwise the spinner can stay up forever if we
+      // paused mid-buffer.
+      update(s => ({ ...s, isPlaying: false, buffering: false }))
     },
 
     resume() {
@@ -185,28 +234,25 @@ function createAudioStore() {
       if (!socket) return
       resetForPlay()
       update(s => ({ ...s, isPlaying: true, buffering: true }))
-      socket.play(state.currentIndex, state.voice)
+      socket.play(state.currentIndex, state.voice, state.speed, sessionId)
     },
 
     seek(index: number) {
       if (!socket) return
       resetForPlay()
-      update(s => ({ ...s, currentIndex: index, buffering: true }))
-      socket.seek(index)
+      update(s => ({ ...s, isPlaying: true, currentIndex: index, buffering: true }))
+      const state = get({ subscribe })
+      socket.seek(index, state.voice, state.speed, sessionId)
     },
 
     setSpeed(newSpeed: number) {
+      const state = get({ subscribe })
       update(s => ({ ...s, speed: newSpeed }))
-      const ac = ctx
-      if (!ac) return
-      const now = ac.currentTime
-      // Reschedule all queued nodes that haven't started yet
-      for (const entry of activeNodes) {
-        entry.node.playbackRate.value = newSpeed
-        // Recalculate nextStartTime from the first unstarted node
-        if (entry.startAt > now) {
-          // Adjust sentence timing proportionally — approximate
-        }
+      if (state.isPlaying && socket) {
+        const currentIdx = state.currentIndex
+        resetForPlay()
+        update(s => ({ ...s, isPlaying: true, buffering: true, currentIndex: currentIdx }))
+        socket.play(currentIdx, state.voice, newSpeed, sessionId)
       }
     },
 
