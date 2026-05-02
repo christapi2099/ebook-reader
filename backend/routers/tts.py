@@ -98,7 +98,7 @@ async def tts_websocket(websocket: WebSocket, book_id: str):
                     chunk_count += 1
                     await websocket.send_bytes(chunk)
                 # Calculate duration based on chunk count and speed factor
-                duration_ms = int(chunk_count * 100 / job.speed)
+                duration_ms = chunk_count * 100
 
                 # Prune this index from the cancelled set so it doesn't leak into
                 # the next session (defence in depth — router also clears the set).

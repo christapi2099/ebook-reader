@@ -333,3 +333,119 @@ class TestWebSocketIntegration:
                 if data.get("type") == "sentence_start":
                     sentence_start_count += 1
             assert sentence_start_count < 3
+
+    def test_stale_session_replaced_by_new_play(self, mock_kokoro):
+        eng = _build_engine()
+        _seed_data(eng, {0: "First.", 1: "Second.", 2: "Third."})
+        with _patch_db(eng):
+            set_kokoro(mock_kokoro)
+            from main import app
+            with TestClient(app) as client:
+                with client.websocket_connect("/ws/tts/test-book") as ws:
+                    ws.send_json({"action": "play", "from_index": 0, "voice": "af_heart", "speed": 1.0, "session_id": 1})
+                    ws.send_json({"action": "play", "from_index": 0, "voice": "af_heart", "speed": 1.0, "session_id": 2})
+
+                    text_messages = []
+                    for _ in range(60):
+                        try:
+                            raw = ws.receive_text()
+                            data = json.loads(raw)
+                            text_messages.append(data)
+                            if data["type"] == "complete":
+                                break
+                        except Exception:
+                            try:
+                                ws.receive_bytes()
+                            except Exception:
+                                break
+
+                    assert len(text_messages) > 0
+                    any_id_2 = any(msg["session_id"] == 2 for msg in text_messages)
+                    assert any_id_2, "Expected at least one message with session_id=2"
+                    first_2 = next(i for i, m in enumerate(text_messages) if m["session_id"] == 2)
+                    for msg in text_messages[first_2:]:
+                        assert msg["session_id"] == 2
+
+    def test_speed_half_duration_doubled(self, mock_kokoro):
+        eng = _build_engine()
+        _seed_data(eng, {0: "Hello."})
+        with _patch_db(eng):
+            set_kokoro(mock_kokoro)
+            from main import app
+            with TestClient(app) as client:
+                with client.websocket_connect("/ws/tts/test-book") as ws:
+                    ws.send_json({"action": "play", "from_index": 0, "voice": "af_heart", "speed": 0.5, "session_id": 3})
+
+                    chunks = 0
+                    sentence_end = None
+                    while sentence_end is None:
+                        try:
+                            raw = ws.receive_text()
+                            data = json.loads(raw)
+                            if data["type"] == "sentence_end":
+                                sentence_end = data
+                                break
+                        except Exception:
+                            try:
+                                ws.receive_bytes()
+                                chunks += 1
+                            except Exception:
+                                break
+
+                    assert sentence_end is not None
+                    assert sentence_end["duration_ms"] == int(chunks * 100 / 0.5)
+
+    def test_full_sentence_sequence_start_chunks_end(self, ws_client):
+        with ws_client.websocket_connect("/ws/tts/test-book") as ws:
+            ws.send_json({"action": "play", "from_index": 0, "voice": "af_heart", "speed": 1.0, "session_id": 7})
+
+            events = []
+            for _ in range(60):
+                try:
+                    raw = ws.receive_text()
+                    data = json.loads(raw)
+                    events.append(("text", data["type"]))
+                    if data["type"] == "complete":
+                        break
+                except Exception:
+                    try:
+                        ws.receive_bytes()
+                        events.append(("bytes", None))
+                    except Exception:
+                        break
+
+            first_text_events = [e for e in events if e[0] == "text"]
+            assert events[0] == ("text", "sentence_start")
+            assert ("text", "sentence_end") in first_text_events
+            assert events[-1] == ("text", "complete")
+
+    def test_from_index_beyond_sentences_sends_complete(self, mock_kokoro):
+        import threading
+        eng = _build_engine()
+        _seed_data(eng, {0: "A.", 1: "B."})
+        with _patch_db(eng):
+            set_kokoro(mock_kokoro)
+            from main import app
+            with TestClient(app) as client:
+                with client.websocket_connect("/ws/tts/test-book") as ws:
+                    ws.send_json({"action": "play", "from_index": 99, "voice": "af_heart", "speed": 1.0, "session_id": 4})
+
+                    text_messages = []
+                    for _ in range(5):
+                        result = [None]
+                        def _read():
+                            try:
+                                result[0] = ws.receive_text()
+                            except Exception:
+                                result[0] = None
+                        t = threading.Thread(target=_read, daemon=True)
+                        t.start()
+                        t.join(timeout=3.0)
+                        if t.is_alive():
+                            break
+                        if result[0] is None:
+                            break
+                        data = json.loads(result[0])
+                        text_messages.append(data)
+
+                    assert any(msg["type"] == "complete" for msg in text_messages)

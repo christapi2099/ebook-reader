@@ -157,6 +157,7 @@
         'absolute cursor-pointer transition-colors',
         s.index === currentIndex ? 'bg-yellow-200/60' : 'hover:bg-blue-100/40',
       ].join(' ')
+      div.dataset.highlighted = s.index === currentIndex ? 'true' : 'false'
       div.style.left   = left + 'px'
       div.style.top    = top + 'px'
       div.style.width  = width + 'px'
@@ -175,12 +176,14 @@
     const prev = sentenceElements.get(prevHighlightIndex)
     if (prev) {
       prev.classList.remove('bg-yellow-200/60')
+      prev.setAttribute('data-highlighted', 'false')
       prev.classList.add('hover:bg-blue-100/40')
     }
     const curr = sentenceElements.get(idx)
     if (curr) {
       curr.classList.remove('hover:bg-blue-100/40')
       curr.classList.add('bg-yellow-200/60')
+      curr.setAttribute('data-highlighted', 'true')
     }
     prevHighlightIndex = idx
   })

@@ -27,3 +27,8 @@ Thumbs.db
 .pytest_cache/
 htmlcov/
 .coverage
+
+# Claude memory / scratch
+.memory/
+.opencode/deepseek_research.md
+.opencode/glm_speed_analysis.md

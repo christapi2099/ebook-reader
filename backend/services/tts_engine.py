@@ -84,6 +84,7 @@ class TTSEngine:
         chunk_samples = sample_rate // 10
 
         for result in results:
+            await asyncio.sleep(0)
             audio = result[-1]
             if job.sentence_index in self.cancelled:
                 return

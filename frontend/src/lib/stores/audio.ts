@@ -53,6 +53,13 @@ function createAudioStore() {
   let sentenceTimings: Map<number, number> = new Map()
   let receivingSentenceIndex = -1
 
+  const SPEED_CHANGE_DEBOUNCE_MS = 200
+  const SENTENCE_TIMING_OFFSET_S = 0.016
+
+  let lastScheduledIndex = -1
+  let speedChangeTimer: ReturnType<typeof setTimeout> | null = null
+  let pendingSpeed = 0
+
   let rafId: number | null = null
 
   function getCtx(): AudioContext {
@@ -66,7 +73,7 @@ function createAudioStore() {
       const ac = ctx
       if (!ac || cancelled) { rafId = null; return }
       const s = get({ subscribe })
-      if (!s.isPlaying || s.buffering) { rafId = requestAnimationFrame(tick); return }
+      if (!s.isPlaying) { rafId = requestAnimationFrame(tick); return }
       const now = ac.currentTime
 
       // Find the latest sentence whose scheduled start is <= now.
@@ -119,19 +126,14 @@ function createAudioStore() {
       source.playbackRate.value = 1.0 // backend handles speed via Kokoro native param
       source.connect(ac.destination)
 
-      if (nextStartTime > 0 && nextStartTime < ac.currentTime - 0.1) nextStartTime = 0
-      // Always add the scheduling buffer so the highlight never outruns the
-      // actual audio output — without it, the rAF can fire the highlight ~80-300ms
-      // before the audio reaches the speakers when nextStartTime dominates.
-      const startAt = Math.max(ac.currentTime, nextStartTime) + 0.08
+      if (nextStartTime > 0 && nextStartTime < ac.currentTime - 0.5) nextStartTime = ac.currentTime
+      const startAt = Math.max(ac.currentTime, nextStartTime)
 
-      // Record timing on the FIRST chunk of each sentence. Use the CAPTURED idx
-      // (not receivingSentenceIndex) because receivingSentenceIndex may have
-      // advanced to the next sentence before this decode promise executes.
       if (idx >= 0 && !sentenceTimings.has(idx)) {
-        sentenceTimings.set(idx, startAt)
+        sentenceTimings.set(idx, startAt + SENTENCE_TIMING_OFFSET_S)
       }
 
+      if (idx >= 0) lastScheduledIndex = idx
       source.start(startAt)
       const entry = { node: source, startAt, duration: buffer.duration }
       activeNodes.push(entry)
@@ -149,18 +151,31 @@ function createAudioStore() {
       const ahead = nextStartTime - ac.currentTime
       update(s => ({ ...s, buffering: ahead < 0.3 }))
 
-      try { if (ac.state === 'suspended') await ac.resume() } catch (e) { console.warn('AudioContext resume failed:', e) }
+      if (ac.state === 'suspended') ac.resume().catch(() => {})
     })
+  }
+
+  function applyPendingSpeedChange() {
+    speedChangeTimer = null
+    const bestIdx = lastScheduledIndex >= 0
+      ? Math.max(lastScheduledIndex, get({ subscribe }).currentIndex)
+      : get({ subscribe }).currentIndex
+    resetForPlay()
+    update(s => ({ ...s, isPlaying: true, buffering: true, currentIndex: bestIdx }))
+    socket!.play(bestIdx, get({ subscribe }).voice, pendingSpeed, sessionId)
   }
 
   function stopAll() {
     generation++
     cancelled = true
+    if (speedChangeTimer) { clearTimeout(speedChangeTimer); speedChangeTimer = null }
+    pendingSpeed = 0
     stopRaf()
     for (const { node } of activeNodes) {
       try { node.stop(0) } catch {}
     }
     activeNodes = []
+    lastScheduledIndex = -1
     sentenceTimings.clear()
     nextStartTime = 0
     receivingSentenceIndex = -1
@@ -248,12 +263,11 @@ function createAudioStore() {
     setSpeed(newSpeed: number) {
       const state = get({ subscribe })
       update(s => ({ ...s, speed: newSpeed }))
-      if (state.isPlaying && socket) {
-        const currentIdx = state.currentIndex
-        resetForPlay()
-        update(s => ({ ...s, isPlaying: true, buffering: true, currentIndex: currentIdx }))
-        socket.play(currentIdx, state.voice, newSpeed, sessionId)
-      }
+      if (!state.isPlaying || !socket) return
+      pendingSpeed = newSpeed
+      update(s => ({ ...s, buffering: true }))
+      if (speedChangeTimer) clearTimeout(speedChangeTimer)
+      speedChangeTimer = setTimeout(applyPendingSpeedChange, SPEED_CHANGE_DEBOUNCE_MS)
     },
 
     setVoice(voice: string) {
