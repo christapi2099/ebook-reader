@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { MOCK_SENTENCES } from './fixtures/mock-data'
+import { MOCK_SENTENCES, makeMinimalPdf } from './fixtures/mock-data'
 import { AUDIO_CONTEXT_MOCK } from './fixtures/audio-context-mock'
 import { WsDriver } from './fixtures/ws-driver'
 
@@ -18,6 +18,11 @@ test.describe('Highlight–Audio Sync', () => {
     await page.addInitScript(AUDIO_CONTEXT_MOCK)
     await page.route('**/documents/*/sentences', r => r.fulfill({ json: MOCK_SENTENCES }))
     await page.route('**/library/*/progress', r => r.fulfill({ json: { sentence_index: 0 } }))
+    await page.route('**/uploads/**', r => r.fulfill({
+      status: 200,
+      headers: { 'content-type': 'application/pdf' },
+      body: makeMinimalPdf(),
+    }))
     await driver.install(page, 'test-book')
     page.on('console', m => { if (m.type() === 'error') errors.push(m.text()) })
     await page.goto('/reader/test-book')
@@ -33,6 +38,7 @@ test.describe('Highlight–Audio Sync', () => {
   })
 
   test('highlight advances and previous clears', async ({ page }) => {
+    await page.click('[aria-label="Play"]')
     await driver.sendSentenceStart(IDX.second, SID.first)
     await driver.sendAudioChunk(Buffer.alloc(1024))
     await page.clock.runFor(TICK.sentence)
@@ -41,7 +47,6 @@ test.describe('Highlight–Audio Sync', () => {
   })
 
   test('stale session_id rejected', async ({ page }) => {
-    await page.click('[aria-label="Play"]')
     await page.click('[aria-label="Play"]')
     await driver.sendSentenceStart(IDX.stale, SID.stale)
     await page.clock.runFor(TICK.sentence)
@@ -79,10 +84,9 @@ test.describe('Highlight–Audio Sync', () => {
   })
 
   test('sentence click triggers seek and highlight jumps', async ({ page }) => {
+    await page.click('[aria-label="Play"]')
     await page.locator('[data-index="3"]').click()
-    await driver.sendSentenceStart(IDX.clicked, SID.first)
-    await driver.sendAudioChunk(Buffer.alloc(1024))
-    await page.clock.runFor(TICK.sentence)
+    // seek() sets currentIndex=3 immediately; no audio needed to verify highlight
     expect(driver.actionsOf('seek')[0]?.['to_index']).toBe(IDX.clicked)
     await expect(page.locator('[data-index="3"][data-highlighted="true"]')).toBeVisible()
   })
@@ -118,6 +122,7 @@ test.describe('Highlight–Audio Sync', () => {
   test('speed change sends correct speed in play action', async ({ page }) => {
     await page.click('[aria-label="Play"]')
     await page.click('button[aria-pressed="false"]:has-text("1.5x")')
+    await page.clock.runFor(200)  // fire the 200ms speed-change debounce timer
     const speedAction = driver.actionsOf('play').at(-1)
     expect(speedAction?.['speed']).toBe(1.5)
   })

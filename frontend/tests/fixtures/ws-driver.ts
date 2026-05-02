@@ -54,11 +54,14 @@ export class WsDriver {
 
   async sendAudioChunk(data: Buffer | Uint8Array) {
     const size = data.length
-    await this.page!.evaluate((size: number) => {
+    await this.page!.evaluate(async (size: number) => {
       const ws = (window as any).__wsDriverSocket
       if (ws && ws._onmessage) {
         ws._onmessage({ data: new ArrayBuffer(size) })
       }
+      // Flush the scheduleChunk promise chain so sentenceTimings is populated
+      // before the caller's next page.clock.runFor() fires rAF callbacks.
+      for (let i = 0; i < 5; i++) await Promise.resolve()
     }, size)
   }
 

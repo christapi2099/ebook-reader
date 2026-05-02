@@ -157,12 +157,13 @@ function createAudioStore() {
 
   function applyPendingSpeedChange() {
     speedChangeTimer = null
+    const speed = pendingSpeed  // save before resetForPlay() clears it via stopAll()
     const bestIdx = lastScheduledIndex >= 0
       ? Math.max(lastScheduledIndex, get({ subscribe }).currentIndex)
       : get({ subscribe }).currentIndex
     resetForPlay()
     update(s => ({ ...s, isPlaying: true, buffering: true, currentIndex: bestIdx }))
-    socket!.play(bestIdx, get({ subscribe }).voice, pendingSpeed, sessionId)
+    socket!.play(bestIdx, get({ subscribe }).voice, speed, sessionId)
   }
 
   function stopAll() {
@@ -268,6 +269,10 @@ function createAudioStore() {
       update(s => ({ ...s, buffering: true }))
       if (speedChangeTimer) clearTimeout(speedChangeTimer)
       speedChangeTimer = setTimeout(applyPendingSpeedChange, SPEED_CHANGE_DEBOUNCE_MS)
+    },
+
+    setCurrentIndex(idx: number) {
+      update(s => ({ ...s, currentIndex: idx }))
     },
 
     setVoice(voice: string) {

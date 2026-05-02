@@ -27,6 +27,7 @@ onMount(async () => {
   await loadBook(bookId)
   audioStore.init(bookId)
   audioStore.setSpeed(get(readerStore).speed)
+  audioStore.setCurrentIndex(get(readerStore).currentIndex)
 })
 
 onDestroy(() => {
@@ -40,9 +41,14 @@ function handlePageJump(page: number) {
   setTimeout(() => { pageToScroll = null }, 100)
 }
 
+// Sync reader store when audio stops naturally (e.g. onComplete from backend)
+$effect(() => {
+  if (!audio.isPlaying && reader.isPlaying) setPlaying(false)
+})
+
 function handlePlay() {
   setPlaying(true)
-  audioStore.play(reader.currentIndex)
+  audioStore.play(audio.currentIndex)
 }
 
 function handlePause() {
