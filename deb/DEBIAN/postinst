@@ -1,0 +1,12 @@
+#!/bin/bash
+set -e
+
+mkdir -p /opt/kokoro-reader
+
+cp -r /usr/share/kokoro-reader/docker-compose.yml /opt/kokoro-reader/
+cp -r /usr/share/kokoro-reader/backend /opt/kokoro-reader/
+cp -r /usr/share/kokoro-reader/frontend /opt/kokoro-reader/
+
+systemctl daemon-reload
+systemctl enable kokoro-reader
+systemctl start kokoro-reader

@@ -1,0 +1,41 @@
+app-id: com.kokororeader.App
+runtime: org.freedesktop.Platform
+runtime-version: '23.08'
+sdk: org.freedesktop.Sdk
+sdk-version: '23.08'
+command: kokoro-launcher.sh
+finish-args:
+  - --share=network
+  - --filesystem=home
+  - --device=dri
+  - --socket=x11
+  - --socket=wayland
+modules:
+  - name: kokoro-launcher
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 kokoro-launcher.sh /app/bin/kokoro-launcher.sh
+    sources:
+      - type: inline
+        dest-filename: kokoro-launcher.sh
+        contents: |
+          #!/bin/bash
+          set -e
+
+          if ! command -v docker &> /dev/null; then
+            echo "Error: docker is not installed. Please install docker.io or docker-ce first." >&2
+            exit 1
+          fi
+
+          KOKORO_DIR="$HOME/.local/share/kokoro-reader"
+
+          if [ ! -d "$KOKORO_DIR" ]; then
+            echo "Error: Kokoro Reader data directory not found at $KOKORO_DIR" >&2
+            exit 1
+          fi
+
+          cd "$KOKORO_DIR"
+          docker compose up -d
+
+          sleep 2
+          xdg-open http://localhost

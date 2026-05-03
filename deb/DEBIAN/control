@@ -1,0 +1,7 @@
+Package: kokoro-reader
+Version: 1.0.0
+Architecture: amd64
+Maintainer: Kokoro Reader <hello@kokororeader.app>
+Depends: docker.io | docker-ce, docker-compose-plugin
+Description: Local AI ebook reader with TTS
+ Kokoro ebook reader with Kokoro TTS engine.
