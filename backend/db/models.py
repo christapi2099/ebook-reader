@@ -12,6 +12,7 @@ class Book(SQLModel, table=True):
     cover_page: int = 0
     created_at: datetime
     last_opened: Optional[datetime] = None
+    ephemeral: bool = False
 
 class Sentence(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -58,3 +59,8 @@ class MP3Export(SQLModel, table=True):
     file_size: int | None = None
     error_message: str | None = None
     created_at: datetime
+
+class UserSettings(SQLModel, table=True):
+    id: int = Field(primary_key=True, default=1)
+    last_book_id: str | None = Field(foreign_key='book.id', nullable=True)
+    last_sentence_index: int = 0

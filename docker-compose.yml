@@ -6,7 +6,7 @@ services:
     container_name: ebook-tts-backend
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "3001:8000"
     volumes:
       - backend_uploads:/app/uploads
       - backend_data:/data

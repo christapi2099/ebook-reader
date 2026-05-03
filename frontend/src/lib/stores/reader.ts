@@ -1,25 +1,8 @@
 import { writable } from 'svelte/store'
-import type { Writable } from 'svelte/store'
-import { getSentences, getProgress, saveProgress } from '$lib/api'
+import { getSentences, getProgress, saveProgress, type Sentence } from '$lib/api'
+import { userStore } from '$lib/stores/user'
 
-export interface Sentence {
-  index: number
-  text: string
-  page: number
-  x0: number
-  y0: number
-  x1: number
-  y1: number
-  filtered: boolean
-}
-
-export interface Book {
-  id: string
-  title: string
-  author: string | null
-  file_type: string
-  page_count: number
-}
+export type { Sentence }
 
 interface ReaderState {
   bookId: string | null
@@ -48,6 +31,9 @@ export const loadBook = async (bookId: string): Promise<void> => {
   }
 
   readerStore.update(s => ({ ...s, bookId, sentences, currentIndex }))
+
+  // Update user settings with the last read book (silently ignore errors)
+  userStore.updateLastRead(bookId, currentIndex).catch(() => {})
 }
 
 export const seek = async (index: number): Promise<void> => {
@@ -59,6 +45,8 @@ export const seek = async (index: number): Promise<void> => {
   })
   if (bookId) {
     await saveProgress(bookId, index).catch(() => {})
+    // Update user settings with the new position (silently ignore errors)
+    userStore.updateLastRead(bookId, index).catch(() => {})
   }
 }
 

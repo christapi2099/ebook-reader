@@ -172,27 +172,30 @@
     <div class="bg-white rounded-xl p-6 max-w-md w-full shadow-xl mx-4" onclick={(e) => e.stopPropagation()}>
       <h2 class="text-lg font-bold text-slate-800 mb-4">Export as MP3</h2>
 
-      <label class="block text-sm font-medium text-slate-700 mb-1">Book</label>
-      <select bind:value={selectedBookId} class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm mb-3">
+      <label for="book-select" class="block text-sm font-medium text-slate-700 mb-1">Book</label>
+      <select id="book-select" bind:value={selectedBookId} class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm mb-3">
         <option value="">Select a book…</option>
         {#each books as book}
           <option value={book.id}>{book.title}</option>
         {/each}
       </select>
 
-      <label class="block text-sm font-medium text-slate-700 mb-1">Voice</label>
-      <select bind:value={selectedVoice} class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm mb-3">
+      <label for="voice-select" class="block text-sm font-medium text-slate-700 mb-1">Voice</label>
+      <select id="voice-select" bind:value={selectedVoice} class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm mb-3">
         {#each voices as voice}
           <option value={voice.id}>{voice.name} ({voice.id})</option>
         {/each}
       </select>
 
-      <label class="block text-sm font-medium text-slate-700 mb-1">Speed</label>
-      <div class="flex gap-1 mb-4">
+      <label id="speed-label" for="speed-group" class="block text-sm font-medium text-slate-700 mb-1">Speed</label>
+      <div id="speed-group" class="flex gap-1 mb-4" role="radiogroup" aria-labelledby="speed-label">
         {#each speeds as s}
           <button
             class="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors {selectedSpeed === s ? 'bg-blue-500 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}"
             onclick={() => (selectedSpeed = s)}
+            role="radio"
+            aria-checked={selectedSpeed === s}
+            aria-label={`${s}x speed`}
           >
             {s}x
           </button>

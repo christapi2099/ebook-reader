@@ -29,20 +29,25 @@
     settingsStore.setVoice(id)
   }
 
+  let currentAudioUrl: string | null = null
+
   async function handlePreview(voiceId: string) {
     if (previewingId === voiceId) {
       currentAudio?.pause()
+      if (currentAudioUrl) { URL.revokeObjectURL(currentAudioUrl); currentAudioUrl = null }
       previewingId = null
       return
     }
     currentAudio?.pause()
+    if (currentAudioUrl) { URL.revokeObjectURL(currentAudioUrl); currentAudioUrl = null }
     previewingId = voiceId
     try {
       const buf = await previewVoice(voiceId)
       const blob = new Blob([buf], { type: 'audio/wav' })
       const url = URL.createObjectURL(blob)
+      currentAudioUrl = url
       const audio = new Audio(url)
-      audio.onended = () => { previewingId = null; URL.revokeObjectURL(url) }
+      audio.onended = () => { previewingId = null; URL.revokeObjectURL(url); if (currentAudioUrl === url) currentAudioUrl = null }
       currentAudio = audio
       audio.play()
     } catch {
@@ -115,7 +120,7 @@
           onclick={() => selectVoice(voice.id)}
           role="button"
           tabindex="0"
-          onkeydown={(e) => { if (e.key === 'Enter') selectVoice(voice.id) }}
+          onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectVoice(voice.id) } }}
         >
           {#if !voice.built_in}
             <button

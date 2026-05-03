@@ -10,10 +10,19 @@
 
 <div
   class="bg-white rounded-xl shadow-sm border border-slate-200 p-4 hover:shadow-md transition-shadow relative group cursor-pointer"
+  role="button"
+  tabindex="0"
+  aria-label={`${book.title} by ${book.author ?? 'Unknown'}`}
   onclick={() => onClick(book.id)}
+  onkeydown={(e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault()
+      onClick(book.id)
+    }
+  }}
 >
   {#if onDelete}
-    <div class="absolute top-2 right-2 z-10" onclick={(e) => e.stopPropagation()}>
+    <div class="absolute top-2 right-2 z-10" role="button" tabindex="-1" onclick={(e) => e.stopPropagation()}>
       <button
         class="opacity-0 group-hover:opacity-100 w-6 h-6 rounded-full bg-slate-100 hover:bg-red-100 text-slate-500 hover:text-red-600 flex items-center justify-center transition-all"
         onclick={() => (showMenu = !showMenu)}
@@ -27,7 +36,7 @@
       </button>
       {#if showMenu}
         <div class="relative">
-          <div class="fixed inset-0 z-10" onclick={() => (showMenu = false)}></div>
+          <div class="fixed inset-0 z-10" role="button" tabindex="-1" onclick={() => (showMenu = false)}></div>
           <div class="absolute right-0 top-8 bg-white border border-slate-200 rounded-lg shadow-lg z-20 py-1 min-w-[120px]">
             <button
               class="w-full px-3 py-1.5 text-left text-sm text-red-600 hover:bg-red-50 flex items-center gap-2"

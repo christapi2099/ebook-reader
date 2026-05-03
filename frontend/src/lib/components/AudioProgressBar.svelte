@@ -38,7 +38,8 @@
   let intervalId: ReturnType<typeof setInterval> | null = null
 
   $effect(() => {
-    // Reset fine offset whenever the sentence changes or playback stops
+    currentIndex
+    isPlaying
     fineOffset = 0
   })
 

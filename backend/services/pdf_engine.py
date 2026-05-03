@@ -1,24 +1,16 @@
 import fitz
-import spacy
 from dataclasses import dataclass
 from typing import List, Dict, Tuple
 import os
 
-@dataclass
-class SentenceRecord:
-    index: int
-    text: str
-    page: int
-    x0: float
-    y0: float
-    x1: float
-    y1: float
+from services.base_engine import BaseEngine, SentenceRecord as BaseSentenceRecord
 
-class PDFEngine:
+
+class PDFEngine(BaseEngine):
     def __init__(self):
-        self.nlp = spacy.load('en_core_web_sm')
+        super().__init__()  # Initialize spaCy via BaseEngine
 
-    def extract_sentences(self, pdf_path: str) -> List[SentenceRecord]:
+    def extract_sentences(self, pdf_path: str) -> List[BaseSentenceRecord]:
         if not os.path.exists(pdf_path):
             raise FileNotFoundError(f"PDF file not found: {pdf_path}")
 
@@ -94,7 +86,7 @@ class PDFEngine:
                         x1_max = max(w[2] for w in sent_words)
                         y1_max = max(w[3] for w in sent_words)
 
-                    all_sentences.append(SentenceRecord(
+                    all_sentences.append(BaseSentenceRecord(
                         index=global_index,
                         text=sent_text,
                         page=page_num,

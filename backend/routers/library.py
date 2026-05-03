@@ -16,7 +16,10 @@ class ProgressUpdate(BaseModel):
 
 @router.get("")
 def list_books(session: Session = Depends(get_session)):
-    books = session.exec(select(Book)).all()
+    # Filter out ephemeral text books (unless they were just saved)
+    books = session.exec(
+        select(Book).where(Book.ephemeral == False)
+    ).all()
     return [
         {"id": b.id, "title": b.title, "author": b.author,
          "file_type": b.file_type, "page_count": b.page_count,

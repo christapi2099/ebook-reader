@@ -16,11 +16,21 @@ FRONTEND_PORT=5173
 cleanup() {
     echo ""
     echo "Shutting down..."
-    kill $BACKEND_PID $FRONTEND_PID 2>/dev/null
+    kill -- -$BACKEND_PID -$FRONTEND_PID 2>/dev/null
     wait $BACKEND_PID $FRONTEND_PID 2>/dev/null
     echo "Done."
 }
 trap cleanup EXIT INT TERM
+set -m
+
+for PORT in $BACKEND_PORT $FRONTEND_PORT; do
+  PID=$(lsof -ti :"$PORT" 2>/dev/null || true)
+  if [ -n "$PID" ]; then
+    echo "Killing process(es) on port $PORT (PID: $PID)"
+    kill $PID 2>/dev/null
+    sleep 0.5
+  fi
+done
 
 VENV="$REPO_DIR/backend/venv"
 if [ ! -f "$VENV/bin/python" ]; then

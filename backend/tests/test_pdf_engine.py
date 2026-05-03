@@ -1,7 +1,8 @@
 """TDD tests for services/pdf_engine.py."""
 import pytest
 from pathlib import Path
-from services.pdf_engine import PDFEngine, SentenceRecord
+from services.pdf_engine import PDFEngine
+from services.base_engine import SentenceRecord
 
 
 @pytest.fixture

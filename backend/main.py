@@ -11,6 +11,7 @@ from routers import tts as tts_router
 from routers import voices as voices_router
 from routers import mp3 as mp3_router
 from routers import bookmarks as bookmarks_router
+from routers import user as user_router
 
 
 def _init_kokoro():
@@ -46,6 +47,7 @@ app.add_middleware(
 
 app.include_router(documents.router)
 app.include_router(library.router)
+app.include_router(user_router.router)
 app.include_router(tts_router.router)
 app.include_router(voices_router.router)
 app.include_router(mp3_router.router)

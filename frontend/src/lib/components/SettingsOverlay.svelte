@@ -33,8 +33,8 @@
   }
 </script>
 
-<div class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center" onclick={onClose}>
-  <div class="bg-white rounded-xl p-6 max-w-sm w-full shadow-xl mx-4" onclick={(e) => e.stopPropagation()}>
+  <div class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center" role="button" tabindex="-1" onclick={onClose} onkeydown={(e) => { if (e.key === 'Escape') onClose() }}>
+    <div class="bg-white rounded-xl p-6 max-w-sm w-full shadow-xl mx-4" onclick={(e) => e.stopPropagation()}>
     <div class="flex items-center justify-between mb-4">
       <h2 class="text-lg font-bold text-slate-800">Settings</h2>
       <button class="text-slate-400 hover:text-slate-700 transition-colors" onclick={onClose}>
@@ -46,14 +46,16 @@
 
     <div class="space-y-5">
       <div>
-        <label class="block text-sm font-medium text-slate-700 mb-2">Highlight Color</label>
-        <div class="flex flex-wrap gap-2">
+        <label id="color-label" class="block text-sm font-medium text-slate-700 mb-2">Highlight Color</label>
+        <div class="flex flex-wrap gap-2" role="radiogroup" aria-labelledby="color-label">
           {#each colorSwatches as swatch}
             <button
               class="w-8 h-8 rounded-full border-2 transition-all {settings.highlightColor === swatch.value ? 'border-slate-800 scale-110' : 'border-transparent hover:scale-105'}"
               style="background-color: {swatch.value}"
               title={swatch.label}
+              aria-checked={settings.highlightColor === swatch.value}
               onclick={() => setColor(swatch.value)}
+              role="radio"
             ></button>
           {/each}
         </div>

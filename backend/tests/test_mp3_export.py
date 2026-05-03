@@ -9,7 +9,7 @@ from unittest.mock import patch
 import db.database as _db
 from routers import mp3 as mp3_router
 from routers import documents as documents_router
-from services.pdf_engine import SentenceRecord as PdfSentence
+from services.base_engine import SentenceRecord as PdfSentence
 
 SAMPLE_SENTENCES = [
     PdfSentence(index=i, text=f"Sentence {i}.", page=i % 2,

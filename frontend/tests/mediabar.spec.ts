@@ -13,13 +13,29 @@ test.describe('MediaBar Controls', () => {
     driver = new WsDriver()
     await page.clock.install()
     await page.addInitScript(AUDIO_CONTEXT_MOCK)
-    await page.route('**/documents/*/sentences', r => r.fulfill({ json: MOCK_SENTENCES }))
-    await page.route('**/library/*/progress', r => r.fulfill({ json: { sentence_index: 0 } }))
-    await page.route('**/uploads/**', r => r.fulfill({
-      status: 200,
-      headers: { 'content-type': 'application/pdf' },
-      body: makeMinimalPdf(),
-    }))
+
+    // Mock all API endpoints
+    await page.route('**/*', async route => {
+      const url = route.request().url()
+      if (url.includes('/documents/') && url.includes('/sentences')) {
+        await route.fulfill({ json: MOCK_SENTENCES })
+      } else if (url.includes('/library/') && url.includes('/progress')) {
+        await route.fulfill({ json: { sentence_index: 0 } })
+      } else if (url.includes('/library/') && !url.includes('/progress')) {
+        await route.fulfill({
+          json: { id: 'book-1', title: 'Test Book', author: 'Test Author', file_type: 'PDF', page_count: 5 }
+        })
+      } else if (url.includes('/uploads/')) {
+        await route.fulfill({
+          status: 200,
+          headers: { 'content-type': 'application/pdf' },
+          body: makeMinimalPdf(),
+        })
+      } else {
+        await route.continue()
+      }
+    })
+
     await driver.install(page, 'book-1')
     await page.goto('/reader/book-1')
   })

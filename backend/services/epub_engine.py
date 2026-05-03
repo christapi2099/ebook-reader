@@ -1,22 +1,19 @@
 import ebooklib
 from ebooklib import epub
 from bs4 import BeautifulSoup
-import spacy
-from dataclasses import dataclass
 from typing import List
 import os
 
-@dataclass
-class SentenceRecord:
-    index: int
-    text: str
-    chapter: str
+from services.base_engine import BaseEngine, SentenceRecord as BaseSentenceRecord
 
-class EPUBEngine:
+
+class EPUBEngine(BaseEngine):
+    """Extract sentences from EPUB files using spaCy sentence detection."""
+
     def __init__(self):
-        self.nlp = spacy.load("en_core_web_sm")
+        super().__init__()  # Initialize spaCy via BaseEngine
 
-    def extract_sentences(self, epub_path: str) -> List[SentenceRecord]:
+    def extract_sentences(self, epub_path: str) -> List[BaseSentenceRecord]:
         if not os.path.exists(epub_path):
             raise FileNotFoundError(f"EPUB file not found: {epub_path}")
 
@@ -26,7 +23,6 @@ class EPUBEngine:
         global_index = 0
 
         for item in items:
-            chapter_name = self._get_chapter_name(item)
             content = item.get_content()
             soup = BeautifulSoup(content, features='xml')
             paragraphs = soup.find_all('p')
@@ -40,12 +36,16 @@ class EPUBEngine:
                 sent_text = sent.text.strip()
                 word_count = len([token for token in sent if not token.is_punct])
                 if word_count >= 3:
-                    sentences.append(SentenceRecord(index=global_index, text=sent_text, chapter=chapter_name))
+                    # EPUB sentences have zero coordinates (no spatial position info)
+                    sentences.append(BaseSentenceRecord(
+                        index=global_index,
+                        text=sent_text,
+                        page=0,
+                        x0=0.0,
+                        y0=0.0,
+                        x1=0.0,
+                        y1=0.0,
+                    ))
                     global_index += 1
 
         return sentences
-
-    def _get_chapter_name(self, item):
-        if item.title and item.title.strip():
-            return item.title.strip()
-        return os.path.splitext(os.path.basename(item.file_name))[0] if item.file_name else "Unknown Chapter"

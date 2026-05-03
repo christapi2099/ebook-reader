@@ -15,7 +15,11 @@
 
   let query = $state('')
   let matches = $state<Sentence[]>([])
-  let currentMatch = $state(initialMatch)
+  let currentMatch = $state(0)
+
+  $effect(() => {
+    currentMatch = initialMatch
+  })
 
   function search() {
     const q = query.toLowerCase().trim()

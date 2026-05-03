@@ -34,21 +34,6 @@ class TTSEngine:
     async def enqueue(self, job: SynthJob) -> None:
         await self.queue.put(job)
 
-    async def cancel_from(self, sentence_index: int) -> None:
-        pending: list[SynthJob] = []
-        while not self.queue.empty():
-            try:
-                pending.append(self.queue.get_nowait())
-            except asyncio.QueueEmpty:
-                break
-        for item in pending:
-            self.cancelled.add(item.sentence_index)
-
-    async def stream_next(self) -> AsyncGenerator[bytes, None]:
-        job: SynthJob = await self.queue.get()
-        async for chunk in self.stream_job(job):
-            yield chunk
-
     async def stream_job(self, job: SynthJob) -> AsyncGenerator[bytes, None]:
         """Stream a specific job, serving from AudioCache when available."""
         if job.sentence_index in self.cancelled or self.kokoro is None:

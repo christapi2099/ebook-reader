@@ -30,8 +30,8 @@ let settingsOpen = $state(false)
 let searchOpen = $state(false)
 let bookmarksOpen = $state(false)
 
-// Get book metadata for type detection
-let bookMeta = $state<{file_type: string; title: string} | null>(null)
+let bookMeta = $state<{file_type: string; title: string; page_count: number} | null>(null)
+let totalPages = $derived(bookMeta?.page_count ?? reader.sentences.length)
 
 // Search state
 let searchMatches = $state<number[]>([])
@@ -181,7 +181,7 @@ function handleBackToLibrary() {
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
           </svg>
         </button>
-        <PageNavigator currentPage={currentPage} totalPages={reader.sentences.length} onGoToPage={handlePageJump} />
+        <PageNavigator currentPage={currentPage} totalPages={totalPages} onGoToPage={handlePageJump} />
       </div>
       <div class="flex justify-center">
         <MediaBar
@@ -221,6 +221,7 @@ function handleBackToLibrary() {
         <TextViewer
           sentences={reader.sentences}
           currentIndex={audio.currentIndex}
+          isPlaying={audio.isPlaying}
           highlightColor={settings.highlightColor}
           autoscroll={settings.autoscroll}
           onSentenceClick={handleSeek}

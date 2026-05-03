@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { goto } from '$app/navigation'
-  import { getLibrary, deleteBook } from '$lib/api'
-  import type { Book } from '$lib/api'
+  import { getLibrary, deleteBook, type Book } from '$lib/api'
   import BookGrid from '$lib/components/BookGrid.svelte'
+  import LastRead from '$lib/components/LastRead.svelte'
+  import { userStore } from '$lib/stores/user'
 
   let books = $state<Book[]>([])
   let loading = $state(true)
@@ -31,10 +32,36 @@
     }
   }
 
-  onMount(fetchLibrary)
+  function handleResumeReading() {
+    const state = $userStore
+    if (state.settings.last_book_id) {
+      goto(`/reader/${state.settings.last_book_id}`)
+    }
+  }
+
+  onMount(async () => {
+    // Load user settings first so LastRead card can check last_book_id
+    await userStore.load()
+    await fetchLibrary()
+  })
 </script>
 
 <div class="p-4 md:p-6">
-  <h1 class="text-xl md:text-2xl font-bold text-slate-800 mb-6">Library</h1>
-  <BookGrid {books} {loading} {error} onClick={(id) => goto(`/reader/${id}`)} onDelete={handleDelete} onRetry={fetchLibrary} />
-</div>
+  <div class="flex items-center justify-between mb-6">
+    <h1 class="text-xl md:text-2xl font-bold text-slate-800">Library</h1>
+  </div>
+
+  <!-- Last read card at the top -->
+  {#if $userStore.settings.last_book_id}
+    <div class="mb-6">
+      <LastRead
+        bookId={$userStore.settings.last_book_id}
+        sentenceIndex={$userStore.settings.last_sentence_index}
+        onClick={handleResumeReading}
+      />
+    </div>
+  {/if}
+
+  <!-- Full book grid -->
+  <BookGrid {books} {loading} {error} onClick={(id) => goto(`/reader/${id}`)} onDelete={handleDelete} onRetry={fetchLibrary} /></div>
+

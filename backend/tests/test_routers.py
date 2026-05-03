@@ -9,7 +9,7 @@ from unittest.mock import patch, MagicMock
 
 from main import app
 from db.database import get_session
-from services.pdf_engine import SentenceRecord as PdfSentence
+from services.base_engine import SentenceRecord as PdfSentence
 
 
 def _fake_sentences(n=5):

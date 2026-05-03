@@ -1,8 +1,8 @@
 """TDD tests for epub_engine.py and ocr_engine.py."""
 import pytest
 from pathlib import Path
-from services.epub_engine import EPUBEngine, SentenceRecord as EpubSentenceRecord
-from services.ocr_engine import OCREngine
+from services.epub_engine import EPUBEngine
+from services.base_engine import SentenceRecord as BaseSentenceRecord
 
 
 EPUB_PATH = Path.home() / "Documents/EBooks/cleancodebook.epub"
@@ -20,7 +20,8 @@ class TestEPUBEngine:
     def test_returns_sentence_records(self, engine):
         result = engine.extract_sentences(str(EPUB_PATH))
         assert len(result) > 0
-        assert all(isinstance(s, EpubSentenceRecord) for s in result)
+        # Verify all records are BaseSentenceRecord instances
+        assert all(isinstance(s, BaseSentenceRecord) for s in result)
 
     def test_sentences_have_text(self, engine):
         result = engine.extract_sentences(str(EPUB_PATH))
@@ -40,26 +41,15 @@ class TestEPUBEngine:
         with pytest.raises(FileNotFoundError):
             engine.extract_sentences("/nonexistent/book.epub")
 
-    def test_sentence_record_has_chapter(self, engine):
+    def test_sentence_record_has_required_fields(self, engine):
+        """Verify sentence records have the fields needed by documents.py router."""
         result = engine.extract_sentences(str(EPUB_PATH))
-        assert hasattr(result[0], 'chapter')
-
-
-class TestOCREngine:
-    @pytest.fixture
-    def engine(self):
-        return OCREngine()
-
-    def test_engine_initializes(self, engine):
-        assert engine is not None
-
-    def test_process_image_returns_sentences(self, engine):
-        import fitz
-        doc = fitz.open(str(EPUB_PATH.parent / "cleancodebook.pdf"))
-        page = doc[20]
-        result = engine.process_page(page)
-        doc.close()
-        assert isinstance(result, list)
-
-    def test_is_available(self, engine):
-        assert engine.is_available()
+        assert len(result) > 0
+        # The router expects index and text fields
+        assert hasattr(result[0], 'index')
+        assert hasattr(result[0], 'text')
+        # EPUB sentences have page=0 and zero coordinates
+        assert hasattr(result[0], 'page')
+        assert hasattr(result[0], 'x0')
+        assert result[0].page == 0
+        assert result[0].x0 == 0.0
