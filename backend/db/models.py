@@ -36,3 +36,25 @@ class Progress(SQLModel, table=True):
     book_id: str = Field(primary_key=True, foreign_key='book.id')
     sentence_index: int
     updated_at: datetime
+
+
+class Bookmark(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    book_id: str = Field(foreign_key='book.id', index=True)
+    sentence_index: int
+    page: int
+    label: str
+    created_at: datetime
+
+
+class MP3Export(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    book_id: str = Field(foreign_key='book.id', index=True)
+    voice: str
+    speed: float
+    status: str
+    progress: int = 0
+    file_path: str | None = None
+    file_size: int | None = None
+    error_message: str | None = None
+    created_at: datetime

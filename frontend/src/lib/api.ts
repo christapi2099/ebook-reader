@@ -17,7 +17,7 @@ export interface Book {
   page_count: number
 }
 
-const API_BASE = 'http://localhost:8000'
+export const API_BASE = 'http://localhost:8000'
 
 async function fetchApi<T>(endpoint: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${endpoint}`, {
@@ -44,6 +44,104 @@ export async function getSentences(bookId: string): Promise<Sentence[]> {
 
 export async function getLibrary(): Promise<Book[]> {
   return fetchApi<Book[]>('/library')
+}
+
+export interface Voice {
+  id: string
+  name: string
+  lang: string
+  gender: string
+  quality: string
+  built_in: boolean
+}
+
+export async function getVoices(): Promise<Voice[]> {
+  return fetchApi<Voice[]>('/voices')
+}
+
+export async function uploadVoice(file: File): Promise<{ id: string; path: string }> {
+  const formData = new FormData()
+  formData.append('file', file)
+  const response = await fetch(`${API_BASE}/voices/upload`, { method: 'POST', body: formData })
+  if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+  return response.json()
+}
+
+export async function deleteVoice(voiceId: string): Promise<void> {
+  await fetchApi<void>(`/voices/${voiceId}`, { method: 'DELETE' })
+}
+
+export async function previewVoice(voiceId: string): Promise<ArrayBuffer> {
+  const response = await fetch(`${API_BASE}/voices/preview/${voiceId}`)
+  if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+  return response.arrayBuffer()
+}
+
+export async function deleteBook(bookId: string): Promise<void> {
+  await fetchApi<void>(`/library/${bookId}`, { method: 'DELETE' })
+}
+
+export async function exportMP3(bookId: string, voice: string, speed: number): Promise<{ export_id: number }> {
+  return fetchApi<{ export_id: number }>('/mp3/export', {
+    method: 'POST',
+    body: JSON.stringify({ book_id: bookId, voice, speed }),
+  })
+}
+
+export interface ExportStatus {
+  status: string
+  progress: number
+  file_size: number | null
+  error_message: string | null
+}
+
+export interface ExportItem {
+  id: number
+  book_id: string
+  book_title: string
+  voice: string
+  speed: number
+  status: string
+  progress: number
+  file_size: number | null
+  error_message: string | null
+  created_at: string
+}
+
+export async function getExports(): Promise<ExportItem[]> {
+  return fetchApi<ExportItem[]>('/mp3/exports')
+}
+
+export async function getExportStatus(exportId: number): Promise<ExportStatus> {
+  return fetchApi(`/mp3/exports/${exportId}/status`)
+}
+
+export async function deleteExport(exportId: number): Promise<void> {
+  await fetchApi<void>(`/mp3/exports/${exportId}`, { method: 'DELETE' })
+}
+
+export interface Bookmark {
+  id: number
+  book_id: string
+  sentence_index: number
+  page: number
+  label: string
+  created_at: string
+}
+
+export async function createBookmark(bookId: string, sentenceIndex: number, label: string): Promise<Bookmark> {
+  return fetchApi<Bookmark>('/bookmarks', {
+    method: 'POST',
+    body: JSON.stringify({ book_id: bookId, sentence_index: sentenceIndex, label }),
+  })
+}
+
+export async function getBookmarks(bookId: string): Promise<Bookmark[]> {
+  return fetchApi<Bookmark[]>(`/bookmarks/${bookId}`)
+}
+
+export async function deleteBookmark(bookmarkId: number): Promise<void> {
+  await fetchApi<void>(`/bookmarks/${bookmarkId}`, { method: 'DELETE' })
 }
 
 export async function saveProgress(bookId: string, sentenceIndex: number): Promise<void> {

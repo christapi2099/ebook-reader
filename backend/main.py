@@ -8,6 +8,9 @@ from fastapi.staticfiles import StaticFiles
 from db.database import create_engine_and_tables
 from routers import documents, library
 from routers import tts as tts_router
+from routers import voices as voices_router
+from routers import mp3 as mp3_router
+from routers import bookmarks as bookmarks_router
 
 
 def _init_kokoro():
@@ -26,6 +29,8 @@ async def lifespan(app: FastAPI):
     Path("uploads").mkdir(exist_ok=True)
     kokoro = _init_kokoro()
     tts_router.set_kokoro(kokoro)
+    voices_router.set_kokoro(kokoro)
+    mp3_router.set_kokoro(kokoro)
     yield
 
 
@@ -42,6 +47,9 @@ app.add_middleware(
 app.include_router(documents.router)
 app.include_router(library.router)
 app.include_router(tts_router.router)
+app.include_router(voices_router.router)
+app.include_router(mp3_router.router)
+app.include_router(bookmarks_router.router)
 
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
