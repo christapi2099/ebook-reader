@@ -1,22 +1,22 @@
-FROM nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04 AS builder
+FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04 AS builder
 
 RUN apt-get update && apt-get install -y \
     python3.12 python3.12-dev python3-pip \
     build-essential cmake gcc g++ git wget curl \
-    libgl1 libglib2.0-0 libsm6 libxext6 libxrender-dev \
+    libgl1-mesa-glx libglib2.0-0 libsm6 libxext6 libxrender-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir --user --break-system-packages -r requirements.txt && \
-    python3 -m spacy download en_core_web_sm
+RUN pip install --no-cache-dir --user -r requirements.txt && \
+    python -m spacy download en_core_web_sm
 
 # Production stage: CUDA 12.4 runtime for GPU acceleration
-FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 
 RUN apt-get update && apt-get install -y \
     python3.12 python3.12-venv python3-pip \
-    libgl1 libglib2.0-0 libsm6 libxext6 libxrender-dev \
+    libgl1-mesa-glx libglib2.0-0 libsm6 libxext6 libxrender-dev \
     ffmpeg libsndfile1 curl \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/bin/python3.12 /usr/bin/python3

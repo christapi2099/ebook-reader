@@ -3,20 +3,23 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+DEST="$PROJECT_ROOT/deb/usr/share/kokoro-reader"
 
-rm -rf "$PROJECT_ROOT/deb/opt/kokoro-reader"
-mkdir -p "$PROJECT_ROOT/deb/opt/kokoro-reader"
+rm -rf "$DEST"
+mkdir -p "$DEST"
 
-cp "$PROJECT_ROOT/docker-compose.yml" "$PROJECT_ROOT/deb/opt/kokoro-reader/"
-cp -r "$PROJECT_ROOT/backend" "$PROJECT_ROOT/deb/opt/kokoro-reader/"
-cp -r "$PROJECT_ROOT/frontend" "$PROJECT_ROOT/deb/opt/kokoro-reader/"
+cp "$PROJECT_ROOT/docker-compose.yml" "$DEST/"
 
-mkdir -p "$PROJECT_ROOT/deb/usr/share/kokoro-reader"
-cp "$PROJECT_ROOT/docker-compose.yml" "$PROJECT_ROOT/deb/usr/share/kokoro-reader/"
-cp -r "$PROJECT_ROOT/backend" "$PROJECT_ROOT/deb/usr/share/kokoro-reader/"
-cp -r "$PROJECT_ROOT/frontend" "$PROJECT_ROOT/deb/usr/share/kokoro-reader/"
+rsync -a \
+    --exclude='venv/' --exclude='.venv/' \
+    --exclude='__pycache__/' --exclude='.pytest_cache/' \
+    --exclude='*.db' --exclude='*.pyc' \
+    --exclude='uploads/' \
+    "$PROJECT_ROOT/backend/" "$DEST/backend/"
 
-cp "$PROJECT_ROOT/deb/lib/systemd/system/kokoro-reader.service" "$PROJECT_ROOT/deb/lib/systemd/system/"
+rsync -a \
+    --exclude='node_modules/' --exclude='.svelte-kit/' --exclude='build/' \
+    "$PROJECT_ROOT/frontend/" "$DEST/frontend/"
 
 chmod 755 "$PROJECT_ROOT/deb/DEBIAN/postinst"
 
