@@ -4,36 +4,68 @@ import { page } from '$app/stores'
 import { get } from 'svelte/store'
 import readerStore, { loadBook, seek, setPlaying, setSpeed } from '$lib/stores/reader'
 import { audioStore } from '$lib/stores/audio'
+import { settingsStore, type SettingsState } from '$lib/stores/settings'
+import { createBookmark } from '$lib/api'
+import { registerHotkeys, unregisterHotkeys } from '$lib/utils/hotkeys'
 import PDFViewer from '$lib/components/PDFViewer.svelte'
 import MediaBar from '$lib/components/MediaBar.svelte'
 import TopToolbar from '$lib/components/TopToolbar.svelte'
 import AudioProgressBar from '$lib/components/AudioProgressBar.svelte'
-import PageNavigator from '$lib/components/PageNavigator.svelte'  // Import PageNavigator
+import PageNavigator from '$lib/components/PageNavigator.svelte'
+import SettingsOverlay from '$lib/components/SettingsOverlay.svelte'
+import SearchOverlay from '$lib/components/SearchOverlay.svelte'
+import BookmarkPanel from '$lib/components/BookmarkPanel.svelte'
 
 const bookId = $page.params.id as string
 
 let reader = $state(get(readerStore))
 let audio = $state(get(audioStore))
+let settings: SettingsState = $state({ ...get(settingsStore) })
 let seeking = $state(false)
-let currentPage = $state(0)  // Add currentPage state
-let pageToScroll = $state<number | null>(null)  // Add pageToScroll state
+let currentPage = $state(0)
+let pageToScroll = $state<number | null>(null)
+let settingsOpen = $state(false)
+let searchOpen = $state(false)
+let bookmarksOpen = $state(false)
+
+// Search state
+let searchMatches = $state<number[]>([])
+let currentSearchIndex = $state(-1)
 
 let unsubReader: () => void
 let unsubAudio: () => void
+let unsubSettings: () => void
 
 onMount(async () => {
   unsubReader = readerStore.subscribe((v) => (reader = v))
   unsubAudio = audioStore.subscribe((v) => (audio = v))
+  unsubSettings = settingsStore.subscribe((v) => (settings = v))
   await loadBook(bookId)
   audioStore.init(bookId)
   audioStore.setSpeed(get(readerStore).speed)
   audioStore.setCurrentIndex(get(readerStore).currentIndex)
+
+  const hotkeyMap: Record<string, () => void> = {
+    ' ': handlePlayPause,
+    'ArrowLeft': () => handleSeek(Math.max(0, reader.currentIndex - 1)),
+    'ArrowRight': () => handleSeek(Math.min(reader.sentences.length - 1, reader.currentIndex + 1)),
+    'ArrowUp': () => handleSpeedChange(Math.min(3, reader.speed + 0.25)),
+    'ArrowDown': () => handleSpeedChange(Math.max(0.5, reader.speed - 0.25)),
+    'b': () => handleAddBookmark(),
+    'B': () => handleAddBookmark(),
+    'f': () => { searchOpen = true },
+    'F': () => { searchOpen = true },
+    'Escape': () => { settingsOpen = false; searchOpen = false; bookmarksOpen = false },
+  }
+  registerHotkeys(hotkeyMap)
 })
 
 onDestroy(() => {
   unsubReader?.()
   unsubAudio?.()
+  unsubSettings?.()
   audioStore.destroy()
+  unregisterHotkeys()
 })
 
 function handlePageJump(page: number) {
@@ -41,10 +73,14 @@ function handlePageJump(page: number) {
   setTimeout(() => { pageToScroll = null }, 100)
 }
 
-// Sync reader store when audio stops naturally (e.g. onComplete from backend)
 $effect(() => {
   if (!audio.isPlaying && reader.isPlaying) setPlaying(false)
 })
+
+function handlePlayPause() {
+  if (audio.isPlaying) handlePause()
+  else handlePlay()
+}
 
 function handlePlay() {
   setPlaying(true)
@@ -59,10 +95,9 @@ function handlePause() {
 async function handleSeek(index: number) {
   if (seeking) return
   seeking = true
-  // Fire audio seek immediately — don't block on HTTP progress save
   if (reader.isPlaying) audioStore.seek(index)
   try {
-    await seek(index)  // HTTP: save progress to DB (runs in parallel with audio)
+    await seek(index)
   } finally {
     seeking = false
   }
@@ -80,11 +115,38 @@ function handleRewind() {
 function handleForward() {
   handleSeek(Math.min(reader.sentences.length - 1, reader.currentIndex + 5))
 }
+
+async function handleAddBookmark() {
+  if (!reader.bookId) return
+  const sentence = reader.sentences[reader.currentIndex]
+  const label = sentence?.text.slice(0, 50) || `Sentence ${reader.currentIndex}`
+  try {
+    await createBookmark(reader.bookId, reader.currentIndex, label)
+    bookmarksOpen = true
+  } catch {
+    // silently fail
+  }
+}
+
+function handleSearchResults(matches: { index: number }[], _current: number) {
+  searchMatches = matches.map(m => m.index)
+  currentSearchIndex = _current >= 0 ? matches.findIndex(m => m.index === _current) : -1
+}
+
+function handleBookmarkGoTo(index: number) {
+  handleSeek(index)
+}
 </script>
 
 <div class="flex flex-col h-full">
-  <!-- Top bar -->
   <div class="border-b border-slate-200 bg-white">
+    {#if searchOpen}
+      <SearchOverlay
+        sentences={reader.sentences}
+        onClose={() => { searchOpen = false; searchMatches = []; currentSearchIndex = -1 }}
+        onResults={handleSearchResults}
+      />
+    {/if}
     <div class="grid grid-cols-3 items-center px-3 py-2">
       <div class="flex items-center justify-center">
         <PageNavigator currentPage={currentPage} totalPages={reader.sentences.length} onGoToPage={handlePageJump} />
@@ -105,13 +167,13 @@ function handleForward() {
         <TopToolbar
           onToggleCC={() => {}}
           onCopyText={() => {}}
-          onSave={() => seek(reader.currentIndex)}
-          onSearch={() => {}}
-          onSettings={() => {}}
+          onAddBookmark={handleAddBookmark}
+          onShowBookmarks={() => (bookmarksOpen = true)}
+          onSearch={() => (searchOpen = true)}
+          onSettings={() => (settingsOpen = true)}
         />
       </div>
     </div>
-    <!-- Progress bar sits below controls, full width -->
     <AudioProgressBar
       sentences={reader.sentences}
       currentIndex={audio.currentIndex}
@@ -120,7 +182,6 @@ function handleForward() {
     />
   </div>
 
-  <!-- PDF viewer -->
   <div class="flex-1 overflow-hidden">
     {#if reader.sentences.length > 0}
       <PDFViewer
@@ -129,6 +190,10 @@ function handleForward() {
         currentIndex={audio.currentIndex}
         buffering={audio.buffering || seeking}
         pageToScroll={pageToScroll}
+        searchMatches={searchMatches}
+        currentSearchIndex={currentSearchIndex}
+        highlightColor={settings.highlightColor}
+        autoscroll={settings.autoscroll}
         onPageChange={(p) => { currentPage = p }}
         onSentenceClick={handleSeek}
       />
@@ -143,3 +208,17 @@ function handleForward() {
     {/if}
   </div>
 </div>
+
+{#if settingsOpen}
+  <SettingsOverlay onClose={() => (settingsOpen = false)} />
+{/if}
+
+{#if bookmarksOpen}
+  <BookmarkPanel
+    {bookId}
+    currentSentenceIndex={reader.currentIndex}
+    currentSentenceText={reader.sentences[reader.currentIndex]?.text ?? ''}
+    onGoToSentence={handleBookmarkGoTo}
+    onClose={() => (bookmarksOpen = false)}
+  />
+{/if}

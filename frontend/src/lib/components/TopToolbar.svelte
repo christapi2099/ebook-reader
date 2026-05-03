@@ -1,8 +1,9 @@
 <script lang="ts">
-  let { onToggleCC, onCopyText, onSave, onSearch, onSettings }: {
+  let { onToggleCC, onCopyText, onAddBookmark, onShowBookmarks, onSearch, onSettings }: {
     onToggleCC: () => void
     onCopyText: () => void
-    onSave: () => void
+    onAddBookmark: () => void
+    onShowBookmarks: () => void
     onSearch: () => void
     onSettings: () => void
   } = $props()
@@ -25,10 +26,17 @@
     </svg>
   </button>
 
-  <button class="p-3 rounded-md hover:bg-slate-100 text-slate-600" onclick={onSave} aria-label="Save bookmark">
+  <button class="p-3 rounded-md hover:bg-slate-100 text-slate-600" onclick={onAddBookmark} aria-label="Add bookmark">
     <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none"
       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
       <path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z" />
+    </svg>
+  </button>
+
+  <button class="p-3 rounded-md hover:bg-slate-100 text-slate-600" onclick={onShowBookmarks} aria-label="Show bookmarks">
+    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
     </svg>
   </button>
 
