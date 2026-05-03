@@ -5,9 +5,10 @@ import { get } from 'svelte/store'
 import readerStore, { loadBook, seek, setPlaying, setSpeed } from '$lib/stores/reader'
 import { audioStore } from '$lib/stores/audio'
 import { settingsStore, type SettingsState } from '$lib/stores/settings'
-import { createBookmark } from '$lib/api'
+import { createBookmark, getBook } from '$lib/api'
 import { registerHotkeys, unregisterHotkeys } from '$lib/utils/hotkeys'
 import PDFViewer from '$lib/components/PDFViewer.svelte'
+import TextViewer from '$lib/components/TextViewer.svelte'
 import MediaBar from '$lib/components/MediaBar.svelte'
 import TopToolbar from '$lib/components/TopToolbar.svelte'
 import AudioProgressBar from '$lib/components/AudioProgressBar.svelte'
@@ -15,6 +16,7 @@ import PageNavigator from '$lib/components/PageNavigator.svelte'
 import SettingsOverlay from '$lib/components/SettingsOverlay.svelte'
 import SearchOverlay from '$lib/components/SearchOverlay.svelte'
 import BookmarkPanel from '$lib/components/BookmarkPanel.svelte'
+import { goto } from '$app/navigation'
 
 const bookId = $page.params.id as string
 
@@ -28,6 +30,9 @@ let settingsOpen = $state(false)
 let searchOpen = $state(false)
 let bookmarksOpen = $state(false)
 
+// Get book metadata for type detection
+let bookMeta = $state<{file_type: string; title: string} | null>(null)
+
 // Search state
 let searchMatches = $state<number[]>([])
 let currentSearchIndex = $state(-1)
@@ -40,10 +45,19 @@ onMount(async () => {
   unsubReader = readerStore.subscribe((v) => (reader = v))
   unsubAudio = audioStore.subscribe((v) => (audio = v))
   unsubSettings = settingsStore.subscribe((v) => (settings = v))
+
+  // Fetch book metadata for type detection
+  try {
+    bookMeta = await getBook(bookId)
+  } catch (e) {
+    console.error('Failed to fetch book metadata:', e)
+  }
+
   await loadBook(bookId)
   audioStore.init(bookId)
   audioStore.setSpeed(get(readerStore).speed)
   audioStore.setCurrentIndex(get(readerStore).currentIndex)
+  audioStore.setVoice(get(settingsStore).voice)
 
   const hotkeyMap: Record<string, () => void> = {
     ' ': handlePlayPause,
@@ -75,6 +89,10 @@ function handlePageJump(page: number) {
 
 $effect(() => {
   if (!audio.isPlaying && reader.isPlaying) setPlaying(false)
+})
+
+$effect(() => {
+  audioStore.setVoice(settings.voice)
 })
 
 function handlePlayPause() {
@@ -136,6 +154,10 @@ function handleSearchResults(matches: { index: number }[], _current: number) {
 function handleBookmarkGoTo(index: number) {
   handleSeek(index)
 }
+
+function handleBackToLibrary() {
+  goto('/library')
+}
 </script>
 
 <div class="flex flex-col h-full">
@@ -148,7 +170,17 @@ function handleBookmarkGoTo(index: number) {
       />
     {/if}
     <div class="grid grid-cols-3 items-center px-3 py-2">
-      <div class="flex items-center justify-center">
+      <div class="flex items-center justify-center gap-2">
+        <!-- Back button -->
+        <button
+          onclick={handleBackToLibrary}
+          class="p-2 rounded-md hover:bg-slate-100 text-slate-600"
+          aria-label="Back to library"
+        >
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
+          </svg>
+        </button>
         <PageNavigator currentPage={currentPage} totalPages={reader.sentences.length} onGoToPage={handlePageJump} />
       </div>
       <div class="flex justify-center">
@@ -184,19 +216,31 @@ function handleBookmarkGoTo(index: number) {
 
   <div class="flex-1 overflow-hidden">
     {#if reader.sentences.length > 0}
-      <PDFViewer
-        {bookId}
-        sentences={reader.sentences}
-        currentIndex={audio.currentIndex}
-        buffering={audio.buffering || seeking}
-        pageToScroll={pageToScroll}
-        searchMatches={searchMatches}
-        currentSearchIndex={currentSearchIndex}
-        highlightColor={settings.highlightColor}
-        autoscroll={settings.autoscroll}
-        onPageChange={(p) => { currentPage = p }}
-        onSentenceClick={handleSeek}
-      />
+      {#if bookMeta?.file_type === 'text' || bookMeta?.file_type === 'epub'}
+        <!-- Text books (saved from text reader) or EPUBs get TextViewer -->
+        <TextViewer
+          sentences={reader.sentences}
+          currentIndex={audio.currentIndex}
+          highlightColor={settings.highlightColor}
+          autoscroll={settings.autoscroll}
+          onSentenceClick={handleSeek}
+        />
+      {:else}
+        <!-- PDF books get PDFViewer -->
+        <PDFViewer
+          {bookId}
+          sentences={reader.sentences}
+          currentIndex={audio.currentIndex}
+          buffering={audio.buffering || seeking}
+          pageToScroll={pageToScroll}
+          searchMatches={searchMatches}
+          currentSearchIndex={currentSearchIndex}
+          highlightColor={settings.highlightColor}
+          autoscroll={settings.autoscroll}
+          onPageChange={(p) => { currentPage = p }}
+          onSentenceClick={handleSeek}
+        />
+      {/if}
     {:else}
       <div class="flex items-center justify-center h-full text-slate-400">
         <svg class="w-5 h-5 animate-spin mr-2" fill="none" viewBox="0 0 24 24">

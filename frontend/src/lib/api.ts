@@ -156,6 +156,49 @@ export async function getProgress(bookId: string): Promise<number> {
   return res.sentence_index
 }
 
+export interface UserSettings {
+  last_book_id: string | null
+  last_sentence_index: number
+}
+
+export async function getUserSettings(): Promise<UserSettings> {
+  return fetchApi<UserSettings>('/user/settings')
+}
+
+export async function updateUserSettings(settings: {
+  last_book_id?: string | null
+  last_sentence_index?: number
+}): Promise<{ ok: boolean }> {
+  return fetchApi('/user/settings', {
+    method: 'POST',
+    body: JSON.stringify(settings),
+  })
+}
+
+// Text book API functions
+
+export async function createTextBook(text: string, title?: string): Promise<{ book_id: string; sentence_count: number; already_existed: boolean }> {
+  const body = title ? { text, title } : { text }
+  const response = await fetch(`${API_BASE}/documents/text`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+  return response.json()
+}
+
+export async function persistTextBook(bookId: string, title?: string): Promise<{ ok: boolean }> {
+  return fetchApi(`/documents/text/${bookId}`, {
+    method: 'PATCH',
+    body: title ? JSON.stringify({ title }) : undefined,
+  })
+}
+
+export async function getBook(bookId: string): Promise<Book> {
+  return fetchApi<Book>(`/library/${bookId}`)
+}
+
 export class TTSSocket {
   private ws: WebSocket | null = null
   private bookId: string
@@ -173,7 +216,7 @@ export class TTSSocket {
 
   connect(): void {
     if (this.ws?.readyState === WebSocket.OPEN) return
-    const wsUrl = `ws://localhost:8000/ws/tts/${this.bookId}`
+    const wsUrl = `${API_BASE.replace(/^http/, 'ws')}/ws/tts/${this.bookId}`
     this.ws = new WebSocket(wsUrl)
     this.ws.binaryType = 'arraybuffer'
     this.ws.onopen = () => { this.reconnectAttempts = 0 }
