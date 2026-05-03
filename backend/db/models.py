@@ -31,6 +31,7 @@ class AudioCache(SQLModel, table=True):
     audio_data: bytes
     duration_ms: int
     voice: str
+    word_timestamps: Optional[str] = None
     created_at: datetime
 
 class Progress(SQLModel, table=True):

@@ -221,6 +221,7 @@ function handleBackToLibrary() {
         <TextViewer
           sentences={reader.sentences}
           currentIndex={audio.currentIndex}
+          currentWordIndex={audio.currentWordIndex}
           isPlaying={audio.isPlaying}
           highlightColor={settings.highlightColor}
           autoscroll={settings.autoscroll}

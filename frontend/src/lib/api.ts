@@ -161,6 +161,12 @@ export interface UserSettings {
   last_sentence_index: number
 }
 
+export interface WordTimestamp {
+  word: string
+  start: number
+  end: number
+}
+
 export async function getUserSettings(): Promise<UserSettings> {
   return fetchApi<UserSettings>('/user/settings')
 }
@@ -207,7 +213,7 @@ export class TTSSocket {
 
   onAudioChunk: (bytes: ArrayBuffer) => void = () => {}
   onSentenceStart: (index: number, sessionId: number) => void = () => {}
-  onSentenceEnd: (index: number, durationMs: number, sessionId: number) => void = () => {}
+  onSentenceEnd: (index: number, durationMs: number, sessionId: number, wordTimestamps?: WordTimestamp[]) => void = () => {}
   onComplete: (sessionId: number) => void = () => {}
 
   constructor(bookId: string) {
@@ -228,7 +234,7 @@ export class TTSSocket {
           const msg = JSON.parse(event.data)
           const sid = typeof msg.session_id === 'number' ? msg.session_id : 0
           if (msg.type === 'sentence_start') this.onSentenceStart(msg.index, sid)
-          else if (msg.type === 'sentence_end') this.onSentenceEnd(msg.index, msg.duration_ms, sid)
+          else if (msg.type === 'sentence_end') this.onSentenceEnd(msg.index, msg.duration_ms, sid, msg.word_timestamps)
           else if (msg.type === 'complete') this.onComplete(sid)
         } catch {}
       }

@@ -1,10 +1,11 @@
 import { writable, get } from 'svelte/store'
-import { TTSSocket } from '$lib/api'
+import { TTSSocket, type WordTimestamp } from '$lib/api'
 
 export interface AudioState {
   isPlaying: boolean
   speed: number
   currentIndex: number
+  currentWordIndex: number
   voice: string
   buffering: boolean
 }
@@ -14,6 +15,7 @@ function createAudioStore() {
     isPlaying: false,
     speed: 1.0,
     currentIndex: 0,
+    currentWordIndex: -1,
     voice: 'af_heart',
     buffering: false,
   })
@@ -52,6 +54,7 @@ function createAudioStore() {
   // rAF polls this to advance currentIndex in audio-time, not receive-time.
   let sentenceTimings: Map<number, number> = new Map()
   let receivingSentenceIndex = -1
+  let wordTimings: Map<number, WordTimestamp[]> = new Map()
 
   const SPEED_CHANGE_DEBOUNCE_MS = 200
   const SENTENCE_TIMING_OFFSET_S = 0.016
@@ -84,14 +87,42 @@ function createAudioStore() {
       for (const [idx, startTime] of sentenceTimings) {
         if (startTime <= now && idx > latestReady) latestReady = idx
       }
+      
+      let newWordIndex = -1
       if (latestReady >= 0) {
-        update(s => {
-          if (latestReady >= s.currentIndex) return { ...s, currentIndex: latestReady }
-          return s
-        })
+        const sentenceStart = sentenceTimings.get(latestReady)
+        const words = wordTimings.get(latestReady)
+        if (sentenceStart !== undefined && words && words.length > 0) {
+          const elapsed = now - sentenceStart
+          // Find the last word where start <= elapsed (word spans from start to end)
+          for (let i = words.length - 1; i >= 0; i--) {
+            if (elapsed >= words[i].start) {
+              newWordIndex = i
+              break
+            }
+          }
+        }
+        // Clean up old entries
         for (const [idx] of sentenceTimings) {
           if (idx <= latestReady) sentenceTimings.delete(idx)
         }
+        // Clean wordTimings for sentences before current
+        for (const [idx] of wordTimings) {
+          if (idx < latestReady) wordTimings.delete(idx)
+        }
+      }
+      
+      if (latestReady >= 0) {
+        update(s => {
+          let next = s
+          if (latestReady >= s.currentIndex) {
+            next = { ...next, currentIndex: latestReady }
+          }
+          if (next.currentWordIndex !== newWordIndex) {
+            next = { ...next, currentWordIndex: newWordIndex }
+          }
+          return next
+        })
       }
 
       rafId = requestAnimationFrame(tick)
@@ -178,17 +209,17 @@ function createAudioStore() {
     activeNodes = []
     lastScheduledIndex = -1
     sentenceTimings.clear()
+    wordTimings.clear()
     nextStartTime = 0
     receivingSentenceIndex = -1
-    activeSessionId = -1 // force a fresh sentence_start before we accept any chunks
+    activeSessionId = -1
     decodeChain = Promise.resolve()
   }
 
   function resetForPlay() {
     stopAll()
     cancelled = false
-    // New session — any in-flight messages tagged with the old sessionId will
-    // be rejected by the onSentenceStart / onAudioChunk guards below.
+    update(s => ({ ...s, currentWordIndex: -1 }))
     sessionId++
     const ac = getCtx()
     try { if (ac.state === 'suspended') void ac.resume() } catch (e) { console.warn('AudioContext resume failed:', e) }
@@ -217,7 +248,12 @@ function createAudioStore() {
         receivingSentenceIndex = index
       }
 
-      socket.onSentenceEnd = (_index: number, _durationMs: number, _sid: number) => {}
+      socket.onSentenceEnd = (_index: number, _durationMs: number, _sid: number, wordTimestamps?: WordTimestamp[]) => {
+        if (sid !== sessionId) return
+        if (wordTimestamps) {
+          wordTimings.set(_index, wordTimestamps)
+        }
+      }
 
       socket.onComplete = (sid: number) => {
         if (sid !== sessionId) return
@@ -231,7 +267,7 @@ function createAudioStore() {
     play(fromIndex: number) {
       if (!socket) return
       resetForPlay()
-      update(s => ({ ...s, isPlaying: true, buffering: true, currentIndex: fromIndex }))
+      update(s => ({ ...s, currentWordIndex: -1, isPlaying: true, buffering: true, currentIndex: fromIndex }))
       const state = get({ subscribe })
       socket.play(fromIndex, state.voice, state.speed, sessionId)
     },
@@ -249,14 +285,14 @@ function createAudioStore() {
       const state = get({ subscribe })
       if (!socket) return
       resetForPlay()
-      update(s => ({ ...s, isPlaying: true, buffering: true }))
+      update(s => ({ ...s, currentWordIndex: -1, isPlaying: true, buffering: true }))
       socket.play(state.currentIndex, state.voice, state.speed, sessionId)
     },
 
     seek(index: number) {
       if (!socket) return
       resetForPlay()
-      update(s => ({ ...s, isPlaying: true, currentIndex: index, buffering: true }))
+      update(s => ({ ...s, currentWordIndex: -1, isPlaying: true, currentIndex: index, buffering: true }))
       const state = get({ subscribe })
       socket.seek(index, state.voice, state.speed, sessionId)
     },

@@ -73,4 +73,13 @@ export class WsDriver {
       }
     }, sessionId)
   }
+
+  async sendSentenceEnd(index: number, sessionId: number, wordTimestamps?: {word: string, start: number, end: number}[]) {
+    await this.page!.evaluate(({ index, sessionId, wordTimestamps }) => {
+      const ws = (window as any).__wsDriverSocket
+      if (ws && ws._onmessage) {
+        ws._onmessage({ data: JSON.stringify({ type: 'sentence_end', index, session_id: sessionId, word_timestamps: wordTimestamps }) })
+      }
+    }, { index, sessionId, wordTimestamps })
+  }
 }

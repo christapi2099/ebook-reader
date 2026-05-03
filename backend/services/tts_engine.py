@@ -27,6 +27,30 @@ class TTSEngine:
         self.current_voice = "af_heart"
         self.queue: asyncio.Queue[SynthJob] = asyncio.Queue(maxsize=30)
         self.cancelled: set[int] = set()
+        self._sentence_meta: dict[int, dict] = {}
+
+    def _proportional_timestamps(self, text: str, duration_ms: int) -> list[dict]:
+        """Estimate word timestamps proportionally by phoneme count. ~3ms, no GPU."""
+        try:
+            from misaki.en import G2P
+            g2p = G2P()
+            _, tokens = g2p(text)
+            words = [(t.text, len(t.phonemes)) for t in tokens if t.phonemes]
+            total_phonemes = sum(p for _, p in words)
+            if total_phonemes == 0:
+                return []
+            duration_s = duration_ms / 1000.0
+            timestamps = []
+            offset = 0.0
+            for word, phoneme_count in words:
+                frac = phoneme_count / total_phonemes
+                start = round(offset, 4)
+                end = round(offset + frac * duration_s, 4)
+                timestamps.append({"word": word, "start": start, "end": end})
+                offset = end
+            return timestamps
+        except Exception:
+            return []
 
     def _cache_key(self, text: str, voice: str, speed: float) -> str:
         return hashlib.sha256(f"{text}:{voice}:{speed}".encode()).hexdigest()
@@ -46,6 +70,13 @@ class TTSEngine:
             cached = session.get(AudioCache, cache_key)
 
         if cached is not None:
+            word_ts = json.loads(cached.word_timestamps) if cached.word_timestamps else None
+            if word_ts is None:
+                word_ts = self._proportional_timestamps(job.text, cached.duration_ms)
+            self._sentence_meta[job.sentence_index] = {
+                "word_timestamps": word_ts,
+                "duration_ms": cached.duration_ms,
+            }
             audio_data = np.frombuffer(cached.audio_data, dtype=np.int16).astype(np.float32) / 32768.0
             chunk_samples = sample_rate // 10
             for start in range(0, len(audio_data), chunk_samples):
@@ -68,6 +99,9 @@ class TTSEngine:
         all_audio_parts: list[np.ndarray] = []
         chunk_samples = sample_rate // 10
 
+        word_timestamps = []
+        audio_offset = 0.0
+
         for result in results:
             await asyncio.sleep(0)
             audio = result[-1]
@@ -75,6 +109,20 @@ class TTSEngine:
                 return
             audio_data = audio if isinstance(audio, np.ndarray) else np.array(audio)
             all_audio_parts.append(audio_data)
+            
+            if result.tokens:
+                for t in result.tokens:
+                    if t.phonemes:
+                        word_timestamps.append({
+                            "word": t.text,
+                            "start": round((t.start_ts or 0) + audio_offset, 4),
+                            "end": round((t.end_ts or 0) + audio_offset, 4),
+                        })
+            
+            if audio_data is not None:
+                audio_flat = audio_data.flatten() if audio_data.ndim > 1 else audio_data
+                audio_offset += len(audio_flat) / sample_rate
+            
             for start in range(0, len(audio_data), chunk_samples):
                 if job.sentence_index in self.cancelled:
                     return
@@ -88,11 +136,18 @@ class TTSEngine:
                 full_audio = np.concatenate(all_audio_parts)
                 duration_ms = int(len(full_audio) / sample_rate * 1000)
                 pcm_bytes = (full_audio * 32768.0).clip(-32768, 32767).astype(np.int16).tobytes()
+                
+                self._sentence_meta[job.sentence_index] = {
+                    "word_timestamps": word_timestamps,
+                    "duration_ms": duration_ms,
+                }
+                
                 entry = AudioCache(
                     text_hash=cache_key,
                     audio_data=pcm_bytes,
                     duration_ms=duration_ms,
                     voice=job.voice,
+                    word_timestamps=json.dumps(word_timestamps) if word_timestamps else None,
                     created_at=datetime.now(UTC),
                 )
                 with Session(_db.engine) as session:
@@ -132,11 +187,27 @@ class TTSEngine:
             try:
                 results = self.kokoro(s["text"], voice=voice, speed=speed)
                 parts: list[np.ndarray] = []
+                word_timestamps = []
+                audio_offset = 0.0
                 for result in results:
                     if cancel.is_set():
                         return
                     audio = result[-1]
                     parts.append(audio if isinstance(audio, np.ndarray) else np.array(audio))
+                    
+                    if result.tokens:
+                        for t in result.tokens:
+                            if t.phonemes:
+                                word_timestamps.append({
+                                    "word": t.text,
+                                    "start": round((t.start_ts or 0) + audio_offset, 4),
+                                    "end": round((t.end_ts or 0) + audio_offset, 4),
+                                })
+                    
+                    if audio is not None:
+                        audio_flat = audio.flatten() if audio.ndim > 1 else audio
+                        audio_offset += len(audio_flat) / sample_rate
+                
                 if parts:
                     full = np.concatenate(parts)
                     duration_ms = int(len(full) / sample_rate * 1000)
@@ -146,6 +217,7 @@ class TTSEngine:
                         audio_data=pcm,
                         duration_ms=duration_ms,
                         voice=voice,
+                        word_timestamps=json.dumps(word_timestamps) if word_timestamps else None,
                         created_at=datetime.now(UTC),
                     )
                     with Session(_db.engine) as session:

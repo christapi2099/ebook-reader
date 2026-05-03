@@ -97,8 +97,11 @@ async def tts_websocket(websocket: WebSocket, book_id: str):
                 async for chunk in engine_tts.stream_job(job):
                     chunk_count += 1
                     await websocket.send_bytes(chunk)
-                # Calculate duration based on chunk count and speed factor
-                duration_ms = chunk_count * 100
+                
+                # Read metadata populated by stream_job (word_timestamps + accurate duration_ms)
+                meta = engine_tts._sentence_meta.pop(job.sentence_index, {})
+                duration_ms = meta.get("duration_ms", chunk_count * 100)
+                word_timestamps = meta.get("word_timestamps", [])
 
                 # Prune this index from the cancelled set so it doesn't leak into
                 # the next session (defence in depth — router also clears the set).
@@ -108,6 +111,7 @@ async def tts_websocket(websocket: WebSocket, book_id: str):
                     "type": "sentence_end",
                     "index": job.sentence_index,
                     "duration_ms": duration_ms,
+                    "word_timestamps": word_timestamps,
                     "session_id": session_id,
                 }))
         except asyncio.CancelledError:
