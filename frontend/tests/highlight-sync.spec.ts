@@ -1,11 +1,18 @@
 import { test, expect } from '@playwright/test'
-import { MOCK_SENTENCES, makeMinimalPdf } from './fixtures/mock-data'
+import type { Page } from '@playwright/test'
+import { MOCK_SENTENCES, makeMinimalPdf, MOCK_AUDIO_CHUNK, MOCK_AUDIO_CHUNK_SMALL } from './fixtures/mock-data'
 import { AUDIO_CONTEXT_MOCK } from './fixtures/audio-context-mock'
 import { WsDriver } from './fixtures/ws-driver'
 
 const IDX  = { first: 0, second: 1, third: 2, clicked: 3, stale: 5, last: 4 }
 const SID  = { first: 1, second: 2, stale: 99 }
 const TICK = { sentence: 200, seek: 100 }
+
+const playBtn = (page: Page) => page.getByRole('button', { name: 'Play' })
+const pauseBtn = (page: Page) => page.getByRole('button', { name: 'Pause' })
+const speedGroup = (page: Page) => page.getByRole('group', { name: 'Playback speed' })
+const sentenceOverlay = (page: Page, index: number, highlighted: string) =>
+  page.locator(`[data-index="${index}"][data-highlighted="${highlighted}"]`)
 
 test.describe('Highlight–Audio Sync', () => {
   let driver: WsDriver
@@ -33,96 +40,98 @@ test.describe('Highlight–Audio Sync', () => {
   })
 
   test('initial highlight on sentence 0', async ({ page }) => {
-    await expect(page.locator('[data-index="0"][data-highlighted="true"]')).toBeVisible()
+    await expect(sentenceOverlay(page, 0, 'true')).toBeVisible()
     await expect(page.locator('[data-highlighted="true"]')).toHaveCount(1)
   })
 
   test('highlight advances and previous clears', async ({ page }) => {
-    await page.click('[aria-label="Play"]')
+    await playBtn(page).click()
     await driver.sendSentenceStart(IDX.second, SID.first)
-    await driver.sendAudioChunk(Buffer.alloc(1024))
+    await driver.sendAudioChunk(MOCK_AUDIO_CHUNK)
     await page.clock.runFor(TICK.sentence)
-    await expect(page.locator('[data-index="1"][data-highlighted="true"]')).toBeVisible()
-    await expect(page.locator('[data-index="0"][data-highlighted="false"]')).toBeVisible()
+    await expect(sentenceOverlay(page, 1, 'true')).toBeVisible()
+    await expect(sentenceOverlay(page, 0, 'false')).toBeVisible()
   })
 
   test('stale session_id rejected', async ({ page }) => {
-    await page.click('[aria-label="Play"]')
+    await playBtn(page).click()
     await driver.sendSentenceStart(IDX.stale, SID.stale)
     await page.clock.runFor(TICK.sentence)
-    await expect(page.locator('[data-index="5"][data-highlighted="true"]')).not.toBeVisible({ timeout: 1000 })
+    await expect(sentenceOverlay(page, IDX.stale, 'true')).not.toBeVisible({ timeout: 300 })
   })
 
   test('stale complete does not stop playback', async ({ page }) => {
-    await page.click('[aria-label="Play"]')
+    await playBtn(page).click()
     await driver.sendComplete(SID.stale)
-    await expect(page.locator('[aria-label="Pause"]')).toBeVisible()
+    await expect(pauseBtn(page)).toBeVisible()
   })
 
   test('pause freezes highlight', async ({ page }) => {
-    await page.click('[aria-label="Play"]')
+    await playBtn(page).click()
     await driver.sendSentenceStart(IDX.second, SID.first)
-    await driver.sendAudioChunk(Buffer.alloc(1024))
+    await driver.sendAudioChunk(MOCK_AUDIO_CHUNK)
     await page.clock.runFor(TICK.sentence)
-    await expect(page.locator('[data-index="1"][data-highlighted="true"]')).toBeVisible()
-    await page.click('[aria-label="Pause"]')
+    await expect(sentenceOverlay(page, 1, 'true')).toBeVisible()
+    await pauseBtn(page).click()
     await driver.sendSentenceStart(IDX.third, SID.first)
     await page.clock.runFor(TICK.sentence)
-    await expect(page.locator('[data-index="2"][data-highlighted="true"]')).not.toBeVisible({ timeout: 500 })
-    await expect(page.locator('[data-index="1"][data-highlighted="true"]')).toBeVisible()
+    await expect(sentenceOverlay(page, 2, 'true')).not.toBeVisible({ timeout: 300 })
+    await expect(sentenceOverlay(page, 1, 'true')).toBeVisible()
   })
 
   test('resume continues from paused index', async ({ page }) => {
-    await page.click('[aria-label="Play"]')
+    await playBtn(page).click()
     await driver.sendSentenceStart(IDX.second, SID.first)
-    await driver.sendAudioChunk(Buffer.alloc(1024))
+    await driver.sendAudioChunk(MOCK_AUDIO_CHUNK)
     await page.clock.runFor(TICK.sentence)
-    await page.click('[aria-label="Pause"]')
-    await page.click('[aria-label="Play"]')
+    await pauseBtn(page).click()
+    await playBtn(page).click()
     const resumeAction = driver.actionsOf('play').at(-1)
     expect(resumeAction?.['from_index']).toBe(IDX.second)
   })
 
   test('sentence click triggers seek and highlight jumps', async ({ page }) => {
-    await page.click('[aria-label="Play"]')
+    await playBtn(page).click()
     await page.locator('[data-index="3"]').click()
-    // seek() sets currentIndex=3 immediately; no audio needed to verify highlight
     expect(driver.actionsOf('seek')[0]?.['to_index']).toBe(IDX.clicked)
-    await expect(page.locator('[data-index="3"][data-highlighted="true"]')).toBeVisible()
+    await expect(sentenceOverlay(page, 3, 'true')).toBeVisible()
   })
 
   test('complete stops playback, last sentence stays highlighted', async ({ page }) => {
-    await page.click('[aria-label="Play"]')
+    await playBtn(page).click()
     await driver.sendSentenceStart(IDX.last, SID.first)
-    await driver.sendAudioChunk(Buffer.alloc(1024))
+    await driver.sendAudioChunk(MOCK_AUDIO_CHUNK)
     await page.clock.runFor(TICK.sentence)
     await driver.sendComplete(SID.first)
-    await expect(page.locator('[aria-label="Play"]')).toBeVisible()
-    await expect(page.locator('[data-index="4"][data-highlighted="true"]')).toBeVisible()
+    await expect(playBtn(page)).toBeVisible()
+    await expect(sentenceOverlay(page, 4, 'true')).toBeVisible()
   })
 
   test('generation guard blocks stale onended', async ({ page }) => {
-    await page.click('[aria-label="Play"]')
+    await playBtn(page).click()
     await page.locator('[data-index="3"]').click()
     await page.evaluate(() => (window as any).__mockNodes[0]?.fireEnded())
-    await expect(page.locator('[data-index="3"][data-highlighted="true"]')).toBeVisible()
-    await expect(page.locator('[data-index="0"][data-highlighted="true"]')).not.toBeVisible({ timeout: 500 })
+    await expect(sentenceOverlay(page, 3, 'true')).toBeVisible()
+    await expect(sentenceOverlay(page, 0, 'true')).not.toBeVisible({ timeout: 300 })
   })
 
   test('rapid sentence_starts: advances to latest', async ({ page }) => {
-    await page.click('[aria-label="Play"]')
-    await driver.sendSentenceStart(0, SID.first); await driver.sendAudioChunk(Buffer.alloc(128))
-    await driver.sendSentenceStart(1, SID.first); await driver.sendAudioChunk(Buffer.alloc(128))
-    await driver.sendSentenceStart(2, SID.first); await driver.sendAudioChunk(Buffer.alloc(128))
+    await playBtn(page).click()
+    await driver.sendSentenceStart(0, SID.first)
+    await driver.sendAudioChunk(MOCK_AUDIO_CHUNK_SMALL)
+    await driver.sendSentenceStart(1, SID.first)
+    await driver.sendAudioChunk(MOCK_AUDIO_CHUNK_SMALL)
+    await driver.sendSentenceStart(2, SID.first)
+    await driver.sendAudioChunk(MOCK_AUDIO_CHUNK_SMALL)
     await page.clock.runFor(TICK.sentence * 3)
-    await expect(page.locator('[data-index="2"][data-highlighted="true"]')).toBeVisible()
-    await expect(page.locator('[data-index="0"][data-highlighted="false"]')).toBeVisible()
+    await expect(sentenceOverlay(page, 2, 'true')).toBeVisible()
+    await expect(sentenceOverlay(page, 0, 'false')).toBeVisible()
   })
 
   test('speed change sends correct speed in play action', async ({ page }) => {
-    await page.click('[aria-label="Play"]')
-    await page.click('button[aria-pressed="false"]:has-text("1.5x")')
-    await page.clock.runFor(200)  // fire the 200ms speed-change debounce timer
+    await playBtn(page).click()
+    await speedGroup(page).getByRole('button', { name: '1.5x' }).click()
+    await page.clock.runFor(200)
     const speedAction = driver.actionsOf('play').at(-1)
     expect(speedAction?.['speed']).toBe(1.5)
   })
@@ -134,27 +143,27 @@ test.describe('Highlight–Audio Sync', () => {
         decodeAudioData() { return Promise.reject(new Error('corrupt')) }
       }
     })
-    await page.click('[aria-label="Play"]')
+    await playBtn(page).click()
     await driver.sendSentenceStart(IDX.second, SID.first)
-    await driver.sendAudioChunk(Buffer.alloc(1024))
+    await driver.sendAudioChunk(MOCK_AUDIO_CHUNK)
     await page.clock.runFor(TICK.sentence)
-    await expect(page.locator('[data-index="1"][data-highlighted="true"]')).not.toBeVisible({ timeout: 500 })
+    await expect(sentenceOverlay(page, 1, 'true')).not.toBeVisible({ timeout: 300 })
   })
 
-  test('WS disconnect freezes highlight', async ({ page }) => {
-    await page.click('[aria-label="Play"]')
+  test('data stream stall freezes highlight', async ({ page }) => {
+    await playBtn(page).click()
     await driver.sendSentenceStart(IDX.second, SID.first)
-    await driver.sendAudioChunk(Buffer.alloc(1024))
+    await driver.sendAudioChunk(MOCK_AUDIO_CHUNK)
     await page.clock.runFor(TICK.sentence)
-    await expect(page.locator('[data-index="1"][data-highlighted="true"]')).toBeVisible()
+    await expect(sentenceOverlay(page, 1, 'true')).toBeVisible()
     await page.clock.runFor(500)
-    await expect(page.locator('[data-index="1"][data-highlighted="true"]')).toBeVisible()
+    await expect(sentenceOverlay(page, 1, 'true')).toBeVisible()
   })
 
   test('highlighted overlay is within viewport bounds', async ({ page }) => {
-    await page.click('[aria-label="Play"]')
+    await playBtn(page).click()
     await driver.sendSentenceStart(IDX.second, SID.first)
-    await driver.sendAudioChunk(Buffer.alloc(1024))
+    await driver.sendAudioChunk(MOCK_AUDIO_CHUNK)
     await page.clock.runFor(TICK.sentence)
     const el = page.locator('[data-highlighted="true"]').first()
     const box = await el.boundingBox()
@@ -164,15 +173,41 @@ test.describe('Highlight–Audio Sync', () => {
   })
 
   test('cross-page: highlight follows to page 2', async ({ page }) => {
-    await page.click('[aria-label="Play"]')
+    await playBtn(page).click()
     for (let i = 0; i <= 2; i++) {
       await driver.sendSentenceStart(i, SID.first)
-      await driver.sendAudioChunk(Buffer.alloc(128))
+      await driver.sendAudioChunk(MOCK_AUDIO_CHUNK_SMALL)
       await page.clock.runFor(TICK.sentence)
     }
     await driver.sendSentenceStart(3, SID.first)
-    await driver.sendAudioChunk(Buffer.alloc(1024))
+    await driver.sendAudioChunk(MOCK_AUDIO_CHUNK)
     await page.clock.runFor(TICK.sentence)
-    await expect(page.locator('[data-index="3"][data-highlighted="true"]')).toBeVisible()
+    await expect(sentenceOverlay(page, 3, 'true')).toBeVisible()
+  })
+
+  test('rapid play-pause-play resets state cleanly', async ({ page }) => {
+    await playBtn(page).click()
+    await driver.sendSentenceStart(0, SID.first)
+    await driver.sendAudioChunk(MOCK_AUDIO_CHUNK)
+    await page.clock.runFor(TICK.sentence)
+    await pauseBtn(page).click()
+    await playBtn(page).click()
+    await driver.sendSentenceStart(0, SID.first)
+    await driver.sendAudioChunk(MOCK_AUDIO_CHUNK)
+    await page.clock.runFor(TICK.sentence)
+    await expect(sentenceOverlay(page, 0, 'true')).toBeVisible()
+    await expect(pauseBtn(page)).toBeVisible()
+  })
+
+  test('speed change debounce prevents double play action', async ({ page }) => {
+    await playBtn(page).click()
+    const afterInitialPlay = driver.actionsOf('play').length
+    await speedGroup(page).getByRole('button', { name: '1.5x' }).click()
+    await page.clock.runFor(50)
+    await speedGroup(page).getByRole('button', { name: '2x' }).click()
+    await page.clock.runFor(200)
+    const newPlayActions = driver.actionsOf('play').slice(afterInitialPlay)
+    expect(newPlayActions.length).toBe(1)
+    expect(newPlayActions[0]?.['speed']).toBe(2.0)
   })
 })
