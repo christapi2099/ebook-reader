@@ -94,12 +94,19 @@ function createAudioStore() {
         const words = wordTimings.get(latestReady)
         if (sentenceStart !== undefined && words && words.length > 0) {
           const elapsed = now - sentenceStart
-          // Find the last word where start <= elapsed (word spans from start to end)
+          // Find as last word where start <= elapsed (word spans from start to end)
           for (let i = words.length - 1; i >= 0; i--) {
             if (elapsed >= words[i].start) {
               newWordIndex = i
               break
             }
+          }
+        }
+        // Clean up old sentenceTimings (keep current and future only)
+        for (const [idx] of sentenceTimings) {
+          if (idx < latestReady) sentenceTimings.delete(idx)
+        }
+      }
           }
         }
         // Clean up old entries
@@ -127,7 +134,6 @@ function createAudioStore() {
 
       rafId = requestAnimationFrame(tick)
     }
-    rafId = requestAnimationFrame(tick)
   }
 
   function stopRaf() {
@@ -135,12 +141,13 @@ function createAudioStore() {
   }
 
   function scheduleChunk(bytes: ArrayBuffer, idx: number) {
-    // Capture generation at schedule time. Both the post-decode guard and the
-    // onended callback check that generation hasn't advanced since — without
+    // Capture generation at schedule time. Both post-decode guard and
+    // onended callback check that generation hasn't advanced since -- without
     // this, a seek-backward would see onended callbacks from the STOPPED nodes
     // of the previous session fire and re-advance currentIndex forward past
-    // the seek target (onended runs even when the source is stopped early).
+    // the seek target (onended runs even when source is stopped early).
     const myGen = generation
+  }
     decodeChain = decodeChain.then(async () => {
       if (cancelled || myGen !== generation) return
       const ac = getCtx()
