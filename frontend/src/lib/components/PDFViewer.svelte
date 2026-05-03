@@ -14,6 +14,10 @@
     onPageChange,
     buffering = false,
     pageToScroll = null,
+    searchMatches = [],
+    currentSearchIndex = -1,
+    highlightColor = '#fef08a',
+    autoscroll = true,
   }: {
     bookId: string
     sentences: Sentence[]
@@ -22,7 +26,19 @@
     onPageChange?: (page: number) => void
     buffering?: boolean
     pageToScroll?: number | null
+    searchMatches?: number[]
+    currentSearchIndex?: number
+    highlightColor?: string
+    autoscroll?: boolean
   } = $props()
+
+  function hexToRgba(hex: string, alpha: number): string {
+    const h = hex.replace('#', '')
+    const r = parseInt(h.substring(0, 2), 16)
+    const g = parseInt(h.substring(2, 4), 16)
+    const b = parseInt(h.substring(4, 6), 16)
+    return `rgba(${r},${g},${b},${alpha})`
+  }
 
   let sentenceElements = new Map<number, HTMLDivElement>()
   let scrollEl: HTMLDivElement   // outer scroll container (used for scrollTo)
@@ -153,10 +169,7 @@
       const width  = (s.x1 - s.x0) * effectiveScale + PAD * 2
       const height = (s.y1 - s.y0) * effectiveScale + PAD * 2
       const div = document.createElement('div')
-      div.className = [
-        'absolute cursor-pointer transition-colors',
-        s.index === currentIndex ? 'bg-yellow-200/60' : 'hover:bg-blue-100/40',
-      ].join(' ')
+      div.className = 'absolute cursor-pointer transition-colors hover:bg-blue-100/40'
       div.dataset.highlighted = s.index === currentIndex ? 'true' : 'false'
       div.style.left   = left + 'px'
       div.style.top    = top + 'px'
@@ -167,30 +180,49 @@
       div.onclick = () => onSentenceClick(s.index)
       sentenceElements.set(s.index, div)
       overlay.appendChild(div)
+      if (s.index === currentIndex) {
+        div.style.backgroundColor = hexToRgba(highlightColor, 0.6)
+      }
     }
   }
 
-  // O(1) class toggle — no DOM rebuild on each currentIndex change
+  // O(1) style toggle — no DOM rebuild on each currentIndex change
   $effect(() => {
     const idx = currentIndex
     const prev = sentenceElements.get(prevHighlightIndex)
     if (prev) {
-      prev.classList.remove('bg-yellow-200/60')
+      prev.style.backgroundColor = ''
       prev.setAttribute('data-highlighted', 'false')
-      prev.classList.add('hover:bg-blue-100/40')
     }
     const curr = sentenceElements.get(idx)
     if (curr) {
-      curr.classList.remove('hover:bg-blue-100/40')
-      curr.classList.add('bg-yellow-200/60')
+      curr.style.backgroundColor = hexToRgba(highlightColor, 0.6)
       curr.setAttribute('data-highlighted', 'true')
     }
     prevHighlightIndex = idx
   })
 
+  // Search match highlighting
+  $effect(() => {
+    // Clear all search highlights first
+    for (const [index, el] of sentenceElements) {
+      el.style.outline = ''
+      el.style.outlineOffset = ''
+    }
+    for (let i = 0; i < searchMatches.length; i++) {
+      const sIndex = searchMatches[i]
+      const el = sentenceElements.get(sIndex)
+      if (!el) continue
+      const isCurrentSearch = i === currentSearchIndex
+      el.style.outline = isCurrentSearch ? '3px solid #3b82f6' : '2px solid #86efac'
+      el.style.outlineOffset = '-1px'
+    }
+  })
+
   // Auto-scroll to keep current sentence in view (debounced)
   $effect(() => {
     const idx = currentIndex
+    if (!autoscroll) return
     if (scrollDebounce) clearTimeout(scrollDebounce)
     scrollDebounce = setTimeout(() => {
       const s = sentences.find(s => s.index === idx)
