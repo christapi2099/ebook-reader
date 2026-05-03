@@ -6,9 +6,11 @@ RUN apt-get update && apt-get install -y \
     libgl1 libglib2.0-0 libsm6 libxext6 libxrender-dev \
     && rm -rf /var/lib/apt/lists/*
 
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
+
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir --user --break-system-packages -r requirements.txt && \
+RUN pip install --no-cache-dir --user -r requirements.txt && \
     python3 -m spacy download en_core_web_sm
 
 # Production stage: CUDA 12.4 runtime for GPU acceleration
@@ -23,7 +25,9 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-RUN useradd -m -u 1000 -s /bin/bash appuser && \
+RUN usermod -l appuser ubuntu && \
+    usermod -d /home/appuser -m appuser && \
+    groupmod -n appuser ubuntu && \
     mkdir -p /app/uploads /data && \
     chown -R appuser:appuser /app /data
 
