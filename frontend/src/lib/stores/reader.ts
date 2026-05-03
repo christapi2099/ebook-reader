@@ -1,5 +1,6 @@
 import { writable } from 'svelte/store'
 import type { Writable } from 'svelte/store'
+import { getSentences, getProgress, saveProgress } from '$lib/api'
 
 export interface Sentence {
   index: number
@@ -37,15 +38,13 @@ const readerStore: Writable<ReaderState> = writable({
 })
 
 export const loadBook = async (bookId: string): Promise<void> => {
-  const sentencesRes = await fetch(`http://localhost:8000/documents/${bookId}/sentences`)
-  if (!sentencesRes.ok) throw new Error(`Failed to fetch sentences: ${sentencesRes.statusText}`)
-  const sentences: Sentence[] = await sentencesRes.json()
+  const sentences: Sentence[] = await getSentences(bookId)
 
-  const progressRes = await fetch(`http://localhost:8000/library/${bookId}/progress`)
   let currentIndex = 0
-  if (progressRes.ok) {
-    const progress = await progressRes.json()
-    currentIndex = progress.sentence_index ?? 0
+  try {
+    currentIndex = await getProgress(bookId)
+  } catch {
+    // No progress saved yet — start from 0
   }
 
   readerStore.update(s => ({ ...s, bookId, sentences, currentIndex }))
@@ -59,11 +58,7 @@ export const seek = async (index: number): Promise<void> => {
     return { ...s, currentIndex: clamped }
   })
   if (bookId) {
-    await fetch(`http://localhost:8000/library/${bookId}/progress`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sentence_index: index }),
-    }).catch(() => {})
+    await saveProgress(bookId, index).catch(() => {})
   }
 }
 

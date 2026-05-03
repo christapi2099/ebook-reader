@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { uploadDocument } from '$lib/api'
+
   let { open, onClose, onUploaded }: {
     open: boolean
     onClose: () => void
@@ -19,15 +21,8 @@
     if (!file || loading) return
     loading = true
     errorMsg = ''
-    const formData = new FormData()
-    formData.append('file', file)
     try {
-      const res = await fetch('http://localhost:8000/documents/upload', {
-        method: 'POST',
-        body: formData,
-      })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const data = await res.json()
+      const data = await uploadDocument(file)
       onUploaded(data.book_id, file.name)
       onClose()
       file = null

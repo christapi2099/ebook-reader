@@ -7,7 +7,10 @@ export const MOCK_SENTENCES = [
   { index: 5, text: 'Sentence 5.', page: 1, x0: 50, y0: 110, x1: 400, y1: 130, filtered: false },
 ]
 
-// Generates a minimal valid 2-page PDF that PDF.js can parse and render.
+// Minimal binary chunks used by WsDriver.sendAudioChunk — the method only
+// reads .length, not the actual bytes, so these serve as convenient size tags.
+export const MOCK_AUDIO_CHUNK = Buffer.alloc(1024)
+export const MOCK_AUDIO_CHUNK_SMALL = Buffer.alloc(128)
 export function makeMinimalPdf(): Buffer {
   const lines: string[] = ['%PDF-1.4']
   const offsets: number[] = []
