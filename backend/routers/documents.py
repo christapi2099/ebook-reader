@@ -1,4 +1,5 @@
 import hashlib
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -48,6 +49,7 @@ async def upload_document(
                 book_id=book_id, index=s.index, text=s.text,
                 page=s.page, x0=s.x0, y0=s.y0, x1=s.x1, y1=s.y1,
                 filtered=tf.should_filter(s.text),
+                words=json.dumps(s.words),
             )
             for s in raw
         ]
@@ -91,7 +93,8 @@ def get_sentences(book_id: str, session: Session = Depends(get_session)):
     ).all()
     return [
         {"index": s.index, "text": s.text, "page": s.page,
-         "x0": s.x0, "y0": s.y0, "x1": s.x1, "y1": s.y1, "filtered": s.filtered}
+         "x0": s.x0, "y0": s.y0, "x1": s.x1, "y1": s.y1, "filtered": s.filtered,
+         "words": json.loads(s.words) if s.words else []}
         for s in rows
     ]
 

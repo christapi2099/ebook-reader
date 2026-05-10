@@ -6,6 +6,17 @@ import os
 from services.base_engine import BaseEngine, SentenceRecord as BaseSentenceRecord
 
 
+def sentence_bbox(sent_words, block_bbox):
+    if not sent_words:
+        return block_bbox
+    return (
+        min(w[0] for w in sent_words),
+        min(w[1] for w in sent_words),
+        max(w[2] for w in sent_words),
+        max(w[3] for w in sent_words),
+    )
+
+
 class PDFEngine(BaseEngine):
     def __init__(self):
         super().__init__()  # Initialize spaCy via BaseEngine
@@ -77,14 +88,7 @@ class PDFEngine(BaseEngine):
                     if len(sent_words) == 0:
                         continue
 
-                    # Use full block bbox as fallback for short/title sentences
-                    if len(sent_words) < 2:
-                        x0_min, y0_min, x1_max, y1_max = block_x0, block_y0, block_x1, block_y1
-                    else:
-                        x0_min = min(w[0] for w in sent_words)
-                        y0_min = min(w[1] for w in sent_words)
-                        x1_max = max(w[2] for w in sent_words)
-                        y1_max = max(w[3] for w in sent_words)
+                    x0_min, y0_min, x1_max, y1_max = sentence_bbox(sent_words, (block_x0, block_y0, block_x1, block_y1))
 
                     all_sentences.append(BaseSentenceRecord(
                         index=global_index,
@@ -94,6 +98,7 @@ class PDFEngine(BaseEngine):
                         y0=y0_min,
                         x1=x1_max,
                         y1=y1_max,
+                        words=[{'x0': float(w[0]), 'y0': float(w[1]), 'x1': float(w[2]), 'y1': float(w[3])} for w in sent_words],
                     ))
                     global_index += 1
         doc.close()

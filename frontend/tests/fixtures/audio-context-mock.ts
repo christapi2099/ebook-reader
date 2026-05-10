@@ -23,7 +23,7 @@ export const AUDIO_CONTEXT_MOCK = `;(function () {
   })
   MockAudioContext.prototype.createBufferSource = function () { return new MockNode() }
   MockAudioContext.prototype.decodeAudioData = function () {
-    return Promise.resolve({ duration: 3.25 })
+    return Promise.resolve({ duration: 0.1 })
   }
   MockAudioContext.prototype.resume = function () { return Promise.resolve() }
   MockAudioContext.prototype.close = function () { return Promise.resolve() }

@@ -1,3 +1,10 @@
+export interface WordBbox {
+  x0: number
+  y0: number
+  x1: number
+  y1: number
+}
+
 export interface Sentence {
   index: number
   text: string
@@ -7,6 +14,7 @@ export interface Sentence {
   x1: number
   y1: number
   filtered: boolean
+  words?: WordBbox[]
 }
 
 export interface Book {

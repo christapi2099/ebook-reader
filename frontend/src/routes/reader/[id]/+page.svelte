@@ -233,6 +233,7 @@ function handleBackToLibrary() {
           {bookId}
           sentences={reader.sentences}
           currentIndex={audio.currentIndex}
+          currentWordIndex={audio.currentWordIndex}
           buffering={audio.buffering || seeking}
           pageToScroll={pageToScroll}
           searchMatches={searchMatches}

@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte'
   import * as pdfjsLib from 'pdfjs-dist'
   import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
-  import type { Sentence } from '$lib/api'
+  import type { Sentence, WordBbox } from '$lib/api'
 
   pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl
 
@@ -18,10 +18,12 @@
     currentSearchIndex = -1,
     highlightColor = '#fef08a',
     autoscroll = true,
+    currentWordIndex = -1,
   }: {
     bookId: string
     sentences: Sentence[]
     currentIndex: number
+    currentWordIndex: number
     onSentenceClick: (index: number) => void
     onPageChange?: (page: number) => void
     buffering?: boolean
@@ -41,6 +43,9 @@
   }
 
   let sentenceElements = new Map<number, HTMLDivElement>()
+  let searchMatchSet = new Set<number>()
+  let wordElements = new Map<string, HTMLDivElement>()
+  let prevWordKey = ''
   let scrollEl: HTMLDivElement   // outer scroll container (used for scrollTo)
   let pagesEl: HTMLDivElement    // inner pages container (pages appended here)
   let pdfDoc: any = null
@@ -56,6 +61,9 @@
   const MAX_WIDTH_PX = 900 // Max width for pages on ultrawide screens
   const BASE_SCALE = 1.5   // Original scale for A4 portrait
   const SCALE_CHANGE_THRESHOLD = 0.05 // Re-render if scale changes by this much
+  const WORD_HIGHLIGHT_ALPHA = 0.85
+  const SEARCH_CURRENT_COLOR = 'rgba(59,130,246,0.35)'
+  const SEARCH_MATCH_COLOR = 'rgba(134,239,172,0.4)'
 
   let containerWidth = $state(0)
   let effectiveScale = $state(BASE_SCALE)
@@ -98,6 +106,7 @@
     pagesEl.innerHTML = ''
     renderedPages.clear()
     sentenceElements.clear()
+    wordElements.clear()
     intersectionObserver?.disconnect()
   }
 
@@ -155,6 +164,37 @@
     intersectionObserver?.observe(wrapper)
   }
 
+  function wordKey(sentenceIndex: number, wordIndex: number): string {
+    return `${sentenceIndex}:${wordIndex}`
+  }
+
+  function createWordDiv(word: WordBbox, scale: number, wordIndex: number, sentenceIndex: number): HTMLDivElement {
+    const div = document.createElement('div')
+    div.className = 'absolute pointer-events-none'
+    div.style.left = (word.x0 * scale) + 'px'
+    div.style.top = (word.y0 * scale) + 'px'
+    div.style.width = ((word.x1 - word.x0) * scale) + 'px'
+    div.style.height = ((word.y1 - word.y0) * scale) + 'px'
+    div.dataset.wordIndex = String(wordIndex)
+    div.dataset.sentenceIndex = String(sentenceIndex)
+    return div
+  }
+
+  function diffSets(prev: Set<number>, next: Set<number>): { added: number[]; removed: number[] } {
+    return {
+      added:   next.size  ? [...next].filter(i => !prev.has(i))  : [],
+      removed: prev.size  ? [...prev].filter(i => !next.has(i))  : [],
+    }
+  }
+
+  function applySearchHighlight(el: HTMLDivElement, isCurrent: boolean): void {
+    el.style.backgroundColor = isCurrent ? SEARCH_CURRENT_COLOR : SEARCH_MATCH_COLOR
+  }
+
+  function clearSearchHighlight(el: HTMLDivElement): void {
+    el.style.backgroundColor = ''
+  }
+
   function drawHighlights(page: number) {
     if (!renderedPages.has(page)) return
     const overlay = pagesEl?.querySelector(`[data-overlay="${page}"]`) as HTMLElement
@@ -183,6 +223,13 @@
       if (s.index === currentIndex) {
         div.style.backgroundColor = hexToRgba(highlightColor, 0.6)
       }
+      if (s.words) {
+        for (let wi = 0; wi < s.words.length; wi++) {
+          const wd = createWordDiv(s.words[wi], effectiveScale, wi, s.index)
+          wordElements.set(wordKey(s.index, wi), wd)
+          overlay.appendChild(wd)
+        }
+      }
     }
   }
 
@@ -202,21 +249,40 @@
     prevHighlightIndex = idx
   })
 
+  $effect(() => {
+    const newKey = currentWordIndex >= 0 ? wordKey(currentIndex, currentWordIndex) : ''
+    const prev = wordElements.get(prevWordKey)
+    if (prev) prev.style.backgroundColor = ''
+    const curr = wordElements.get(newKey)
+    if (curr) curr.style.backgroundColor = hexToRgba(highlightColor, WORD_HIGHLIGHT_ALPHA)
+    prevWordKey = newKey
+  })
+
   // Search match highlighting
   $effect(() => {
-    // Clear all search highlights first
-    for (const [index, el] of sentenceElements) {
-      el.style.outline = ''
-      el.style.outlineOffset = ''
+    void currentIndex
+    const nextSet = new Set(searchMatches)
+    const { added, removed } = diffSets(searchMatchSet, nextSet)
+    for (const i of removed) {
+      const el = sentenceElements.get(i)
+      if (el) clearSearchHighlight(el)
     }
-    for (let i = 0; i < searchMatches.length; i++) {
-      const sIndex = searchMatches[i]
-      const el = sentenceElements.get(sIndex)
+    for (const i of added) {
+      const el = sentenceElements.get(i)
       if (!el) continue
-      const isCurrentSearch = i === currentSearchIndex
-      el.style.outline = isCurrentSearch ? '3px solid #3b82f6' : '2px solid #86efac'
-      el.style.outlineOffset = '-1px'
+      if (el.getAttribute('data-highlighted') === 'true') continue
+      applySearchHighlight(el, searchMatches.indexOf(i) === currentSearchIndex)
     }
+    // Update current search highlight when currentSearchIndex changes
+    if (searchMatches.length > 0) {
+      const prevCurrentEl = searchMatches[currentSearchIndex - 1] !== undefined
+        ? sentenceElements.get(searchMatches[currentSearchIndex - 1])
+        : undefined
+      if (prevCurrentEl) applySearchHighlight(prevCurrentEl, false)
+      const currEl = sentenceElements.get(searchMatches[currentSearchIndex])
+      if (currEl && currEl.getAttribute('data-highlighted') !== 'true') applySearchHighlight(currEl, true)
+    }
+    searchMatchSet = nextSet
   })
 
   // Auto-scroll to keep current sentence in view (debounced)

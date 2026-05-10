@@ -81,6 +81,7 @@
         class="p-1 rounded hover:bg-slate-100 text-slate-500 disabled:opacity-30 transition-colors"
         disabled={matches.length <= 1}
         onclick={goPrev}
+        aria-label="Previous match"
       >
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
@@ -90,6 +91,7 @@
         class="p-1 rounded hover:bg-slate-100 text-slate-500 disabled:opacity-30 transition-colors"
         disabled={matches.length <= 1}
         onclick={goNext}
+        aria-label="Next match"
       >
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />

@@ -106,14 +106,6 @@ function createAudioStore() {
         for (const [idx] of sentenceTimings) {
           if (idx < latestReady) sentenceTimings.delete(idx)
         }
-      }
-          }
-        }
-        // Clean up old entries
-        for (const [idx] of sentenceTimings) {
-          if (idx <= latestReady) sentenceTimings.delete(idx)
-        }
-        // Clean wordTimings for sentences before current
         for (const [idx] of wordTimings) {
           if (idx < latestReady) wordTimings.delete(idx)
         }
@@ -134,6 +126,7 @@ function createAudioStore() {
 
       rafId = requestAnimationFrame(tick)
     }
+    rafId = requestAnimationFrame(tick)
   }
 
   function stopRaf() {
@@ -147,7 +140,6 @@ function createAudioStore() {
     // of the previous session fire and re-advance currentIndex forward past
     // the seek target (onended runs even when source is stopped early).
     const myGen = generation
-  }
     decodeChain = decodeChain.then(async () => {
       if (cancelled || myGen !== generation) return
       const ac = getCtx()
@@ -255,7 +247,7 @@ function createAudioStore() {
         receivingSentenceIndex = index
       }
 
-      socket.onSentenceEnd = (_index: number, _durationMs: number, _sid: number, wordTimestamps?: WordTimestamp[]) => {
+      socket.onSentenceEnd = (_index: number, _durationMs: number, sid: number, wordTimestamps?: WordTimestamp[]) => {
         if (sid !== sessionId) return
         if (wordTimestamps) {
           wordTimings.set(_index, wordTimestamps)
@@ -285,7 +277,7 @@ function createAudioStore() {
       stopAll()
       // Clear buffering too — otherwise the spinner can stay up forever if we
       // paused mid-buffer.
-      update(s => ({ ...s, isPlaying: false, buffering: false }))
+      update(s => ({ ...s, isPlaying: false, buffering: false, currentWordIndex: -1 }))
     },
 
     resume() {
@@ -328,7 +320,7 @@ function createAudioStore() {
       socket = null
       ctx?.close()
       ctx = null
-      set({ isPlaying: false, speed: 1.0, currentIndex: 0, voice: 'af_heart', buffering: false })
+      set({ isPlaying: false, speed: 1.0, currentIndex: 0, currentWordIndex: -1, voice: 'af_heart', buffering: false })
     },
   }
 }

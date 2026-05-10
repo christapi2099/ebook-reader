@@ -1,5 +1,5 @@
 """Shared base engine abstraction for sentence extraction."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import spacy
 
 
@@ -13,6 +13,7 @@ class SentenceRecord:
     x1: float = 0.0
     y1: float = 0.0
     filtered: bool = False
+    words: list = field(default_factory=list)
 
 
 class BaseEngine:
