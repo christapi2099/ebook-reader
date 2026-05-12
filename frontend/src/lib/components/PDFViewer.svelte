@@ -3,6 +3,7 @@
   import * as pdfjsLib from 'pdfjs-dist'
   import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
   import type { Sentence, WordBbox } from '$lib/api'
+  import { bionifyTextToSegments } from '$lib/utils/bionic-reading'
 
   pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl
 
@@ -64,15 +65,18 @@
   let intersectionObserver: IntersectionObserver | null = null
   let resizeObserver: ResizeObserver | null = null
 
-  const MAX_WIDTH_PX = 900 // Max width for pages on ultrawide screens
-  const BASE_SCALE = 1.5   // Original scale for A4 portrait
-  const SCALE_CHANGE_THRESHOLD = 0.05 // Re-render if scale changes by this much
+  const MAX_WIDTH_PX = 900
+  const BASE_SCALE = 1.5
+  const SCALE_CHANGE_THRESHOLD = 0.05
   const WORD_HIGHLIGHT_ALPHA = 0.85
   const SEARCH_CURRENT_COLOR = 'rgba(59,130,246,0.35)'
   const SEARCH_MATCH_COLOR = 'rgba(134,239,172,0.4)'
+  const BIONIC_CANVAS_OPACITY = 0.3
 
   let containerWidth = $state(0)
   let effectiveScale = $state(BASE_SCALE)
+
+  const bionicOpts = $derived({ fixationPoint: bionicFixation, boldRatio: bionicBoldRatio })
 
   let sentencesByPage = $derived(
     sentences.reduce((acc, s) => {
@@ -164,8 +168,22 @@
     overlay.className = 'absolute inset-0 pointer-events-auto'
     overlay.dataset.overlay = String(pageNum - 1)
     wrapper.appendChild(overlay)
+
+    const bionicOverlay = document.createElement('div')
+    bionicOverlay.className = 'absolute inset-0 pointer-events-none'
+    bionicOverlay.dataset.bionicOverlay = String(pageNum - 1)
+    bionicOverlay.style.zIndex = '1'
+    bionicOverlay.style.display = bionicMode ? '' : 'none'
+    wrapper.appendChild(bionicOverlay)
+
     pagesEl?.appendChild(wrapper)
     drawHighlights(pageNum - 1)
+    drawBionicText(pageNum - 1)
+
+    if (bionicMode) {
+      canvas.style.opacity = String(BIONIC_CANVAS_OPACITY)
+      canvas.style.transition = 'opacity 0.3s ease'
+    }
 
     intersectionObserver?.observe(wrapper)
   }
@@ -235,6 +253,44 @@
           wordElements.set(wordKey(s.index, wi), wd)
           overlay.appendChild(wd)
         }
+      }
+    }
+  }
+
+  function drawBionicText(page: number) {
+    const bionicOverlay = pagesEl?.querySelector(`[data-bionic-overlay="${page}"]`) as HTMLElement
+    if (!bionicOverlay) return
+    bionicOverlay.innerHTML = ''
+    if (!bionicMode) return
+    const pageSentences = sentencesByPage.get(page) ?? []
+    for (const s of pageSentences) {
+      if (s.filtered) continue
+      const segments = bionifyTextToSegments(s.text, bionicOpts)
+      const fontSize = Math.max(8, (s.y1 - s.y0) * effectiveScale * 0.85)
+      const span = document.createElement('span')
+      span.className = 'absolute'
+      span.style.left = (s.x0 * effectiveScale) + 'px'
+      span.style.top = (s.y0 * effectiveScale) + 'px'
+      span.style.fontSize = fontSize + 'px'
+      span.style.lineHeight = '1'
+      span.style.whiteSpace = 'pre'
+      for (const seg of segments) {
+        const node = document.createElement(seg.bold ? 'strong' : 'span')
+        node.textContent = seg.text
+        span.appendChild(node)
+      }
+      bionicOverlay.appendChild(span)
+    }
+  }
+
+  function updateCanvasOpacity() {
+    for (const [page] of renderedPages) {
+      const wrapper = pagesEl?.querySelector(`[data-page="${page}"]`) as HTMLElement
+      if (!wrapper) continue
+      const canvas = wrapper.querySelector('canvas') as HTMLElement
+      if (canvas) {
+        canvas.style.opacity = bionicMode ? String(BIONIC_CANVAS_OPACITY) : '1'
+        canvas.style.transition = 'opacity 0.3s ease'
       }
     }
   }
@@ -312,6 +368,21 @@
     if (p == null) return
     const wrapper = pagesEl?.querySelector(`[data-page="${p}"]`) as HTMLElement
     if (wrapper) scrollEl?.scrollTo({ top: wrapper.offsetTop, behavior: 'smooth' })
+  })
+
+  // Re-render bionic text and toggle canvas opacity when bionic settings change
+  $effect(() => {
+    void bionicMode
+    void bionicFixation
+    void bionicBoldRatio
+    for (const [page] of renderedPages) {
+      const overlay = pagesEl?.querySelector(`[data-bionic-overlay="${page}"]`) as HTMLElement
+      if (overlay) {
+        overlay.style.display = bionicMode ? '' : 'none'
+        if (bionicMode) drawBionicText(page)
+      }
+    }
+    updateCanvasOpacity()
   })
 
   function setupIntersectionObserver() {
