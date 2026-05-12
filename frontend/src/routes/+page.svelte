@@ -8,6 +8,7 @@
   import AudioProgressBar from '$lib/components/AudioProgressBar.svelte'
   import TextViewer from '$lib/components/TextViewer.svelte'
   import UploadDialog from '$lib/components/UploadDialog.svelte'
+  import SettingsOverlay from '$lib/components/SettingsOverlay.svelte'
   import { get } from 'svelte/store'
 
   let textarea = $state('')
@@ -20,6 +21,7 @@
   let sentences = $state<Sentence[]>([])
   let isSaved = $state(false)
   let uploadOpen = $state(false)
+  let settingsOpen = $state(false)
 
   // Subscribe to audio store for playback state
   let audio = $state(get(audioStore))
@@ -213,7 +215,17 @@
               Saved
             </span>
           {/if}
-          <!-- Voice selector would go here -->
+          <button
+            onclick={() => settingsOpen = true}
+            class="p-2 rounded-md hover:bg-slate-100 text-slate-600"
+            aria-label="Settings"
+          >
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <circle cx="12" cy="5" r="1" fill="currentColor" />
+              <circle cx="12" cy="12" r="1" fill="currentColor" />
+              <circle cx="12" cy="19" r="1" fill="currentColor" />
+            </svg>
+          </button>
         </div>
       </div>
 
@@ -251,6 +263,9 @@
         isPlaying={audio.isPlaying}
         highlightColor={settings.highlightColor}
         autoscroll={settings.autoscroll}
+        bionicMode={settings.bionicMode}
+        bionicFixation={settings.bionicFixation}
+        bionicBoldRatio={settings.bionicBoldRatio}
         onSentenceClick={handleSeek}
       />
     {:else}
@@ -267,3 +282,7 @@
   onClose={() => uploadOpen = false}
   onUploaded={handleUploaded}
 />
+
+{#if settingsOpen}
+  <SettingsOverlay onClose={() => settingsOpen = false} />
+{/if}

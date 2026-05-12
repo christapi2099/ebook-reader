@@ -64,6 +64,7 @@
   let prevHighlightIndex = -1
   let intersectionObserver: IntersectionObserver | null = null
   let resizeObserver: ResizeObserver | null = null
+  let bionicDebounce: ReturnType<typeof setTimeout> | null = null
 
   const MAX_WIDTH_PX = 900
   const BASE_SCALE = 1.5
@@ -376,14 +377,23 @@
     void bionicMode
     void bionicFixation
     void bionicBoldRatio
+
+    // Always update visibility and canvas opacity immediately (cheap)
     for (const [page] of renderedPages) {
       const overlay = pagesEl?.querySelector(`[data-bionic-overlay="${page}"]`) as HTMLElement
       if (overlay) {
         overlay.style.display = bionicMode ? '' : 'none'
-        if (bionicMode) drawBionicText(page)
       }
     }
     updateCanvasOpacity()
+
+    // Debounce expensive text re-render (slider drags fire ~60 events/sec)
+    if (bionicDebounce) clearTimeout(bionicDebounce)
+    bionicDebounce = bionicMode ? setTimeout(() => {
+      for (const [page] of renderedPages) {
+        drawBionicText(page)
+      }
+    }, 80) : null
   })
 
   function setupIntersectionObserver() {
@@ -432,6 +442,7 @@
     loadPDF()
   })
   onDestroy(() => {
+    if (bionicDebounce) clearTimeout(bionicDebounce)
     pdfDoc?.destroy()
     intersectionObserver?.disconnect()
     resizeObserver?.disconnect()
