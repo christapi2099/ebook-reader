@@ -174,6 +174,7 @@
     bionicOverlay.dataset.bionicOverlay = String(pageNum - 1)
     bionicOverlay.style.zIndex = '1'
     bionicOverlay.style.display = bionicMode ? '' : 'none'
+    bionicOverlay.setAttribute('aria-hidden', 'true')
     wrapper.appendChild(bionicOverlay)
 
     pagesEl?.appendChild(wrapper)
