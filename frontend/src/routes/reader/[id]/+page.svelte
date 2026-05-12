@@ -54,6 +54,7 @@ onMount(async () => {
   }
 
   await loadBook(bookId)
+  settingsStore.loadFromServer().catch(() => {})
   audioStore.init(bookId)
   audioStore.setSpeed(get(readerStore).speed)
   audioStore.setCurrentIndex(get(readerStore).currentIndex)
@@ -224,6 +225,7 @@ function handleBackToLibrary() {
           currentWordIndex={audio.currentWordIndex}
           isPlaying={audio.isPlaying}
           highlightColor={settings.highlightColor}
+          highlightEnabled={settings.highlightEnabled}
           autoscroll={settings.autoscroll}
           bionicMode={settings.bionicMode}
           bionicFixation={settings.bionicFixation}
@@ -242,6 +244,7 @@ function handleBackToLibrary() {
           searchMatches={searchMatches}
           currentSearchIndex={currentSearchIndex}
           highlightColor={settings.highlightColor}
+          highlightEnabled={settings.highlightEnabled}
           autoscroll={settings.autoscroll}
           bionicMode={settings.bionicMode}
           bionicFixation={settings.bionicFixation}

@@ -1,4 +1,5 @@
 import { writable } from 'svelte/store'
+import { getUserSettings, updateUserSettings } from '$lib/api'
 
 const STORAGE_KEY = 'kokoro-settings'
 
@@ -21,6 +22,7 @@ export interface SettingsState {
   bionicMode: boolean
   bionicFixation: number
   bionicBoldRatio: number
+  highlightEnabled: boolean
 }
 
 const DEFAULTS: SettingsState = {
@@ -31,6 +33,7 @@ const DEFAULTS: SettingsState = {
   bionicMode: false,
   bionicFixation: 1,
   bionicBoldRatio: 0.5,
+  highlightEnabled: true,
 }
 
 function isValidColor(c: string): boolean {
@@ -56,6 +59,7 @@ function readFromStorage(): SettingsState {
       bionicBoldRatio: typeof parsed.bionicBoldRatio === 'number' && parsed.bionicBoldRatio >= 0.2 && parsed.bionicBoldRatio <= 0.8
         ? parsed.bionicBoldRatio
         : DEFAULTS.bionicBoldRatio,
+      highlightEnabled: typeof parsed.highlightEnabled === 'boolean' ? parsed.highlightEnabled : DEFAULTS.highlightEnabled,
     }
   } catch {
     return { ...DEFAULTS }
@@ -113,6 +117,21 @@ function createSettingsStore() {
       if (!Number.isFinite(value)) return
       const clamped = Math.max(0.2, Math.min(0.8, Math.round(value * 20) / 20))
       update(s => ({ ...s, bionicBoldRatio: clamped }))
+    },
+
+    toggleHighlight() {
+      let next = true
+      update(s => { next = !s.highlightEnabled; return { ...s, highlightEnabled: next } })
+      updateUserSettings({ highlight_enabled: next }).catch(() => {})
+    },
+
+    async loadFromServer() {
+      try {
+        const serverSettings = await getUserSettings()
+        update(s => ({ ...s, highlightEnabled: serverSettings.highlight_enabled }))
+      } catch {
+        // Server unavailable — keep local value
+      }
     },
 
     reset() {

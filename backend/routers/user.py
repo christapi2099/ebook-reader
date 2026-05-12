@@ -16,6 +16,7 @@ class UserSettingsUpdate(BaseModel):
     """Schema for updating user settings."""
     last_book_id: Optional[str] = None
     last_sentence_index: Optional[int] = None
+    highlight_enabled: Optional[bool] = None
 
 
 @router.get("/settings")
@@ -29,11 +30,12 @@ def get_user_settings(session: Session = Depends(get_session)):
     
     if not settings:
         # Return default settings if none exist
-        return {"last_book_id": None, "last_sentence_index": 0}
+        return {"last_book_id": None, "last_sentence_index": 0, "highlight_enabled": True}
     
     return {
         "last_book_id": settings.last_book_id,
-        "last_sentence_index": settings.last_sentence_index
+        "last_sentence_index": settings.last_sentence_index,
+        "highlight_enabled": settings.highlight_enabled,
     }
 
 
@@ -55,12 +57,15 @@ def update_user_settings(
             existing_settings.last_book_id = settings.last_book_id
         if settings.last_sentence_index is not None or "last_sentence_index" in settings.model_fields_set:
             existing_settings.last_sentence_index = settings.last_sentence_index or 0
+        if settings.highlight_enabled is not None:
+            existing_settings.highlight_enabled = settings.highlight_enabled
     else:
         # Create new settings
         existing_settings = UserSettings(
             id=1,
             last_book_id=settings.last_book_id,
-            last_sentence_index=settings.last_sentence_index or 0
+            last_sentence_index=settings.last_sentence_index or 0,
+            highlight_enabled=settings.highlight_enabled if settings.highlight_enabled is not None else True,
         )
         session.add(existing_settings)
     

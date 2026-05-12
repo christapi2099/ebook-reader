@@ -21,9 +21,19 @@ def create_engine_and_tables(db_url: str | None = None) -> object:
 def _migrate(engine):
     """Add columns that create_all() can't (existing tables)."""
     with engine.connect() as conn:
-        cols = {row[1] for row in conn.execute(text("PRAGMA table_info(audiocache)"))}
-        if 'word_timestamps' not in cols:
+        ac_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(audiocache)"))}
+        if 'word_timestamps' not in ac_cols:
             conn.execute(text("ALTER TABLE audiocache ADD COLUMN word_timestamps TEXT"))
+            conn.commit()
+
+        sent_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(sentence)"))}
+        if 'words' not in sent_cols:
+            conn.execute(text("ALTER TABLE sentence ADD COLUMN words TEXT"))
+            conn.commit()
+
+        us_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(usersettings)"))}
+        if 'highlight_enabled' not in us_cols:
+            conn.execute(text("ALTER TABLE usersettings ADD COLUMN highlight_enabled INTEGER DEFAULT 1"))
             conn.commit()
 
 

@@ -7,6 +7,7 @@
     currentWordIndex = -1,
     isPlaying = false,
     highlightColor = '#fef08a',
+    highlightEnabled = true,
     autoscroll = true,
     bionicMode = false,
     bionicFixation = 1,
@@ -18,6 +19,7 @@
     currentWordIndex?: number
     isPlaying?: boolean
     highlightColor?: string
+    highlightEnabled?: boolean
     autoscroll?: boolean
     bionicMode?: boolean
     bionicFixation?: number
@@ -73,7 +75,7 @@
       class="cursor-pointer rounded-lg p-2 transition-colors"
       data-sentence-index={sentence.index}
       data-highlighted={sentence.index === currentIndex}
-      style={sentence.index === currentIndex ? `background-color: ${highlightColor}` : ''}
+      style={sentence.index === currentIndex && highlightEnabled ? `background-color: ${highlightColor}` : ''}
       onclick={() => handleSentenceClick(sentence.index)}
       role="listitem"
       aria-current={sentence.index === currentIndex ? 'true' : 'false'}

@@ -3,7 +3,7 @@
   import * as pdfjsLib from 'pdfjs-dist'
   import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
   import type { Sentence, WordBbox } from '$lib/api'
-  import { bionifyTextToSegments } from '$lib/utils/bionic-reading'
+  import { bionifyTextToSegments, bionifyWord } from '$lib/utils/bionic-reading'
 
   pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl
 
@@ -18,6 +18,7 @@
     searchMatches = [],
     currentSearchIndex = -1,
     highlightColor = '#fef08a',
+    highlightEnabled = true,
     autoscroll = true,
     currentWordIndex = -1,
     bionicMode = false,
@@ -35,6 +36,7 @@
     searchMatches?: number[]
     currentSearchIndex?: number
     highlightColor?: string
+    highlightEnabled?: boolean
     autoscroll?: boolean
     bionicMode?: boolean
     bionicFixation?: number
@@ -246,7 +248,7 @@
       div.onclick = () => onSentenceClick(s.index)
       sentenceElements.set(s.index, div)
       overlay.appendChild(div)
-      if (s.index === currentIndex) {
+      if (s.index === currentIndex && highlightEnabled) {
         div.style.backgroundColor = hexToRgba(highlightColor, 0.6)
       }
       if (s.words) {
@@ -266,23 +268,58 @@
     if (!bionicMode) return
     const pageSentences = sentencesByPage.get(page) ?? []
     if (pageSentences.length === 0) return
+
     for (const s of pageSentences) {
       if (s.filtered) continue
-      const segments = bionifyTextToSegments(s.text, bionicOpts)
-      const fontSize = Math.max(8, (s.y1 - s.y0) * effectiveScale * 0.85)
-      const span = document.createElement('span')
-      span.className = 'absolute'
-      span.style.left = (s.x0 * effectiveScale) + 'px'
-      span.style.top = (s.y0 * effectiveScale) + 'px'
-      span.style.fontSize = fontSize + 'px'
-      span.style.lineHeight = '1'
-      span.style.whiteSpace = 'pre'
-      for (const seg of segments) {
-        const node = document.createElement(seg.bold ? 'strong' : 'span')
-        node.textContent = seg.text
-        span.appendChild(node)
+
+      if (s.words && s.words.length > 0) {
+        // Path A: word-level rendering using per-word bounding boxes (accurate positioning)
+        const textWords = s.text.split(/\s+/).filter(w => w.length > 0)
+        const count = Math.min(textWords.length, s.words.length)
+        for (let i = 0; i < count; i++) {
+          const word = s.words[i]
+          const wordText = textWords[i]
+          const fontSize = Math.max(6, (word.y1 - word.y0) * effectiveScale * 0.8)
+          const bw = bionifyWord(wordText, bionicOpts)
+          const span = document.createElement('span')
+          span.className = 'absolute'
+          span.style.left = (word.x0 * effectiveScale) + 'px'
+          span.style.top = (word.y0 * effectiveScale) + 'px'
+          span.style.fontSize = fontSize + 'px'
+          span.style.lineHeight = '1'
+          span.style.whiteSpace = 'nowrap'
+          if (bw.bold) {
+            const boldNode = document.createElement('strong')
+            boldNode.textContent = bw.bold
+            span.appendChild(boldNode)
+          }
+          if (bw.rest) {
+            const restNode = document.createElement('span')
+            restNode.textContent = bw.rest
+            span.appendChild(restNode)
+          }
+          bionicOverlay.appendChild(span)
+        }
+      } else {
+        // Path B: sentence-level fallback (EPUBs, text books, old PDFs without word data)
+        const segments = bionifyTextToSegments(s.text, bionicOpts)
+        const fontSize = Math.min(22, Math.max(8, (s.y1 - s.y0) * effectiveScale * 0.85))
+        const span = document.createElement('span')
+        span.className = 'absolute'
+        span.style.left = (s.x0 * effectiveScale) + 'px'
+        span.style.top = (s.y0 * effectiveScale) + 'px'
+        span.style.fontSize = fontSize + 'px'
+        span.style.lineHeight = '1'
+        span.style.whiteSpace = 'pre'
+        span.style.overflow = 'hidden'
+        span.style.maxWidth = ((s.x1 - s.x0) * effectiveScale) + 'px'
+        for (const seg of segments) {
+          const node = document.createElement(seg.bold ? 'strong' : 'span')
+          node.textContent = seg.text
+          span.appendChild(node)
+        }
+        bionicOverlay.appendChild(span)
       }
-      bionicOverlay.appendChild(span)
     }
   }
 
@@ -308,8 +345,8 @@
     }
     const curr = sentenceElements.get(idx)
     if (curr) {
-      curr.style.backgroundColor = hexToRgba(highlightColor, 0.6)
-      curr.setAttribute('data-highlighted', 'true')
+      curr.style.backgroundColor = highlightEnabled ? hexToRgba(highlightColor, 0.6) : ''
+      curr.setAttribute('data-highlighted', highlightEnabled ? 'true' : 'false')
     }
     prevHighlightIndex = idx
   })
@@ -371,6 +408,14 @@
     if (p == null) return
     const wrapper = pagesEl?.querySelector(`[data-page="${p}"]`) as HTMLElement
     if (wrapper) scrollEl?.scrollTo({ top: wrapper.offsetTop, behavior: 'smooth' })
+  })
+
+  // Redraw highlights when highlightEnabled changes
+  $effect(() => {
+    void highlightEnabled
+    for (const [page] of renderedPages) {
+      drawHighlights(page)
+    }
   })
 
   // Re-render bionic text and toggle canvas opacity when bionic settings change

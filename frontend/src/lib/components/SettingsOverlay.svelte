@@ -32,6 +32,11 @@
     settingsStore.toggleHotkeys()
   }
 
+  function toggleHighlight() {
+    settings.highlightEnabled = !settings.highlightEnabled
+    settingsStore.toggleHighlight()
+  }
+
   function toggleBionicMode() {
     settings.bionicMode = !settings.bionicMode
     settingsStore.toggleBionicMode()
@@ -75,6 +80,23 @@
               role="radio"
             ></button>
           {/each}
+        </div>
+      </div>
+
+      <div>
+        <div class="flex items-center justify-between">
+          <div>
+            <span class="text-sm font-medium text-slate-700">Sentence Highlight</span>
+            <p class="text-xs text-slate-500">Show highlight on current sentence while reading</p>
+          </div>
+          <button
+            role="switch"
+            aria-checked={settings.highlightEnabled}
+            class="relative w-10 h-5 rounded-full transition-colors {settings.highlightEnabled ? 'bg-blue-500' : 'bg-slate-300'}"
+            onclick={toggleHighlight}
+          >
+            <div class="absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform {settings.highlightEnabled ? 'translate-x-5' : ''}"></div>
+          </button>
         </div>
       </div>
 

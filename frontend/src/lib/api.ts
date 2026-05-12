@@ -167,6 +167,7 @@ export async function getProgress(bookId: string): Promise<number> {
 export interface UserSettings {
   last_book_id: string | null
   last_sentence_index: number
+  highlight_enabled: boolean
 }
 
 export interface WordTimestamp {
@@ -182,6 +183,7 @@ export async function getUserSettings(): Promise<UserSettings> {
 export async function updateUserSettings(settings: {
   last_book_id?: string | null
   last_sentence_index?: number
+  highlight_enabled?: boolean
 }): Promise<{ ok: boolean }> {
   return fetchApi('/user/settings', {
     method: 'POST',

@@ -66,3 +66,4 @@ class UserSettings(SQLModel, table=True):
     id: int = Field(primary_key=True, default=1)
     last_book_id: str | None = Field(foreign_key='book.id', nullable=True)
     last_sentence_index: int = 0
+    highlight_enabled: bool = Field(default=True)
