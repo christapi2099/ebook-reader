@@ -22,7 +22,7 @@ const bookId = $page.params.id as string
 
 let reader = $state(get(readerStore))
 let audio = $state(get(audioStore))
-let settings: SettingsState = $state({ ...get(settingsStore) })
+  let settings: SettingsState = $state(get(settingsStore))
 let seeking = $state(false)
 let currentPage = $state(0)
 let pageToScroll = $state<number | null>(null)

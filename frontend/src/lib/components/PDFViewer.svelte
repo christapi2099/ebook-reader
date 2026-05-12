@@ -265,6 +265,7 @@
     bionicOverlay.innerHTML = ''
     if (!bionicMode) return
     const pageSentences = sentencesByPage.get(page) ?? []
+    if (pageSentences.length === 0) return
     for (const s of pageSentences) {
       if (s.filtered) continue
       const segments = bionifyTextToSegments(s.text, bionicOpts)

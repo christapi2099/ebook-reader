@@ -25,14 +25,11 @@
 
   // Subscribe to audio store for playback state
   let audio = $state(get(audioStore))
-  onMount(() => {
-    return audioStore.subscribe(v => audio = v)
-  })
-
-  // Subscribe to settings for voice/color
   let settings = $state(get(settingsStore))
   onMount(() => {
-    return settingsStore.subscribe(v => settings = v)
+    const unsubAudio = audioStore.subscribe(v => audio = v)
+    const unsubSettings = settingsStore.subscribe(v => settings = v)
+    return () => { unsubAudio(); unsubSettings() }
   })
 
   async function handleSubmit() {

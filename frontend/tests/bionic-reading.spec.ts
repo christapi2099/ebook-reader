@@ -1,6 +1,5 @@
-import { test, expect } from '@playwright/test'
+import { test, expect, type Page } from '@playwright/test'
 import { AUDIO_CONTEXT_MOCK } from './fixtures/audio-context-mock'
-import { WsDriver } from './fixtures/ws-driver'
 
 const TEXT_SENTENCES = [
   { index: 0, text: 'The quick brown fox jumps over the lazy dog near the bank.', page: 0, x0: 0, y0: 0, x1: 0, y1: 0, filtered: false },
@@ -9,10 +8,7 @@ const TEXT_SENTENCES = [
 ]
 
 test.describe('Bionic Reading', () => {
-  let driver: WsDriver
-
   test.beforeEach(async ({ page }) => {
-    driver = new WsDriver()
     await page.clock.install()
     await page.addInitScript(AUDIO_CONTEXT_MOCK)
 
@@ -28,19 +24,19 @@ test.describe('Bionic Reading', () => {
     }))
   })
 
-  async function enterReadingMode(page: any, text = 'The quick brown fox jumps over the lazy dog near the bank.') {
+  async function enterReadingMode(page: Page, text = 'The quick brown fox jumps over the lazy dog near the bank.') {
     await page.goto('/')
     await page.getByPlaceholder('Paste or type your text here...').fill(text)
     await page.getByRole('button', { name: 'Read Aloud' }).click()
     await expect(page.locator('[data-sentence-index="0"]')).toBeVisible()
   }
 
-  async function openSettings(page: any) {
+  async function openSettings(page: Page) {
     await page.locator('[aria-label="Settings"]').click()
     await expect(page.getByRole('heading', { name: 'Settings' })).toBeVisible()
   }
 
-  async function toggleBionicOn(page: any) {
+  async function toggleBionicOn(page: Page) {
     await openSettings(page)
     await page.getByRole('switch').nth(2).click()
   }
@@ -268,7 +264,7 @@ test.describe('Bionic Reading', () => {
       { index: 1, text: 'Bionic reading helps you read faster.', page: 0, x0: 50, y0: 140, x1: 350, y1: 160, filtered: false },
     ]
 
-    async function setupPdfBook(page: any) {
+    async function setupPdfBook(page: Page) {
       await page.route('**/library', r => r.fulfill({
         json: [{ id: 'pdf-book-1', title: 'PDF Book', author: 'Test', file_type: 'pdf', page_count: 1 }]
       }), { once: true })

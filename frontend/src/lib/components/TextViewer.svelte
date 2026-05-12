@@ -31,10 +31,20 @@
   const bionicOpts = $derived({ fixationPoint: bionicFixation, boldRatio: bionicBoldRatio })
 
   const currentBionicWords = $derived(
-    currentSentence && currentSentence.text && bionicMode
+    currentSentence && bionicMode
       ? bionifyText(currentSentence.text, bionicOpts)
       : [] as BionicWord[]
   )
+
+  const sentenceBionicSegments = $derived(
+    bionicMode
+      ? new Map(sentences.map(s => [s.index, bionifyTextToSegments(s.text, bionicOpts)]))
+      : null
+  )
+
+  function wordTrackStyle(index: number): string {
+    return index <= currentWordIndex ? 'background-color: rgba(0,0,0,0.1); font-weight: 600;' : ''
+  }
 
   let containerRef: HTMLElement | null = null
 
@@ -73,19 +83,19 @@
           {#each currentBionicWords as bw, i}
             <span
               class="transition-colors duration-100"
-              style={i <= currentWordIndex ? 'background-color: rgba(0,0,0,0.1); font-weight: 600;' : ''}
+              style={wordTrackStyle(i)}
             >{#if bw.bold}<strong>{bw.bold}</strong>{/if}{bw.rest}{#if i < currentBionicWords.length - 1}{' '}{/if}</span>
           {/each}
         {:else}
           {#each words as word, i}
             <span
               class="transition-colors duration-100"
-              style={i <= currentWordIndex ? 'background-color: rgba(0,0,0,0.1); font-weight: 600;' : ''}
+              style={wordTrackStyle(i)}
             >{word}{#if i < words.length - 1}{' '}{/if}</span>
           {/each}
         {/if}
       {:else if bionicMode && !sentence.filtered}
-        {#each bionifyTextToSegments(sentence.text, bionicOpts) as seg}
+        {#each (sentenceBionicSegments?.get(sentence.index) ?? []) as seg}
           {#if seg.bold}<strong>{seg.text}</strong>{:else}{seg.text}{/if}
         {/each}
       {:else}
