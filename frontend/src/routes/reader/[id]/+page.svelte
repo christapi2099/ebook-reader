@@ -185,16 +185,17 @@ function handleBackToLibrary() {
         <PageNavigator currentPage={currentPage} totalPages={totalPages} onGoToPage={handlePageJump} />
       </div>
       <div class="flex justify-center">
-        <MediaBar
-          isPlaying={reader.isPlaying}
-          speed={reader.speed}
-          disabled={seeking}
-          onPlay={handlePlay}
-          onPause={handlePause}
-          onRewind={handleRewind}
-          onForward={handleForward}
-          onSpeedChange={handleSpeedChange}
-        />
+    <MediaBar
+      isPlaying={reader.isPlaying}
+      speed={reader.speed}
+      disabled={seeking}
+      buffering={audio.buffering}
+      onPlay={handlePlay}
+      onPause={handlePause}
+      onRewind={handleRewind}
+      onForward={handleForward}
+      onSpeedChange={handleSpeedChange}
+    />
       </div>
       <div class="flex justify-end">
         <TopToolbar
@@ -210,8 +211,9 @@ function handleBackToLibrary() {
     <AudioProgressBar
       sentences={reader.sentences}
       currentIndex={audio.currentIndex}
-      isPlaying={reader.isPlaying}
+      isPlaying={audio.isPlaying}
       speed={reader.speed}
+      buffering={audio.buffering}
     />
   </div>
 
@@ -226,6 +228,7 @@ function handleBackToLibrary() {
           isPlaying={audio.isPlaying}
           highlightColor={settings.highlightColor}
           highlightEnabled={settings.highlightEnabled}
+          buffering={audio.buffering}
           autoscroll={settings.autoscroll}
           bionicMode={settings.bionicMode}
           bionicFixation={settings.bionicFixation}

@@ -6,11 +6,13 @@
     currentIndex,
     isPlaying,
     speed,
+    buffering = false,
   }: {
     sentences: { index: number; text: string; filtered: boolean }[]
     currentIndex: number
     isPlaying: boolean
     speed: number
+    buffering?: boolean
   } = $props()
 
   // Average English TTS: ~150 wpm at 1x speed
@@ -79,6 +81,10 @@
       class="absolute inset-y-0 left-0 bg-blue-500 rounded-full transition-[width] duration-500"
       style="width: {progress}%"
     ></div>
+    {#if buffering && isPlaying}
+      <!-- Shimmer overlay while buffering -->
+      <div class="absolute inset-y-0 left-0 right-0 w-full h-full bg-gradient-to-r from-transparent via-white/40 to-transparent shimmer-shine"></div>
+    {/if}
   </div>
   <!-- Time display -->
   <div class="flex justify-end">
@@ -87,3 +93,13 @@
     </span>
   </div>
 </div>
+
+<style>
+  @keyframes apb-shimmer {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
+  }
+  .shimmer-shine {
+    animation: apb-shimmer 1.5s ease-in-out infinite;
+  }
+</style>

@@ -1,8 +1,19 @@
 <script lang="ts">
-  let { isPlaying, speed, disabled = false, onPlay, onPause, onRewind, onForward, onSpeedChange }: {
+  let {
+    isPlaying,
+    speed,
+    disabled = false,
+    buffering = false,
+    onPlay,
+    onPause,
+    onRewind,
+    onForward,
+    onSpeedChange,
+  }: {
     isPlaying: boolean
     speed: number
     disabled?: boolean
+    buffering?: boolean
     onPlay: () => void
     onPause: () => void
     onRewind: () => void
@@ -33,7 +44,12 @@
       class="flex items-center justify-center w-12 h-12 rounded-full bg-blue-500 hover:bg-blue-600 text-white shadow-lg transition-colors"
       aria-label={isPlaying ? 'Pause' : 'Play'}
     >
-      {#if isPlaying}
+      {#if isPlaying && buffering}
+        <svg class="w-6 h-6 animate-spin" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"></path>
+        </svg>
+      {:else if isPlaying}
         <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
           <rect x="6" y="4" width="4" height="16" rx="1" />
           <rect x="14" y="4" width="4" height="16" rx="1" />

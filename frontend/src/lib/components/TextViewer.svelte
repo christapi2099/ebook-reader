@@ -8,6 +8,7 @@
     isPlaying = false,
     highlightColor = '#fef08a',
     highlightEnabled = true,
+    buffering = false,
     autoscroll = true,
     bionicMode = false,
     bionicFixation = 1,
@@ -20,6 +21,7 @@
     isPlaying?: boolean
     highlightColor?: string
     highlightEnabled?: boolean
+    buffering?: boolean
     autoscroll?: boolean
     bionicMode?: boolean
     bionicFixation?: number
@@ -73,6 +75,7 @@
   {#each sentences as sentence (sentence.index)}
     <p
       class="cursor-pointer rounded-lg p-2 transition-colors"
+      class:animate-pulse={sentence.index === currentIndex && highlightEnabled && buffering && isPlaying}
       data-sentence-index={sentence.index}
       data-highlighted={sentence.index === currentIndex}
       style={sentence.index === currentIndex && highlightEnabled ? `background-color: ${highlightColor}` : ''}
