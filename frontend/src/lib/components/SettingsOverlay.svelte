@@ -31,6 +31,23 @@
     settings.hotkeysEnabled = !settings.hotkeysEnabled
     settingsStore.toggleHotkeys()
   }
+
+  function toggleBionicMode() {
+    settings.bionicMode = !settings.bionicMode
+    settingsStore.toggleBionicMode()
+  }
+
+  function handleBionicFixation(e: Event) {
+    const val = Number((e.target as HTMLInputElement).value)
+    settings.bionicFixation = val
+    settingsStore.setBionicFixation(val)
+  }
+
+  function handleBionicBoldRatio(e: Event) {
+    const val = Number((e.target as HTMLInputElement).value)
+    settings.bionicBoldRatio = val
+    settingsStore.setBionicBoldRatio(val)
+  }
 </script>
 
   <div class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center" role="button" tabindex="-1" onclick={onClose} onkeydown={(e) => { if (e.key === 'Escape') onClose() }}>
@@ -93,6 +110,65 @@
             <div class="absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform {settings.hotkeysEnabled ? 'translate-x-5' : ''}"></div>
           </button>
         </div>
+      </div>
+
+      <div>
+        <div class="flex items-center justify-between">
+          <div>
+            <span class="text-sm font-medium text-slate-700">Bionic Reading</span>
+            <p class="text-xs text-slate-500">Bold initial letters to guide eye movement</p>
+          </div>
+          <button
+            role="switch"
+            aria-checked={settings.bionicMode}
+            class="relative w-10 h-5 rounded-full transition-colors {settings.bionicMode ? 'bg-blue-500' : 'bg-slate-300'}"
+            onclick={toggleBionicMode}
+          >
+            <div class="absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform {settings.bionicMode ? 'translate-x-5' : ''}"></div>
+          </button>
+        </div>
+        {#if settings.bionicMode}
+          <div class="mt-3 space-y-3 pl-1">
+            <div>
+              <label for="bionic-fixation" class="block text-xs font-medium text-slate-600">
+                Fixation point: {settings.bionicFixation}
+              </label>
+              <input
+                id="bionic-fixation"
+                type="range"
+                min="1"
+                max="5"
+                step="1"
+                value={settings.bionicFixation}
+                oninput={handleBionicFixation}
+                class="w-full mt-1 accent-blue-500"
+              />
+              <div class="flex justify-between text-xs text-slate-400 px-0.5">
+                <span>More bold</span>
+                <span>Less bold</span>
+              </div>
+            </div>
+            <div>
+              <label for="bionic-ratio" class="block text-xs font-medium text-slate-600">
+                Bold strength: {settings.bionicBoldRatio.toFixed(2)}
+              </label>
+              <input
+                id="bionic-ratio"
+                type="range"
+                min="0.2"
+                max="0.8"
+                step="0.05"
+                value={settings.bionicBoldRatio}
+                oninput={handleBionicBoldRatio}
+                class="w-full mt-1 accent-blue-500"
+              />
+              <div class="flex justify-between text-xs text-slate-400 px-0.5">
+                <span>Light</span>
+                <span>Heavy</span>
+              </div>
+            </div>
+          </div>
+        {/if}
       </div>
 
       <div class="bg-slate-50 rounded-lg p-3 text-xs text-slate-500 space-y-1">

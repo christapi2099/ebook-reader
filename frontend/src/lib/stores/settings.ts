@@ -18,6 +18,9 @@ export interface SettingsState {
   highlightColor: string
   autoscroll: boolean
   hotkeysEnabled: boolean
+  bionicMode: boolean
+  bionicFixation: number
+  bionicBoldRatio: number
 }
 
 const DEFAULTS: SettingsState = {
@@ -25,6 +28,9 @@ const DEFAULTS: SettingsState = {
   highlightColor: '#fef08a',
   autoscroll: true,
   hotkeysEnabled: true,
+  bionicMode: false,
+  bionicFixation: 1,
+  bionicBoldRatio: 0.5,
 }
 
 function isValidColor(c: string): boolean {
@@ -41,6 +47,9 @@ function readFromStorage(): SettingsState {
       highlightColor: isValidColor(parsed.highlightColor) ? parsed.highlightColor : DEFAULTS.highlightColor,
       autoscroll: typeof parsed.autoscroll === 'boolean' ? parsed.autoscroll : DEFAULTS.autoscroll,
       hotkeysEnabled: typeof parsed.hotkeysEnabled === 'boolean' ? parsed.hotkeysEnabled : DEFAULTS.hotkeysEnabled,
+      bionicMode: typeof parsed.bionicMode === 'boolean' ? parsed.bionicMode : DEFAULTS.bionicMode,
+      bionicFixation: typeof parsed.bionicFixation === 'number' && parsed.bionicFixation >= 1 && parsed.bionicFixation <= 5 ? parsed.bionicFixation : DEFAULTS.bionicFixation,
+      bionicBoldRatio: typeof parsed.bionicBoldRatio === 'number' && parsed.bionicBoldRatio >= 0.2 && parsed.bionicBoldRatio <= 0.8 ? parsed.bionicBoldRatio : DEFAULTS.bionicBoldRatio,
     }
   } catch {
     return { ...DEFAULTS }
@@ -82,6 +91,20 @@ function createSettingsStore() {
 
     toggleHotkeys() {
       update(s => ({ ...s, hotkeysEnabled: !s.hotkeysEnabled }))
+    },
+
+    toggleBionicMode() {
+      update(s => ({ ...s, bionicMode: !s.bionicMode }))
+    },
+
+    setBionicFixation(value: number) {
+      const clamped = Math.max(1, Math.min(5, Math.round(value)))
+      update(s => ({ ...s, bionicFixation: clamped }))
+    },
+
+    setBionicBoldRatio(value: number) {
+      const clamped = Math.max(0.2, Math.min(0.8, Math.round(value * 20) / 20))
+      update(s => ({ ...s, bionicBoldRatio: clamped }))
     },
 
     reset() {

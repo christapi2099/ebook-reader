@@ -7,12 +7,14 @@ const DEFAULTS: SettingsState = {
   highlightColor: '#fef08a',
   autoscroll: true,
   hotkeysEnabled: true,
+  bionicMode: false,
+  bionicFixation: 1,
+  bionicBoldRatio: 0.5,
 }
 
 describe('settingsStore', () => {
   beforeEach(() => {
     localStorage.clear()
-    // Reinitialize by calling the store's reset
     settingsStore.reset()
   })
 
@@ -67,7 +69,97 @@ describe('settingsStore', () => {
     settingsStore.setHighlightColor('#86efac')
     settingsStore.toggleAutoscroll()
     settingsStore.toggleHotkeys()
+    settingsStore.toggleBionicMode()
+    settingsStore.setBionicFixation(3)
+    settingsStore.setBionicBoldRatio(0.7)
     settingsStore.reset()
     expect(get(settingsStore)).toEqual(DEFAULTS)
+  })
+
+  describe('bionic reading settings', () => {
+    it('has bionicMode defaulting to false', () => {
+      expect(get(settingsStore).bionicMode).toBe(false)
+    })
+
+    it('has bionicFixation defaulting to 1', () => {
+      expect(get(settingsStore).bionicFixation).toBe(1)
+    })
+
+    it('has bionicBoldRatio defaulting to 0.5', () => {
+      expect(get(settingsStore).bionicBoldRatio).toBe(0.5)
+    })
+
+    it('toggleBionicMode flips bionicMode', () => {
+      settingsStore.toggleBionicMode()
+      expect(get(settingsStore).bionicMode).toBe(true)
+      settingsStore.toggleBionicMode()
+      expect(get(settingsStore).bionicMode).toBe(false)
+    })
+
+    it('setBionicFixation clamps to [1, 5]', () => {
+      settingsStore.setBionicFixation(7)
+      expect(get(settingsStore).bionicFixation).toBe(5)
+      settingsStore.setBionicFixation(0)
+      expect(get(settingsStore).bionicFixation).toBe(1)
+    })
+
+    it('setBionicFixation accepts valid values within range', () => {
+      settingsStore.setBionicFixation(3)
+      expect(get(settingsStore).bionicFixation).toBe(3)
+      settingsStore.setBionicFixation(1)
+      expect(get(settingsStore).bionicFixation).toBe(1)
+      settingsStore.setBionicFixation(5)
+      expect(get(settingsStore).bionicFixation).toBe(5)
+    })
+
+    it('setBionicBoldRatio clamps to [0.2, 0.8]', () => {
+      settingsStore.setBionicBoldRatio(0.1)
+      expect(get(settingsStore).bionicBoldRatio).toBe(0.2)
+      settingsStore.setBionicBoldRatio(0.9)
+      expect(get(settingsStore).bionicBoldRatio).toBe(0.8)
+    })
+
+    it('setBionicBoldRatio accepts valid values within range', () => {
+      settingsStore.setBionicBoldRatio(0.35)
+      expect(get(settingsStore).bionicBoldRatio).toBe(0.35)
+      settingsStore.setBionicBoldRatio(0.5)
+      expect(get(settingsStore).bionicBoldRatio).toBe(0.5)
+      settingsStore.setBionicBoldRatio(0.8)
+      expect(get(settingsStore).bionicBoldRatio).toBe(0.8)
+    })
+
+    it('setBionicBoldRatio rounds to nearest 0.05', () => {
+      settingsStore.setBionicBoldRatio(0.53)
+      expect(get(settingsStore).bionicBoldRatio).toBe(0.55)
+      settingsStore.setBionicBoldRatio(0.52)
+      expect(get(settingsStore).bionicBoldRatio).toBe(0.5)
+    })
+
+    it('persists bionic settings to localStorage', () => {
+      settingsStore.toggleBionicMode()
+      settingsStore.setBionicFixation(4)
+      settingsStore.setBionicBoldRatio(0.35)
+      const saved = JSON.parse(localStorage.getItem('kokoro-settings') || '{}')
+      expect(saved.bionicMode).toBe(true)
+      expect(saved.bionicFixation).toBe(4)
+      expect(saved.bionicBoldRatio).toBe(0.35)
+    })
+
+    it('loads bionic settings from localStorage', () => {
+      localStorage.setItem('kokoro-settings', JSON.stringify({ ...DEFAULTS, bionicMode: true, bionicFixation: 3 }))
+      settingsStore.reloadFromStorage()
+      const state = get(settingsStore)
+      expect(state.bionicMode).toBe(true)
+      expect(state.bionicFixation).toBe(3)
+    })
+
+    it('falls back to defaults for corrupted bionic settings', () => {
+      localStorage.setItem('kokoro-settings', JSON.stringify({ bionicMode: 'nope', bionicFixation: 'abc', bionicBoldRatio: 'xyz' }))
+      settingsStore.reloadFromStorage()
+      const state = get(settingsStore)
+      expect(state.bionicMode).toBe(false)
+      expect(state.bionicFixation).toBe(1)
+      expect(state.bionicBoldRatio).toBe(0.5)
+    })
   })
 })
