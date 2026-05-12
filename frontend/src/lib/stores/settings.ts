@@ -47,9 +47,15 @@ function readFromStorage(): SettingsState {
       highlightColor: isValidColor(parsed.highlightColor) ? parsed.highlightColor : DEFAULTS.highlightColor,
       autoscroll: typeof parsed.autoscroll === 'boolean' ? parsed.autoscroll : DEFAULTS.autoscroll,
       hotkeysEnabled: typeof parsed.hotkeysEnabled === 'boolean' ? parsed.hotkeysEnabled : DEFAULTS.hotkeysEnabled,
-      bionicMode: typeof parsed.bionicMode === 'boolean' ? parsed.bionicMode : DEFAULTS.bionicMode,
-      bionicFixation: typeof parsed.bionicFixation === 'number' && parsed.bionicFixation >= 1 && parsed.bionicFixation <= 5 ? parsed.bionicFixation : DEFAULTS.bionicFixation,
-      bionicBoldRatio: typeof parsed.bionicBoldRatio === 'number' && parsed.bionicBoldRatio >= 0.2 && parsed.bionicBoldRatio <= 0.8 ? parsed.bionicBoldRatio : DEFAULTS.bionicBoldRatio,
+      bionicMode: typeof parsed.bionicMode === 'boolean'
+        ? parsed.bionicMode
+        : DEFAULTS.bionicMode,
+      bionicFixation: typeof parsed.bionicFixation === 'number' && parsed.bionicFixation >= 1 && parsed.bionicFixation <= 5
+        ? parsed.bionicFixation
+        : DEFAULTS.bionicFixation,
+      bionicBoldRatio: typeof parsed.bionicBoldRatio === 'number' && parsed.bionicBoldRatio >= 0.2 && parsed.bionicBoldRatio <= 0.8
+        ? parsed.bionicBoldRatio
+        : DEFAULTS.bionicBoldRatio,
     }
   } catch {
     return { ...DEFAULTS }

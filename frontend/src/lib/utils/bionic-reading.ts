@@ -37,6 +37,7 @@ export const COMMON_WORDS = new Set([
 
 const LEADING_PUNCTUATION = /^["'«¿¡({\[\]]+/
 const TRAILING_PUNCTUATION = /[.,!?;:…"'»)\]}\-\u2014\u2013]+$/
+const WHITESPACE_ONLY = /^\s+$/
 
 function getEffectiveBoldRatio(options: BionicOptions): number {
   return options.boldRatio ?? (0.5 - (options.fixationPoint - 1) * 0.05)
@@ -45,10 +46,10 @@ function getEffectiveBoldRatio(options: BionicOptions): number {
 function splitPunctuation(word: string): { prefix: string; core: string; suffix: string } {
   const prefixMatch = word.match(LEADING_PUNCTUATION)
   const prefix = prefixMatch ? prefixMatch[0] : ''
-  const afterPrefix = prefixMatch ? word.slice(prefix.length) : word
+  const afterPrefix = prefix ? word.slice(prefix.length) : word
   const suffixMatch = afterPrefix.match(TRAILING_PUNCTUATION)
-  const core = suffixMatch ? afterPrefix.slice(0, -suffixMatch[0].length) : afterPrefix
-  const suffix = suffixMatch ? afterPrefix.slice(core.length) : ''
+  const suffix = suffixMatch ? suffixMatch[0] : ''
+  const core = suffix ? afterPrefix.slice(0, -suffix.length) : afterPrefix
   return { prefix, core, suffix }
 }
 
@@ -97,7 +98,7 @@ export function bionifyTextToSegments(text: string, options?: Partial<BionicOpti
   const segments: BionicSegment[] = []
   for (const part of parts) {
     if (part.length === 0) continue
-    if (/^\s+$/.test(part)) {
+    if (WHITESPACE_ONLY.test(part)) {
       segments.push({ text: part, bold: false })
     } else {
       const bw = processWord(part, opts)

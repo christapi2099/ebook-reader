@@ -149,6 +149,12 @@ describe('bionifyWord', () => {
     expect(result.bold).toBe('')
     expect(result.rest).toBe('...')
   })
+
+  it('respects minWordLength option', () => {
+    expect(bionifyWord('hi', { minWordLength: 2 }).bold).toBe('h')
+    expect(bionifyWord('hi', { minWordLength: 3 }).bold).toBe('')
+    expect(bionifyWord('cat', { minWordLength: 4 }).bold).toBe('')
+  })
 })
 
 describe('bionifyText', () => {
