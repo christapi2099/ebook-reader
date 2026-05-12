@@ -57,7 +57,6 @@ describe('TextViewer - bionic reading integration', () => {
     })
     const boldText = segments.filter(s => s.bold).map(s => s.text).join('')
     expect(boldText).toBe('rea')
-    settingsStore.setBionicFixation(1)
   })
 
   it('respects settings store bionicBoldRatio', () => {
@@ -68,6 +67,5 @@ describe('TextViewer - bionic reading integration', () => {
     })
     const boldText = segments.filter(s => s.bold).map(s => s.text).join('')
     expect(boldText).toBe('readi')
-    settingsStore.setBionicBoldRatio(0.5)
   })
 })
