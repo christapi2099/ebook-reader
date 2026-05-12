@@ -104,11 +104,13 @@ function createSettingsStore() {
     },
 
     setBionicFixation(value: number) {
+      if (!Number.isFinite(value)) return
       const clamped = Math.max(1, Math.min(5, Math.round(value)))
       update(s => ({ ...s, bionicFixation: clamped }))
     },
 
     setBionicBoldRatio(value: number) {
+      if (!Number.isFinite(value)) return
       const clamped = Math.max(0.2, Math.min(0.8, Math.round(value * 20) / 20))
       update(s => ({ ...s, bionicBoldRatio: clamped }))
     },

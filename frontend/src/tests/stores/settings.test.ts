@@ -135,6 +135,18 @@ describe('settingsStore', () => {
       expect(get(settingsStore).bionicBoldRatio).toBe(0.5)
     })
 
+    it('setBionicFixation ignores NaN', () => {
+      const before = get(settingsStore).bionicFixation
+      settingsStore.setBionicFixation(NaN)
+      expect(get(settingsStore).bionicFixation).toBe(before)
+    })
+
+    it('setBionicBoldRatio ignores NaN', () => {
+      const before = get(settingsStore).bionicBoldRatio
+      settingsStore.setBionicBoldRatio(NaN)
+      expect(get(settingsStore).bionicBoldRatio).toBe(before)
+    })
+
     it('persists bionic settings to localStorage', () => {
       settingsStore.toggleBionicMode()
       settingsStore.setBionicFixation(4)
