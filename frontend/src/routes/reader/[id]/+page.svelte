@@ -225,6 +225,9 @@ function handleBackToLibrary() {
           isPlaying={audio.isPlaying}
           highlightColor={settings.highlightColor}
           autoscroll={settings.autoscroll}
+          bionicMode={settings.bionicMode}
+          bionicFixation={settings.bionicFixation}
+          bionicBoldRatio={settings.bionicBoldRatio}
           onSentenceClick={handleSeek}
         />
       {:else}
@@ -240,6 +243,9 @@ function handleBackToLibrary() {
           currentSearchIndex={currentSearchIndex}
           highlightColor={settings.highlightColor}
           autoscroll={settings.autoscroll}
+          bionicMode={settings.bionicMode}
+          bionicFixation={settings.bionicFixation}
+          bionicBoldRatio={settings.bionicBoldRatio}
           onPageChange={(p) => { currentPage = p }}
           onSentenceClick={handleSeek}
         />

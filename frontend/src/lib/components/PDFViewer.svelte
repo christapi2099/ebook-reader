@@ -19,6 +19,9 @@
     highlightColor = '#fef08a',
     autoscroll = true,
     currentWordIndex = -1,
+    bionicMode = false,
+    bionicFixation = 1,
+    bionicBoldRatio = 0.5,
   }: {
     bookId: string
     sentences: Sentence[]
@@ -32,6 +35,9 @@
     currentSearchIndex?: number
     highlightColor?: string
     autoscroll?: boolean
+    bionicMode?: boolean
+    bionicFixation?: number
+    bionicBoldRatio?: number
   } = $props()
 
   function hexToRgba(hex: string, alpha: number): string {

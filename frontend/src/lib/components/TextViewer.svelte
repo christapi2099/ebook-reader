@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { bionifyText, bionifyTextToSegments, type BionicWord } from '$lib/utils/bionic-reading'
+
   let {
     sentences,
     currentIndex,
@@ -6,6 +8,9 @@
     isPlaying = false,
     highlightColor = '#fef08a',
     autoscroll = true,
+    bionicMode = false,
+    bionicFixation = 1,
+    bionicBoldRatio = 0.5,
     onSentenceClick,
   }: {
     sentences: Array<{ index: number; text: string; filtered: boolean }>
@@ -14,13 +19,28 @@
     isPlaying?: boolean
     highlightColor?: string
     autoscroll?: boolean
+    bionicMode?: boolean
+    bionicFixation?: number
+    bionicBoldRatio?: number
     onSentenceClick?: (index: number) => void
   } = $props()
 
   const currentSentence = $derived(sentences.find(s => s.index === currentIndex) || null)
   const words = $derived(currentSentence?.text.split(/\s+/) || [])
 
+  const bionicOpts = $derived({ fixationPoint: bionicFixation, boldRatio: bionicBoldRatio })
+
+  const currentBionicWords = $derived(
+    currentSentence && currentSentence.text && bionicMode
+      ? bionifyText(currentSentence.text, bionicOpts)
+      : [] as BionicWord[]
+  )
+
   let containerRef: HTMLElement | null = null
+
+  function handleSentenceClick(index: number) {
+    onSentenceClick?.(index)
+  }
 
   $effect(() => {
     if (autoscroll && containerRef && currentSentence) {
@@ -44,18 +64,29 @@
       data-sentence-index={sentence.index}
       data-highlighted={sentence.index === currentIndex}
       style={sentence.index === currentIndex ? `background-color: ${highlightColor}` : ''}
-      onclick={() => handleClick(sentence.index)}
+      onclick={() => handleSentenceClick(sentence.index)}
       role="listitem"
       aria-current={sentence.index === currentIndex ? 'true' : 'false'}
     >
       {#if sentence.index === currentIndex && currentSentence && isPlaying && currentWordIndex >= 0}
-        {#each words as word, i}
-          <span
-            class="transition-colors duration-100"
-            style={i <= currentWordIndex ? 'background-color: rgba(0,0,0,0.1); font-weight: 600;' : ''}
-          >
-            {word}{#if i < words.length - 1}{' '}{/if}
-          </span>
+        {#if bionicMode}
+          {#each currentBionicWords as bw, i}
+            <span
+              class="transition-colors duration-100"
+              style={i <= currentWordIndex ? 'background-color: rgba(0,0,0,0.1); font-weight: 600;' : ''}
+            >{#if bw.bold}<strong>{bw.bold}</strong>{/if}{bw.rest}{#if i < currentBionicWords.length - 1}{' '}{/if}</span>
+          {/each}
+        {:else}
+          {#each words as word, i}
+            <span
+              class="transition-colors duration-100"
+              style={i <= currentWordIndex ? 'background-color: rgba(0,0,0,0.1); font-weight: 600;' : ''}
+            >{word}{#if i < words.length - 1}{' '}{/if}</span>
+          {/each}
+        {/if}
+      {:else if bionicMode && !sentence.filtered}
+        {#each bionifyTextToSegments(sentence.text, bionicOpts) as seg}
+          {#if seg.bold}<strong>{seg.text}</strong>{:else}{seg.text}{/if}
         {/each}
       {:else}
         {sentence.text}
