@@ -7,6 +7,7 @@ const DEFAULTS: SettingsState = {
   highlightColor: '#fef08a',
   autoscroll: true,
   hotkeysEnabled: true,
+  highlightEnabled: true,
   bionicMode: false,
   bionicFixation: 1,
   bionicBoldRatio: 0.5,

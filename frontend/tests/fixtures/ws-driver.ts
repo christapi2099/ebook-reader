@@ -4,12 +4,16 @@ export class WsDriver {
   private actions: Array<Record<string, any>> = []
   private page: Page | null = null
 
-  async install(page: Page, _bookId: string) {
+  async install(page: Page, _bookId: string, opts: { openDelayMs?: number } = {}) {
     this.page = page
     this.actions = []
     await page.exposeFunction('__recordWsAction', (action: any) => {
       this.actions.push(action)
     })
+    const openDelay = opts.openDelayMs ?? 0
+    // When openDelayMs > 0, the socket starts in CONNECTING (readyState=0) and
+    // transitions to OPEN after the delay — letting tests verify that play commands
+    // queued before the connection opens are delivered on open.
     await page.addInitScript(`
       window.__wsDriverSocket = null;
       window.WebSocket = class MockWS {
@@ -19,13 +23,14 @@ export class WsDriver {
         static CLOSED = 3;
         constructor(url) {
           this.url = url;
-          this.readyState = 1;
+          this.readyState = ${openDelay > 0 ? 0 : 1};
           this._onmessage = null;
           this.binaryType = '';
           window.__wsDriverSocket = this;
           setTimeout(() => {
+            this.readyState = 1;
             if (this.onopen) this.onopen({ type: 'open' });
-          }, 0);
+          }, ${openDelay});
         }
         set onmessage(fn) { this._onmessage = fn; }
         get onmessage() { return this._onmessage; }

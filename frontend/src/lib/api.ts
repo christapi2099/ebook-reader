@@ -167,7 +167,7 @@ export async function getProgress(bookId: string): Promise<number> {
 export interface UserSettings {
   last_book_id: string | null
   last_sentence_index: number
-  highlight_enabled: boolean
+  highlight_enabled?: boolean
 }
 
 export interface WordTimestamp {
@@ -220,6 +220,7 @@ export class TTSSocket {
   private bookId: string
   private reconnectAttempts = 0
   private maxReconnectAttempts = 5
+  private _pendingMessage: unknown = null
 
   onAudioChunk: (bytes: ArrayBuffer) => void = () => {}
   onSentenceStart: (index: number, sessionId: number) => void = () => {}
@@ -235,7 +236,13 @@ export class TTSSocket {
     const wsUrl = `${API_BASE.replace(/^http/, 'ws')}/ws/tts/${this.bookId}`
     this.ws = new WebSocket(wsUrl)
     this.ws.binaryType = 'arraybuffer'
-    this.ws.onopen = () => { this.reconnectAttempts = 0 }
+    this.ws.onopen = () => {
+      this.reconnectAttempts = 0
+      if (this._pendingMessage !== null) {
+        this.ws!.send(JSON.stringify(this._pendingMessage))
+        this._pendingMessage = null
+      }
+    }
     this.ws.onmessage = (event) => {
       if (event.data instanceof ArrayBuffer) {
         this.onAudioChunk(event.data)
@@ -274,7 +281,11 @@ export class TTSSocket {
   }
 
   private _send(data: unknown): void {
-    if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(data))
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(data))
+    } else {
+      this._pendingMessage = data
+    }
   }
 
   disconnect(): void {

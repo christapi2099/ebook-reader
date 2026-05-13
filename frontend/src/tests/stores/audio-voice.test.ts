@@ -49,7 +49,7 @@ vi.mock('$lib/api', () => {
 })
 
 async function importSentMessages() {
-  const mod = await import('$lib/api') as { getSentMessages: () => unknown[]; clearSentMessages: () => void }
+  const mod = await import('$lib/api') as unknown as { getSentMessages: () => unknown[]; clearSentMessages: () => void }
   return mod
 }
 

@@ -387,10 +387,12 @@
     searchMatchSet = nextSet
   })
 
-  // Auto-scroll to keep current sentence in view (debounced)
+  // Auto-scroll to keep current sentence in view (debounced).
+  // Gate on !buffering so the PDF doesn't jump pages while Kokoro is still loading
+  // the first chunk — the scroll fires when audio is actually confirmed ready.
   $effect(() => {
     const idx = currentIndex
-    if (!autoscroll) return
+    if (!autoscroll || buffering) return
     if (scrollDebounce) clearTimeout(scrollDebounce)
     scrollDebounce = setTimeout(() => {
       const s = sentences.find(s => s.index === idx)

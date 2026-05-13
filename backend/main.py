@@ -16,9 +16,12 @@ from routers import user as user_router
 
 def _init_kokoro():
     try:
+        import os, torch
         from kokoro import KPipeline
-        pipeline = KPipeline(lang_code="a")
-        return pipeline
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"[kokoro] initializing on {device}")
+        return KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M", device=device)
     except Exception as e:
         print(f"[warn] Kokoro not available: {e}")
         return None

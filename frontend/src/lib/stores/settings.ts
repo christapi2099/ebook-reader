@@ -128,7 +128,7 @@ function createSettingsStore() {
     async loadFromServer() {
       try {
         const serverSettings = await getUserSettings()
-        update(s => ({ ...s, highlightEnabled: serverSettings.highlight_enabled }))
+        update(s => ({ ...s, highlightEnabled: serverSettings.highlight_enabled ?? true }))
       } catch {
         // Server unavailable — keep local value
       }

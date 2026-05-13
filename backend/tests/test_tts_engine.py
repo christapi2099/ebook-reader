@@ -361,3 +361,118 @@ class TestKokoroSpeedParam:
             assert first_call == call(job.text, voice=job.voice, speed=1.5)
             second_call = mock_kokoro.call_args_list[1]
             assert second_call == call(job.text, voice=job.voice)
+
+
+# ---------------------------------------------------------------------------
+# Shared helper: stream_job iterates result.tokens so mocks must support it
+# ---------------------------------------------------------------------------
+
+class _KResult:
+    """Minimal KPipeline.Result stub: supports result[-1] for audio and result.tokens."""
+    def __init__(self, audio, tokens=None):
+        self._data = (None, None, audio)
+        self.tokens = tokens
+    def __getitem__(self, idx):
+        return self._data[idx]
+    def __iter__(self):
+        return iter(self._data)
+
+
+# ---------------------------------------------------------------------------
+# Fix 5 — cache-hit JSON parse regression
+# ---------------------------------------------------------------------------
+
+class TestCacheHitJsonParse:
+    @pytest.mark.asyncio
+    async def test_cache_hit_parses_word_timestamps_from_json(self):
+        """Regression: stream_job must json.loads word_timestamps from cache.
+        Without 'import json', the second run would raise NameError."""
+        import json
+        import numpy as np
+        from unittest.mock import patch, MagicMock
+        from db.models import AudioCache
+
+        sample_rate = 24000
+        mock_audio = np.ones(2400, dtype=np.float32)
+        pcm = (mock_audio * 32768.0).clip(-32768, 32767).astype(np.int16).tobytes()
+        word_ts_json = json.dumps([{"word": "hello", "start": 0.0, "end": 0.05}])
+
+        cached_entry = MagicMock(spec=AudioCache)
+        cached_entry.audio_data = pcm
+        cached_entry.word_timestamps = word_ts_json
+        cached_entry.duration_ms = 100
+
+        mock_session = MagicMock()
+        # First run: cache miss → synthesize → pre-save check → save
+        # Second run: cache hit → json.loads
+        mock_session.get.side_effect = [None, None, cached_entry]
+        mock_session_ctx = MagicMock()
+        mock_session_ctx.__enter__.return_value = mock_session
+        mock_session_ctx.__exit__.return_value = None
+
+        def mock_kokoro(text, voice, speed):
+            yield _KResult(mock_audio)
+
+        with patch('services.tts_engine.Session', return_value=mock_session_ctx):
+            engine = TTSEngine(kokoro=mock_kokoro)
+            job = SynthJob(sentence_index=0, text="hello world", voice="af_heart", speed=1.0)
+
+            async def drain():
+                async for _ in engine.stream_job(job):
+                    pass
+
+            await drain()                    # first run: synthesize + cache
+            engine._sentence_meta.clear()
+            await drain()                    # second run: cache hit → json.loads
+
+        meta = engine._sentence_meta.get(0, {})
+        assert isinstance(meta.get("word_timestamps"), list), \
+            "word_timestamps must be a list after json.loads from cache"
+        assert meta["word_timestamps"][0]["word"] == "hello"
+
+
+# ---------------------------------------------------------------------------
+# Fix 6 — speed regression: parametrized tests
+# ---------------------------------------------------------------------------
+
+class TestSpeedParametrized:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("speed", [1.0, 1.5, 2.0, 3.0])
+    async def test_stream_job_passes_speed_to_kokoro(self, speed):
+        """speed kwarg must reach KPipeline.__call__ unchanged at every supported speed."""
+        import numpy as np
+        from unittest.mock import patch, MagicMock
+
+        seen: dict = {}
+
+        def spy_kokoro(text, voice, speed):
+            seen["speed"] = speed
+            yield _KResult(np.ones(2400, dtype=np.float32))
+
+        mock_session = MagicMock()
+        mock_session.get.return_value = None  # always cache miss
+        mock_ctx = MagicMock()
+        mock_ctx.__enter__.return_value = mock_session
+        mock_ctx.__exit__.return_value = None
+
+        with patch('services.tts_engine.Session', return_value=mock_ctx):
+            engine = TTSEngine(kokoro=spy_kokoro)
+            job = SynthJob(sentence_index=0, text="hello", voice="af_heart", speed=speed)
+            async for _ in engine.stream_job(job):
+                pass
+
+        assert seen.get("speed") == speed, \
+            f"Expected speed={speed} to reach KPipeline, got {seen.get('speed')}"
+
+    @pytest.mark.parametrize("speed_a,speed_b", [(1.0, 1.5), (1.5, 2.0), (2.0, 3.0)])
+    def test_cache_keys_differ_between_speeds(self, speed_a, speed_b):
+        """Different speeds must produce separate cache entries."""
+        engine = TTSEngine(kokoro=None)
+        assert engine._cache_key("hello", "af_heart", speed_a) != \
+               engine._cache_key("hello", "af_heart", speed_b), \
+               f"Cache keys must differ for speed {speed_a} vs {speed_b}"
+
+    def test_cache_key_stable_for_same_speed(self):
+        engine = TTSEngine(kokoro=None)
+        assert engine._cache_key("hello", "af_heart", 2.0) == \
+               engine._cache_key("hello", "af_heart", 2.0)

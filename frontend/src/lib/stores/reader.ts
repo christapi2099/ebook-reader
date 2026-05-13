@@ -1,10 +1,10 @@
-import { writable } from 'svelte/store'
+import { writable, type Writable } from 'svelte/store'
 import { getSentences, getProgress, saveProgress, type Sentence } from '$lib/api'
 import { userStore } from '$lib/stores/user'
 
 export type { Sentence }
 
-interface ReaderState {
+export interface ReaderState {
   bookId: string | null
   sentences: Sentence[]
   currentIndex: number

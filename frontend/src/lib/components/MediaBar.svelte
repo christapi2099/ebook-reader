@@ -43,6 +43,7 @@
       onclick={() => (isPlaying ? onPause() : onPlay())}
       class="flex items-center justify-center w-12 h-12 rounded-full bg-blue-500 hover:bg-blue-600 text-white shadow-lg transition-colors"
       aria-label={isPlaying ? 'Pause' : 'Play'}
+      data-loading={isPlaying && buffering ? 'true' : 'false'}
     >
       {#if isPlaying && buffering}
         <svg class="w-6 h-6 animate-spin" fill="none" viewBox="0 0 24 24">

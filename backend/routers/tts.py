@@ -114,8 +114,8 @@ async def tts_websocket(websocket: WebSocket, book_id: str):
                     "word_timestamps": word_timestamps,
                     "session_id": session_id,
                 }))
-        except asyncio.CancelledError:
-            # Normal cancellation when router starts a new session or the socket closes.
+        except (asyncio.CancelledError, WebSocketDisconnect):
+            # Normal exit: cancelled by router (new session) or client disconnected.
             return
 
     async def _cancel_and_clear() -> None:

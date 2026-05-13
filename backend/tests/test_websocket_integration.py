@@ -449,3 +449,56 @@ class TestWebSocketIntegration:
                         text_messages.append(data)
 
                     assert any(msg["type"] == "complete" for msg in text_messages)
+
+
+    # Fix 4 — disconnect mid-stream must not raise unhandled exception
+    def test_client_disconnect_mid_stream_does_not_raise(self, ws_client):
+        """_consumer_with_events must exit cleanly when the client closes mid-stream."""
+        with ws_client.websocket_connect("/ws/tts/test-book") as ws:
+            ws.send_json({
+                "action": "play", "from_index": 0, "voice": "af_heart",
+                "speed": 1.0, "session_id": 1,
+            })
+            first = json.loads(ws.receive_text())
+            assert first["type"] == "sentence_start"
+            # Exiting the `with` block sends WebSocketDisconnect to the server.
+        # Re-open to confirm the server is still healthy — would fail if the exception
+        # propagated and left the handler in a broken state.
+        with ws_client.websocket_connect("/ws/tts/test-book") as ws2:
+            ws2.send_json({"action": "pause"})
+
+
+class TestSpeedForwarding:
+    """Fix 6 — WS play payload must forward speed to KPipeline at all supported speeds."""
+
+    @pytest.mark.parametrize("speed", [1.0, 1.5, 2.0, 3.0])
+    def test_websocket_play_forwards_speed_to_kokoro(self, speed):
+        import numpy as np
+        import routers.tts as _tts_mod
+
+        seen: dict = {}
+
+        def spy_kokoro(text, voice, speed):
+            seen["speed"] = speed
+            # Plain tuple is fine here: spy is called before result.tokens is read,
+            # and sentence_start is sent before stream_job is called.
+            yield (None, None, np.ones(2400, dtype=np.float32))
+
+        eng = _build_engine()
+        _seed_data(eng, {0: "First.", 1: "Second."})
+        with _patch_db(eng):
+            from main import app
+            with TestClient(app) as client:
+                # Set spy AFTER TestClient lifespan has run (which overwrites with real
+                # Kokoro). The TTSSocket handler reads _kokoro at WS-connect time.
+                _tts_mod._kokoro = spy_kokoro
+                with client.websocket_connect("/ws/tts/test-book") as ws:
+                    ws.send_json({
+                        "action": "play", "from_index": 0,
+                        "voice": "af_heart", "speed": speed, "session_id": 1,
+                    })
+                    msg = json.loads(ws.receive_text())
+                    assert msg["type"] == "sentence_start"
+
+        assert seen.get("speed") == speed, \
+            f"Expected speed={speed} delivered to KPipeline, got {seen.get('speed')}"

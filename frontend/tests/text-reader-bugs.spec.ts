@@ -123,4 +123,69 @@ test.describe('Text Reader Bug Fixes', () => {
     // Final state should be playing (Pause button visible)
     await expect(page.getByRole('button', { name: 'Pause' })).toBeVisible({ timeout: 2000 })
   })
+
+  // BUG5: sentence click auto-play regressions
+
+  test('BUG5a: clicking a sentence while not playing sends play with that from_index', async ({ page }) => {
+    await setupReadingMode(page)
+    await page.locator('[data-sentence-index="2"]').click()
+    await expect.poll(() => driver.actionsOf('play').length).toBeGreaterThanOrEqual(1)
+    expect(driver.actionsOf('play').at(-1)!['from_index']).toBe(2)
+  })
+
+  test('BUG5b: spinner shows while buffering after sentence click, clicking it cancels', async ({ page }) => {
+    await setupReadingMode(page)
+    await page.locator('[data-sentence-index="0"]').click()
+    // data-loading="true" is set by MediaBar when isPlaying && buffering
+    await expect(page.locator('button[data-loading="true"]')).toBeVisible({ timeout: 2000 })
+    // Clicking the spinner should pause — play button must reappear
+    await page.locator('button[data-loading="true"]').click()
+    await expect(page.getByRole('button', { name: 'Play' })).toBeVisible({ timeout: 2000 })
+  })
+
+  // Speed regression: WS play payload carries user-selected speed
+  for (const speed of [1.5, 2.0, 3.0]) {
+    test(`BUG-speed: clicking sentence at ${speed}x sends correct speed to backend`, async ({ page }) => {
+      await setupReadingMode(page)
+      await page.getByRole('button', { name: `${speed}x` }).click()
+      await page.locator('[data-sentence-index="0"]').click()
+      await expect.poll(() => driver.actionsOf('play').length).toBeGreaterThanOrEqual(1)
+      expect(driver.actionsOf('play').at(-1)!['speed']).toBe(speed)
+    })
+  }
+})
+
+// BUG5c needs its own describe because it installs a delayed-open WS mock
+test.describe('BUG5c: WS delayed open queues play command', () => {
+  test('play queued and delivered when WS opens after sentence click', async ({ page }) => {
+    const slowDriver = new WsDriver()
+    await slowDriver.install(page, 'text-book-1', { openDelayMs: 200 })
+    await page.clock.install()
+    await page.addInitScript(AUDIO_CONTEXT_MOCK)
+    await page.route('**/library', r => r.fulfill({ json: [] }))
+    await page.route('**/user/settings', r => r.fulfill({ json: { last_book_id: null, last_sentence_index: 0 } }))
+    await page.route('**/documents/text', r => r.fulfill({
+      json: { book_id: 'text-book-1', sentence_count: 2, already_existed: false }
+    }))
+    await page.route('**/documents/text-book-1/sentences', r => r.fulfill({
+      json: [
+        { index: 0, text: 'Sentence zero.', page: 0, x0: 0, y0: 0, x1: 0, y1: 0, filtered: false },
+        { index: 1, text: 'Sentence one.', page: 0, x0: 0, y0: 0, x1: 0, y1: 0, filtered: false },
+      ]
+    }))
+    await page.route('**/ws/tts/**', r => r.fulfill())
+    await page.goto('/')
+    await page.getByPlaceholder('Paste or type your text here...').fill('text')
+    await page.getByRole('button', { name: 'Read Aloud' }).click()
+    await expect(page.locator('[data-sentence-index="0"]')).toBeVisible({ timeout: 5000 })
+
+    // Click a sentence while WS is still CONNECTING (readyState=0)
+    await page.locator('[data-sentence-index="1"]').click()
+    expect(slowDriver.actionsOf('play')).toHaveLength(0)
+
+    // Advance clock past the 200ms delay — WS opens, queued play is flushed
+    await page.clock.runFor(250)
+    await expect.poll(() => slowDriver.actionsOf('play').length).toBeGreaterThanOrEqual(1)
+    expect(slowDriver.actionsOf('play').at(-1)!['from_index']).toBe(1)
+  })
 })

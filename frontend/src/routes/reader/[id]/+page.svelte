@@ -2,8 +2,8 @@
 import { onMount, onDestroy } from 'svelte'
 import { page } from '$app/stores'
 import { get } from 'svelte/store'
-import readerStore, { loadBook, seek, setPlaying, setSpeed } from '$lib/stores/reader'
-import { audioStore } from '$lib/stores/audio'
+import readerStore, { loadBook, seek, setPlaying, setSpeed, type ReaderState } from '$lib/stores/reader'
+import { audioStore, type AudioState } from '$lib/stores/audio'
 import { settingsStore, type SettingsState } from '$lib/stores/settings'
 import { createBookmark, getBook } from '$lib/api'
 import { registerHotkeys, unregisterHotkeys } from '$lib/utils/hotkeys'
@@ -20,7 +20,7 @@ import { goto } from '$app/navigation'
 
 const bookId = $page.params.id as string
 
-let reader = $state(get(readerStore))
+let reader: ReaderState = $state(get(readerStore))
 let audio = $state(get(audioStore))
   let settings: SettingsState = $state(get(settingsStore))
 let seeking = $state(false)
@@ -42,9 +42,9 @@ let unsubAudio: () => void
 let unsubSettings: () => void
 
 onMount(async () => {
-  unsubReader = readerStore.subscribe((v) => (reader = v))
-  unsubAudio = audioStore.subscribe((v) => (audio = v))
-  unsubSettings = settingsStore.subscribe((v) => (settings = v))
+  unsubReader = readerStore.subscribe((v: ReaderState) => (reader = v))
+  unsubAudio = audioStore.subscribe((v: AudioState) => (audio = v))
+  unsubSettings = settingsStore.subscribe((v: SettingsState) => (settings = v))
 
   // Fetch book metadata for type detection
   try {
@@ -56,8 +56,8 @@ onMount(async () => {
   await loadBook(bookId)
   settingsStore.loadFromServer().catch(() => {})
   audioStore.init(bookId)
-  audioStore.setSpeed(get(readerStore).speed)
-  audioStore.setCurrentIndex(get(readerStore).currentIndex)
+  audioStore.setSpeed((get(readerStore) as ReaderState).speed)
+  audioStore.setCurrentIndex((get(readerStore) as ReaderState).currentIndex)
   audioStore.setVoice(get(settingsStore).voice)
 
   const hotkeyMap: Record<string, () => void> = {
@@ -114,7 +114,18 @@ function handlePause() {
 async function handleSeek(index: number) {
   if (seeking) return
   seeking = true
-  if (reader.isPlaying) audioStore.seek(index)
+
+  // Sync page indicator immediately from sentence metadata
+  const sentenceForPage = reader.sentences.find(s => s.index === index)
+  if (sentenceForPage != null) currentPage = sentenceForPage.page
+
+  if (reader.isPlaying) {
+    audioStore.seek(index)
+  } else {
+    // Auto-play from the clicked sentence and fix the stale audio.currentIndex bug
+    setPlaying(true)
+    audioStore.play(index)
+  }
   try {
     await seek(index)
   } finally {
