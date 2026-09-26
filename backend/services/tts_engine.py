@@ -4,6 +4,7 @@ import inspect
 import io
 import json
 import logging
+import math
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, UTC
@@ -34,6 +35,39 @@ SAMPLE_RATE = 24000
 # at the transport boundary so the key, the argument handed to Kokoro and the
 # rate reported back can never disagree.
 SPEED_PRECISION = 2
+
+# The band the API accepts. Out-of-band values are clamped rather than rejected, so
+# tightening the range cannot break an existing client, and 3.0 stays reachable
+# for the cache rows already keyed there.
+MIN_SPEED = 0.5
+MAX_SPEED = 3.0
+
+
+def normalize_speed(raw: Any) -> float:
+    """Validate and quantise a requested playback rate, or raise ValueError.
+
+    Every synthesis entry point funnels through here, so the cache key, the
+    argument handed to Kokoro and the rate reported back to the client cannot
+    disagree about which rate was asked for.
+
+    Two failure modes motivate the checks. Kokoro's duration predictor divides the
+    predicted frame durations by ``speed`` and then floors every phoneme at one
+    25 ms frame, so the delivered rate saturates well below the request — a 3.0x
+    request renders at roughly 2.2x. A non-finite speed is worse than merely
+    inaccurate: ``clamp(min=1)`` is applied to the float *before* the cast to
+    long, so ``inf`` and ``NaN`` survive it and become INT64_MIN, which makes
+    ``repeat_interleave`` raise during iteration — outside ``_call_kokoro``, so
+    nothing on the synthesis path catches it and the session dies.
+    """
+    try:
+        speed = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError("speed must be a number") from None
+    if not math.isfinite(speed):
+        raise ValueError("speed must be finite")
+    if speed <= 0:
+        raise ValueError("speed must be greater than zero")
+    return round(min(max(speed, MIN_SPEED), MAX_SPEED), SPEED_PRECISION)
 
 # How much audio prefetch tries to keep warm ahead of the playhead, in seconds.
 # The bound used to be a sentence COUNT (50), which says nothing about how much
@@ -136,6 +170,19 @@ def _accepts_speed(kokoro: Any) -> bool:
         # Not introspectable (builtins, some C callables). Give it the benefit of
         # the doubt and let any real error surface from the call itself.
         return True
+
+
+def synthesize_serialized(
+    engine: "TTSEngine", text: str, voice: str, speed: float
+) -> tuple[np.ndarray | None, float]:
+    """Run ``engine.synthesize_cached`` on the shared synthesis worker.
+
+    Blocking, so callers must already be off the event loop. Exported so that
+    every synthesis path — streaming playback, prefetch and the MP3 export — goes
+    through the same single worker, which is what stops two of them rendering
+    concurrently against the same CPU cores and CUDA context.
+    """
+    return _synthesis_pool.submit(engine.synthesize_cached, text, voice, speed).result()
 
 
 @dataclass
@@ -290,6 +337,54 @@ class TTSEngine:
                 session.add(entry)
                 session.commit()
         return full_audio, duration_ms
+
+    def synthesize_cached(
+        self, text: str, voice: str, speed: float
+    ) -> tuple[np.ndarray | None, float]:
+        """Synthesize one sentence, reusing AudioCache.
+
+        Returns ``(audio, effective_speed)``, with ``audio`` None when nothing was
+        produced. Blocking and synchronous: callers must keep it off the event
+        loop, and ``synthesize_serialized`` is the usual way in.
+
+        This exists so the MP3 export path shares this engine's cache *and* its
+        speed-capability handling instead of duplicating both. Duplicating them is
+        how the export came to re-render audio the reader already had, and to
+        record a playback rate the build may never have rendered.
+        """
+        effective_speed = self._effective_speed(speed)
+        cache_key = self._cache_key(text, voice, effective_speed)
+
+        with Session(_db.engine) as session:
+            cached = session.get(AudioCache, cache_key)
+        if cached is not None:
+            audio = np.frombuffer(cached.audio_data, dtype=np.int16).astype(np.float32) / INT16_MAX
+            return audio, effective_speed
+
+        if self.kokoro is None:
+            return None, effective_speed
+
+        results, effective_speed = self._call_kokoro(text, voice, speed)
+        audio_parts: list[np.ndarray] = []
+        word_timestamps: list[dict] = []
+        audio_offset = 0.0
+        for result in results:
+            _, audio_offset = self._collect_result(
+                result, audio_parts, word_timestamps, audio_offset,
+            )
+        if not audio_parts:
+            return None, effective_speed
+
+        try:
+            self._write_cache_entry(
+                audio_parts,
+                word_timestamps,
+                self._cache_key(text, voice, effective_speed),
+                voice,
+            )
+        except Exception:
+            logger.warning("Failed to cache a synthesised sentence", exc_info=True)
+        return np.concatenate(audio_parts), effective_speed
 
     async def enqueue(self, job: SynthJob) -> None:
         await self.queue.put(job)

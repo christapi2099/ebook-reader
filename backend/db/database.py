@@ -62,6 +62,14 @@ def _migrate(engine):
             conn.execute(text("ALTER TABLE usersettings ADD COLUMN highlight_enabled INTEGER DEFAULT 1"))
             conn.commit()
 
+        # MP3 exports record the rate actually rendered alongside the rate that
+        # was requested, so the exports list cannot claim a tempo the file does
+        # not have. Nullable: rows written before this distinction predate it.
+        exp_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(mp3export)"))}
+        if 'effective_speed' not in exp_cols:
+            conn.execute(text("ALTER TABLE mp3export ADD COLUMN effective_speed REAL"))
+        conn.commit()
+
         # Folders (handoff task 1). create_all() creates the new `folder` table on
         # both fresh and existing databases, but it never adds a column to a table
         # that already exists, so `book.folder_id` has to be added here. Without

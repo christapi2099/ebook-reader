@@ -49,10 +49,11 @@ from db.models import AudioCache
 from services.tts_engine import TTSEngine, SynthJob
 
 SAMPLE_RATE = 24000
-# The speeds the reader actually offers — `MediaBar.svelte:24` is the only place
-# that list exists. The API accepts any float, so client-supplied values the UI
-# cannot produce are covered separately by TestCacheKeyCollisions.
-UI_SPEEDS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0]
+# The speeds the reader actually offers. `MediaBar.svelte` holds the only copy of
+# that list; 3.0 was removed in 36e2120 because Kokoro cannot deliver it. The API
+# accepts any float, so client-supplied values the UI cannot produce are covered
+# separately by TestCacheKeyCollisions.
+UI_SPEEDS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
 
 # Amplitude is used as a witness for "which code path rendered this audio".
 AMP_FALLBACK_1X = 0.20  # kokoro(text, voice=voice)      -> 1.0x

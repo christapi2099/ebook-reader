@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,18 +13,26 @@ from starlette.concurrency import run_in_threadpool
 
 import db.database as _db
 from db.models import Book, MP3Export, Sentence
+from services.tts_engine import TTSEngine, normalize_speed, synthesize_serialized
 
 EXPORTS_DIR = Path("exports")
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/mp3")
 
 _kokoro = None
+# One engine for the whole export path, so exports share the speed-capability
+# probe and the on-disk AudioCache with playback instead of maintaining their own
+# copies of both.
+_engine: TTSEngine | None = None
 _export_tasks: dict[int, asyncio.Task] = {}
 
 
 def set_kokoro(kokoro):
-    global _kokoro
+    global _kokoro, _engine
     _kokoro = kokoro
+    _engine = TTSEngine(kokoro) if kokoro is not None else None
 
 
 def _run_export_blocking(export_id: int, book_id: str, voice: str, speed: float) -> None:
@@ -47,12 +56,20 @@ def _run_export_blocking(export_id: int, book_id: str, voice: str, speed: float)
 
         total = len(rows)
         audio_parts: list[np.ndarray] = []
+        rendered_speed: float | None = None
 
         for idx, (s_idx, s) in enumerate(sorted(rows.items())):
             if s["filtered"]:
                 continue
 
-            audio = _synthesize(s["text"], voice, speed)
+            audio, used_speed = _synthesize(s["text"], voice, speed)
+            if rendered_speed is None:
+                rendered_speed = used_speed
+            elif used_speed != rendered_speed:
+                logger.warning(
+                    "Export %s rendered sentence %s at %sx after %sx",
+                    export_id, s_idx, used_speed, rendered_speed,
+                )
             if audio is not None and len(audio) > 0:
                 audio_parts.append(audio)
 
@@ -79,6 +96,8 @@ def _run_export_blocking(export_id: int, book_id: str, voice: str, speed: float)
                 ex.progress = 100
                 ex.file_path = str(file_path)
                 ex.file_size = file_size
+                # Record what the file actually is, not what was asked for.
+                ex.effective_speed = rendered_speed if rendered_speed is not None else speed
                 session.commit()
 
     except Exception as e:
@@ -116,22 +135,18 @@ def _load_sentences(book_id: str) -> dict[int, dict] | None:
         return {s.index: {"text": s.text, "filtered": s.filtered} for s in rows}
 
 
-def _synthesize(text: str, voice: str, speed: float) -> np.ndarray | None:
-    if _kokoro is None:
-        return None
-    try:
-        results = _kokoro(text, voice=voice, speed=speed)
-    except TypeError:
-        try:
-            results = _kokoro(text, voice=voice)
-        except TypeError:
-            results = _kokoro(text)
+def _synthesize(text: str, voice: str, speed: float) -> tuple[np.ndarray | None, float]:
+    """Synthesize one sentence through the shared engine and cache.
 
-    parts = []
-    for result in results:
-        audio = result[-1]
-        parts.append(audio if isinstance(audio, np.ndarray) else np.array(audio))
-    return np.concatenate(parts) if parts else None
+    Returns ``(audio, effective_speed)``. This used to duplicate the Kokoro call
+    and the speed fallback ladder locally and bypass AudioCache entirely, so an
+    export re-rendered audio the reader already had, and recorded the *requested*
+    speed on the export row even when the installed build could not honour it —
+    a permanently wrong label on a file. Both now come from the one engine.
+    """
+    if _engine is None:
+        return None, speed
+    return synthesize_serialized(_engine, text, voice, speed)
 
 
 class ExportRequest(BaseModel):
@@ -142,6 +157,15 @@ class ExportRequest(BaseModel):
 
 @router.post("/export")
 async def create_export(body: ExportRequest):
+    # Validated here, not deep inside the export loop: an unconstrained speed used
+    # to reach Kokoro, where a non-positive or non-finite value fails during
+    # iteration outside the guarded call and kills the export with an opaque error
+    # (or, worse, claims a rate the file will not have).
+    try:
+        speed = normalize_speed(body.speed)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
     with Session(_db.engine) as session:
         book = session.get(Book, body.book_id)
         if not book:
@@ -149,7 +173,7 @@ async def create_export(body: ExportRequest):
         export = MP3Export(
             book_id=body.book_id,
             voice=body.voice,
-            speed=body.speed,
+            speed=speed,
             status="pending",
             progress=0,
             created_at=datetime.now(timezone.utc),
@@ -159,7 +183,7 @@ async def create_export(body: ExportRequest):
         session.refresh(export)
         export_id = export.id
 
-    task = asyncio.create_task(_run_export(export_id, body.book_id, body.voice, body.speed))
+    task = asyncio.create_task(_run_export(export_id, body.book_id, body.voice, speed))
     _export_tasks[export_id] = task
 
     return {"export_id": export_id}
@@ -178,6 +202,7 @@ def list_exports():
                 "book_title": book.title if book else "Unknown",
                 "voice": ex.voice,
                 "speed": ex.speed,
+                "effective_speed": ex.effective_speed,
                 "status": ex.status,
                 "progress": ex.progress,
                 "file_size": ex.file_size,
@@ -198,6 +223,7 @@ def get_export_status(export_id: int):
             "progress": ex.progress,
             "file_size": ex.file_size,
             "error_message": ex.error_message,
+            "effective_speed": ex.effective_speed,
         }
 
 

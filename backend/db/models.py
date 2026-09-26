@@ -92,6 +92,11 @@ class MP3Export(SQLModel, table=True):
     book_id: str = Field(foreign_key='book.id', index=True)
     voice: str
     speed: float
+    # The rate the audio was ACTUALLY rendered at, kept separately from the
+    # requested `speed` so the exports list can never advertise a tempo the file
+    # does not have. NULL for rows written before this column existed, and for
+    # exports still in progress.
+    effective_speed: float | None = None
     status: str
     progress: int = 0
     file_path: str | None = None

@@ -13,6 +13,7 @@ of that: responsiveness *and* identical results.
 """
 import asyncio
 import inspect
+import sqlite3
 import sys
 import threading
 import time
@@ -23,8 +24,11 @@ import numpy as np
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy import inspect as sa_inspect, text
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, Session, create_engine
+
+from services.tts_engine import TTSEngine
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BACKEND_DIR))
@@ -87,6 +91,11 @@ def _install_kokoro(monkeypatch, *, delay=0.0, calls=None, threads=None, samples
         return [(None, None, np.ones(samples, dtype=np.float32))]
 
     monkeypatch.setattr(mp3_router, "_kokoro", kokoro)
+    # The export path now synthesises through a TTSEngine so it shares the
+    # speed-capability probe and the AudioCache with playback. Installing the stub
+    # therefore means installing the engine too: reaching past it by setting only
+    # `_kokoro` would leave the engine unset and the export would produce nothing.
+    monkeypatch.setattr(mp3_router, "_engine", TTSEngine(kokoro))
     return kokoro
 
 
@@ -245,7 +254,11 @@ def test_progress_is_written_during_the_export(seeded, monkeypatch, engine):
 
 
 def test_no_audio_marks_the_export_as_error(seeded, engine, monkeypatch):
-    monkeypatch.setattr(mp3_router, "_kokoro", None)  # _synthesize returns None
+    # Both globals, and through monkeypatch. Setting only `_kokoro` leaves a
+    # previously-installed `_engine` in place, so the export would still succeed
+    # and this test's result would depend on whatever ran before it.
+    monkeypatch.setattr(mp3_router, "_kokoro", None)
+    monkeypatch.setattr(mp3_router, "_engine", None)
 
     asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.0))
 
@@ -255,11 +268,14 @@ def test_no_audio_marks_the_export_as_error(seeded, engine, monkeypatch):
         assert export.error_message
 
 
-def test_synthesis_exception_marks_the_export_as_error(seeded, engine):
+def test_synthesis_exception_marks_the_export_as_error(seeded, engine, monkeypatch):
     def exploding(text, voice=None, speed=None):
         raise RuntimeError("kokoro exploded")
 
-    mp3_router._kokoro = exploding
+    # monkeypatch rather than a bare assignment: this used to leak both globals
+    # into every later test in the file.
+    monkeypatch.setattr(mp3_router, "_kokoro", exploding)
+    monkeypatch.setattr(mp3_router, "_engine", TTSEngine(exploding))
     asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.0))
 
     with Session(engine) as s:
@@ -322,3 +338,166 @@ def test_post_export_returns_before_the_export_finishes(seeded, monkeypatch, eng
                 break
             time.sleep(0.05)
         assert status == "done", f"export never completed, last status={status!r}"
+
+
+# ---------------------------------------------------------------------------
+# The export path shares TTSEngine, the AudioCache and the speed normaliser
+# ---------------------------------------------------------------------------
+
+
+def _supporting_kokoro(samples=2400):
+    """A binding that honours speed=, recording every call."""
+    calls: list[tuple[str, float]] = []
+
+    def kokoro(text, voice=None, speed=1.0):
+        calls.append((text, speed))
+        return [(None, None, np.ones(samples, dtype=np.float32))]
+
+    return kokoro, calls
+
+
+def _downgrading_kokoro(samples=2400):
+    """A binding with no `speed` parameter, so the engine must degrade to 1.0x."""
+    calls: list[str] = []
+
+    def kokoro(text, voice=None, **kwargs):
+        calls.append(text)
+        return [(None, None, np.ones(samples, dtype=np.float32))]
+
+    return kokoro, calls
+
+
+class TestExportRecordsTheRenderedRate:
+    """An export row must not advertise a tempo its file does not have.
+
+    The export kept its own copy of the Kokoro call and the speed-fallback ladder
+    and bypassed TTSEngine entirely, so it stamped MP3Export.speed with the
+    *requested* rate even when the installed build could not honour it. Nothing
+    ever rewrote that row, and the UI renders it as `{speed}x`.
+    """
+
+    def test_a_downgraded_export_records_the_rate_it_rendered(
+        self, seeded, engine, monkeypatch
+    ):
+        kokoro, _ = _downgrading_kokoro()
+        monkeypatch.setattr(mp3_router, "_kokoro", kokoro)
+        monkeypatch.setattr(mp3_router, "_engine", TTSEngine(kokoro))
+        with Session(engine) as s:
+            row = s.get(MP3Export, seeded)
+            row.speed = 1.5
+            s.commit()
+
+        asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.5))
+
+        with Session(engine) as s:
+            export = s.get(MP3Export, seeded)
+        assert export.status == "done"
+        assert export.speed == 1.5, "the requested rate stays on the row"
+        assert export.effective_speed == 1.0, (
+            "the export must record the rate it actually rendered at"
+        )
+
+    def test_a_supported_export_records_the_requested_rate(
+        self, seeded, engine, monkeypatch
+    ):
+        kokoro, _ = _supporting_kokoro()
+        monkeypatch.setattr(mp3_router, "_kokoro", kokoro)
+        monkeypatch.setattr(mp3_router, "_engine", TTSEngine(kokoro))
+
+        asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.5))
+
+        with Session(engine) as s:
+            export = s.get(MP3Export, seeded)
+        assert export.status == "done"
+        assert export.effective_speed == 1.5
+
+    def test_a_second_export_reuses_the_cache_instead_of_resynthesising(
+        self, seeded, engine, monkeypatch
+    ):
+        kokoro, calls = _supporting_kokoro()
+        monkeypatch.setattr(mp3_router, "_kokoro", kokoro)
+        monkeypatch.setattr(mp3_router, "_engine", TTSEngine(kokoro))
+
+        asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.0))
+        after_first = len(calls)
+        assert after_first == SENTENCE_COUNT, (
+            f"expected one synthesis per sentence, got {after_first}"
+        )
+
+        with Session(engine) as s:
+            second = MP3Export(book_id="bk", voice="af_heart", speed=1.0,
+                               status="pending", progress=0,
+                               created_at=datetime.now(timezone.utc))
+            s.add(second)
+            s.commit()
+            s.refresh(second)
+            second_id = second.id
+
+        asyncio.run(mp3_router._run_export(second_id, "bk", "af_heart", 1.0))
+
+        assert len(calls) == after_first, (
+            "the second export re-synthesised audio the reader already had cached"
+        )
+
+
+class TestExportSpeedValidation:
+    """POST /mp3/export must reject a rate the engine cannot use."""
+
+    @staticmethod
+    def _client(monkeypatch):
+        _install_kokoro(monkeypatch)
+        app = FastAPI()
+        app.include_router(mp3_router.router)
+        return TestClient(app)
+
+    @pytest.mark.parametrize("bad", [0, -1.0, -0.5])
+    def test_unusable_speeds_are_rejected_with_400(self, seeded, engine, monkeypatch, bad):
+        with self._client(monkeypatch) as client:
+            response = client.post("/mp3/export", json={"book_id": "bk", "speed": bad})
+        assert response.status_code == 400
+        assert response.json()["detail"]
+
+    def test_out_of_band_speeds_are_clamped_not_rejected(self, seeded, engine, monkeypatch):
+        with self._client(monkeypatch) as client:
+            response = client.post("/mp3/export", json={"book_id": "bk", "speed": 99})
+        assert response.status_code == 200
+        with Session(engine) as s:
+            row = s.get(MP3Export, response.json()["export_id"])
+        assert row.speed == 3.0
+
+
+class TestEffectiveSpeedMigration:
+    """`mp3export.effective_speed` must reach databases that predate it."""
+
+    def test_legacy_table_gains_the_column_and_keeps_its_rows(self, tmp_path):
+        db_file = tmp_path / "legacy_mp3.db"
+        conn = sqlite3.connect(db_file)
+        conn.execute(
+            "CREATE TABLE mp3export (id INTEGER PRIMARY KEY, book_id TEXT, voice TEXT, "
+            "speed REAL, status TEXT, progress INTEGER, file_path TEXT, "
+            "file_size INTEGER, error_message TEXT, created_at TIMESTAMP)"
+        )
+        conn.execute(
+            "INSERT INTO mp3export VALUES (1,'bk','af_heart',1.5,'done',100,"
+            "NULL,NULL,NULL,'2024-01-01')"
+        )
+        conn.commit()
+        conn.close()
+
+        engine = _db.create_engine_and_tables(db_url=f"sqlite:///{db_file}")
+        assert "effective_speed" in {c["name"] for c in sa_inspect(engine).get_columns("mp3export")}
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text("SELECT id, speed, effective_speed FROM mp3export")
+            ).fetchall()
+        assert rows == [(1, 1.5, None)], (
+            "existing export rows must survive and read as unknown, not zero"
+        )
+
+    def test_repeated_migration_is_idempotent(self, tmp_path):
+        db_file = tmp_path / "legacy_mp3_twice.db"
+        sqlite3.connect(db_file).close()
+        first = _db.create_engine_and_tables(db_url=f"sqlite:///{db_file}")
+        cols = [c["name"] for c in sa_inspect(first).get_columns("mp3export")]
+        second = _db.create_engine_and_tables(db_url=f"sqlite:///{db_file}")
+        assert [c["name"] for c in sa_inspect(second).get_columns("mp3export")] == cols

@@ -190,11 +190,12 @@ class TestCacheKeyBackwardCompatibility:
     reveal.
     """
 
-    # The speeds the reader actually offers (`MediaBar.svelte:24` is the only
-    # place that list exists), plus every other multiple of 0.25 the API can be
-    # handed by a client that is not the UI. Every value here must keep its
+    # The speeds the reader actually offers. `MediaBar.svelte` holds the only copy
+    # of that list; 3.0 was removed in 36e2120 because Kokoro cannot deliver it
+    # (it saturates near 2.2x). MULTIPLES_OF_025 additionally covers values the API
+    # accepts from a client that is not the UI. Every value here must keep its
     # legacy key spelling.
-    UI_SPEEDS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0]
+    UI_SPEEDS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
     MULTIPLES_OF_025 = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0]
 
     @staticmethod

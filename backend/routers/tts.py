@@ -1,7 +1,6 @@
 import asyncio
 import io
 import json
-import math
 from typing import Any
 
 import numpy as np
@@ -11,38 +10,18 @@ from sqlmodel import Session, select
 
 import db.database as _db
 from db.models import Book, Sentence
-from services.tts_engine import TTSEngine, SynthJob
-
-# Kokoro's duration predictor divides the predicted frame durations by `speed`
-# and then floors every phoneme at one 25 ms frame, so the delivered rate
-# saturates well below the requested one — a 3.0x request renders at roughly
-# 2.2x — and a non-positive speed divides by zero into a `torch.round(inf)`
-# failure that nothing on this path catches (it happens during iteration, outside
-# `_call_kokoro`), killing the session.
-#
-# Speed is therefore validated and quantised once, here at the transport
-# boundary, so the cache key, the argument handed to Kokoro and the rate reported
-# back to the client can never disagree about which rate was asked for. The
-# quantisation matches `TTSEngine._cache_key`'s 2-decimal normalisation.
-MIN_SPEED = 0.5
-MAX_SPEED = 3.0
+from services.tts_engine import TTSEngine, SynthJob, normalize_speed
 
 
 def _requested_speed(msg: dict) -> float:
     """Validate and normalise the `speed` field of an inbound message.
 
-    Raises ValueError with a client-safe message so the caller can report it
+    A thin wrapper over the shared normaliser so the WebSocket path and the MP3
+    export path cannot drift apart in what they accept — they used to. Raises
+    ValueError with a client-safe message so the caller can report the problem
     rather than letting a bad value reach Kokoro.
     """
-    try:
-        speed = float(msg.get("speed", 1.0))
-    except (TypeError, ValueError):
-        raise ValueError("speed must be a number")
-    if not math.isfinite(speed):
-        raise ValueError("speed must be finite")
-    if speed <= 0:
-        raise ValueError("speed must be greater than zero")
-    return round(min(max(speed, MIN_SPEED), MAX_SPEED), 2)
+    return normalize_speed(msg.get("speed", 1.0))
 
 router = APIRouter()
 
@@ -240,7 +219,10 @@ async def tts_websocket(websocket: WebSocket, book_id: str):
                 await _cancel_and_clear()
                 producer_task = asyncio.create_task(_producer(from_index, voice, speed))
                 consumer_task = asyncio.create_task(_consumer_with_events(session_id))
-                # Pre-warm cache for the next 25 sentences after the current position.
+                # Warm the cache ahead of the current position. The bound that
+                # matters is the audio-time budget inside prefetch (60 s by
+                # default); the 50 here is only a hard safety cap, and this
+                # comment used to claim 25.
                 prefetch_cancel.clear()
                 prefetch_task = asyncio.create_task(
                     engine_tts.prefetch(sentence_data, from_index + 1, 50, voice, speed, prefetch_cancel)
