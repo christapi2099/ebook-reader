@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlmodel import Session, select
+from sqlmodel import Session, func, select
 
 from db.database import get_session
 from db.models import Book, Bookmark, Folder, MP3Export, Progress, Sentence
@@ -20,11 +20,26 @@ class FolderAssignment(BaseModel):
     folder_id: int | None = None
 
 
-def _serialize(book: Book) -> dict:
+def _serialize(book: Book, sentence_count: int, sentence_index: int | None) -> dict:
+    """One library row, including the two fields progress needs.
+
+    `sentence_count` and `sentence_index` are the only honest denominator and
+    numerator for reading progress. `page_count` is not: it means PDF pages, or a
+    sentence count, or a derived ``len(text) // 10`` depending on file_type, so a
+    client that divides by it shows a wrong percentage for two of the three
+    formats.
+
+    They are emitted here rather than fetched per book because the alternative is
+    what the library used to do: pull every started book's FULL sentence list —
+    including word bounding boxes it never reads — purely to learn a total. That
+    is one request per book on a page that should cost one.
+    """
     return {"id": book.id, "title": book.title, "author": book.author,
             "file_type": book.file_type, "page_count": book.page_count,
             "created_at": book.created_at, "last_opened": book.last_opened,
-            "folder_id": book.folder_id}
+            "folder_id": book.folder_id,
+            "sentence_count": sentence_count,
+            "sentence_index": sentence_index}
 
 
 @router.get("")
@@ -33,7 +48,17 @@ def list_books(session: Session = Depends(get_session)):
     books = session.exec(
         select(Book).where(Book.ephemeral == False)
     ).all()
-    return [_serialize(b) for b in books]
+
+    # Two grouped queries covering the whole library, rather than two per book.
+    counts = dict(session.exec(
+        select(Sentence.book_id, func.count(Sentence.id)).group_by(Sentence.book_id)
+    ).all())
+    positions = {p.book_id: p.sentence_index for p in session.exec(select(Progress)).all()}
+
+    return [
+        _serialize(b, counts.get(b.id, 0), positions.get(b.id))
+        for b in books
+    ]
 
 
 @router.post("/{book_id}/progress")
@@ -81,7 +106,11 @@ def get_book(book_id: str, session: Session = Depends(get_session)):
     book = session.get(Book, book_id)
     if not book:
         raise HTTPException(status_code=404, detail="Book not found")
-    return _serialize(book)
+    count = session.exec(
+        select(func.count(Sentence.id)).where(Sentence.book_id == book_id)
+    ).one()
+    row = session.get(Progress, book_id)
+    return _serialize(book, count, row.sentence_index if row else None)
 
 
 @router.get("/{book_id}/progress")
