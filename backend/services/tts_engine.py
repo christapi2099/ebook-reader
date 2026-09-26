@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import io
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime, UTC
 from typing import AsyncGenerator, Any
@@ -13,8 +14,43 @@ from sqlmodel import Session
 import db.database as _db
 from db.models import AudioCache
 
+logger = logging.getLogger(__name__)
+
 INT16_MAX = 32767
 SAMPLE_RATE = 24000
+
+# Speeds are normalised to this many decimals before being hashed into a cache
+# key. The UI only offers multiples of 0.25 in [0.5, 3.0], so two decimals is
+# lossless for every reachable input while collapsing float noise
+# (1.15 vs 1.1500000000000001) onto a single key.
+SPEED_PRECISION = 2
+
+_g2p = None
+
+
+def _get_g2p():
+    """Return the process-wide misaki G2P instance, constructing it on first use.
+
+    ``G2P()`` loads pronunciation dictionaries and a spaCy pipeline, so building
+    a fresh one per sentence was pure waste on the word-timestamp path.
+    """
+    global _g2p
+    if _g2p is None:
+        from misaki.en import G2P
+
+        _g2p = G2P()
+    return _g2p
+
+
+def _is_spoken_token(token: Any) -> bool:
+    """True when a misaki token is a real word rather than bare punctuation.
+
+    This predicate must be applied identically on both the stored-timestamp path
+    and the estimated-timestamp path. When the two disagreed, the word list for
+    a sentence changed the moment that sentence became cached, and the reader's
+    word highlighting visibly shifted underneath the user.
+    """
+    return bool(token.phonemes) and any(c.isalnum() for c in token.text)
 
 
 @dataclass
@@ -37,10 +73,8 @@ class TTSEngine:
     def _proportional_timestamps(self, text: str, duration_ms: int) -> list[dict]:
         """Estimate word timestamps proportionally by phoneme count. ~3ms, no GPU."""
         try:
-            from misaki.en import G2P
-            g2p = G2P()
-            _, tokens = g2p(text)
-            words = [(t.text, len(t.phonemes)) for t in tokens if t.phonemes]
+            _, tokens = _get_g2p()(text)
+            words = [(t.text, len(t.phonemes)) for t in tokens if _is_spoken_token(t)]
             total_phonemes = sum(p for _, p in words)
             if total_phonemes == 0:
                 return []
@@ -58,22 +92,44 @@ class TTSEngine:
             return []
 
     def _cache_key(self, text: str, voice: str, speed: float) -> str:
-        return hashlib.sha256(f"{text}:{voice}:{speed}".encode()).hexdigest()
+        normalised = f"{round(float(speed), SPEED_PRECISION):.{SPEED_PRECISION}f}"
+        return hashlib.sha256(f"{text}:{voice}:{normalised}".encode()).hexdigest()
 
-    def _call_kokoro(self, text: str, voice: str, speed: float) -> list:
-        if self._speed_kwarg_supported is not False:
-            try:
-                result = self.kokoro(text, voice=voice, speed=speed)
-                self._speed_kwarg_supported = True
-                return result
-            except TypeError:
-                import logging
-                logging.warning("Kokoro speed= kwarg not supported — falling back to 1.0x for this session")
-                self._speed_kwarg_supported = False
+    def _effective_speed(self, requested: float) -> float:
+        """The rate audio will actually be produced at.
+
+        Until the first synthesis proves otherwise we optimistically assume the
+        requested speed is honoured. Once a call has shown it cannot be, this
+        collapses to 1.0 for the lifetime of the engine.
+        """
+        return 1.0 if self._speed_kwarg_supported is False else requested
+
+    def _call_kokoro(self, text: str, voice: str, speed: float) -> tuple[list, float]:
+        """Synthesize `text`, returning ``(results, effective_speed)``.
+
+        ``effective_speed`` is the rate the audio was really produced at. It can
+        only differ from ``speed`` on a Kokoro build that rejects the ``speed``
+        kwarg, in which case this engine degrades to 1.0x for the rest of the
+        session. Callers must key any cache on ``effective_speed`` and never on
+        the requested value: keying on the request stored a 1.0x render under the
+        1.5x key, permanently, so every later 1.5x request replayed the wrong
+        rate straight out of the cache.
+        """
+        if self._speed_kwarg_supported is False:
+            return self.kokoro(text, voice=voice), 1.0
+
         try:
-            return self.kokoro(text, voice=voice)
+            results = self.kokoro(text, voice=voice, speed=speed)
         except TypeError:
-            return self.kokoro(text)
+            logger.warning(
+                "Installed Kokoro does not accept the speed= kwarg; "
+                "synthesising at 1.0x and labelling the audio as such"
+            )
+            self._speed_kwarg_supported = False
+            return self.kokoro(text, voice=voice), 1.0
+
+        self._speed_kwarg_supported = True
+        return results, speed
 
     def _collect_result(
         self,
@@ -87,7 +143,7 @@ class TTSEngine:
         audio_parts.append(audio_data)
 
         for t in (getattr(result, 'tokens', None) or []):
-            if t.phonemes and any(c.isalnum() for c in t.text):
+            if _is_spoken_token(t):
                 word_timestamps.append({
                     "word": t.text,
                     "start": round((t.start_ts or 0) + audio_offset, 4),
@@ -97,6 +153,12 @@ class TTSEngine:
         audio_flat = audio_data.flatten() if audio_data.ndim > 1 else audio_data
         return audio_data, audio_offset + len(audio_flat) / SAMPLE_RATE
 
+    @staticmethod
+    def _audio_duration_ms(audio_parts: list[np.ndarray]) -> int:
+        """Duration of the concatenated audio without materialising the copy."""
+        frames = sum(part.shape[0] for part in audio_parts)
+        return int(frames / SAMPLE_RATE * 1000)
+
     def _write_cache_entry(
         self,
         audio_parts: list[np.ndarray],
@@ -105,7 +167,7 @@ class TTSEngine:
         voice: str,
     ) -> tuple[np.ndarray, int]:
         full_audio = np.concatenate(audio_parts)
-        duration_ms = int(len(full_audio) / SAMPLE_RATE * 1000)
+        duration_ms = self._audio_duration_ms(audio_parts)
         pcm = (full_audio * INT16_MAX).clip(-INT16_MAX, INT16_MAX).astype(np.int16).tobytes()
 
         entry = AudioCache(
@@ -129,7 +191,8 @@ class TTSEngine:
         if job.sentence_index in self.cancelled or self.kokoro is None:
             return
 
-        cache_key = self._cache_key(job.text, job.voice, job.speed)
+        effective_speed = self._effective_speed(job.speed)
+        cache_key = self._cache_key(job.text, job.voice, effective_speed)
 
         with Session(_db.engine) as session:
             cached = session.get(AudioCache, cache_key)
@@ -141,6 +204,8 @@ class TTSEngine:
             self._sentence_meta[job.sentence_index] = {
                 "word_timestamps": word_ts,
                 "duration_ms": cached.duration_ms,
+                "requested_speed": job.speed,
+                "effective_speed": effective_speed,
             }
             audio_data = np.frombuffer(cached.audio_data, dtype=np.int16).astype(np.float32) / INT16_MAX
             chunk_samples = SAMPLE_RATE // 10
@@ -153,7 +218,9 @@ class TTSEngine:
                 yield buf.getvalue()
             return
 
-        results = self._call_kokoro(job.text, job.voice, job.speed)
+        # This call may be the one that discovers the installed Kokoro cannot
+        # honour `speed`, so it hands back the rate it actually used.
+        results, effective_speed = self._call_kokoro(job.text, job.voice, job.speed)
         audio_parts: list[np.ndarray] = []
         word_timestamps: list[dict] = []
         audio_offset = 0.0
@@ -175,16 +242,25 @@ class TTSEngine:
                 yield buf.getvalue()
 
         if audio_parts and job.sentence_index not in self.cancelled:
+            # Re-derive the key: `_call_kokoro` above may have just proved the
+            # requested speed cannot be honoured, which changes which key this
+            # audio legitimately belongs under.
+            cache_key = self._cache_key(job.text, job.voice, effective_speed)
             try:
                 _, duration_ms = self._write_cache_entry(
                     audio_parts, word_timestamps, cache_key, job.voice,
                 )
-                self._sentence_meta[job.sentence_index] = {
-                    "word_timestamps": word_timestamps,
-                    "duration_ms": duration_ms,
-                }
             except Exception:
-                pass
+                logger.warning(
+                    "Failed to cache sentence %s", job.sentence_index, exc_info=True,
+                )
+                duration_ms = self._audio_duration_ms(audio_parts)
+            self._sentence_meta[job.sentence_index] = {
+                "word_timestamps": word_timestamps,
+                "duration_ms": duration_ms,
+                "requested_speed": job.speed,
+                "effective_speed": effective_speed,
+            }
 
     async def prefetch(
         self,
@@ -205,7 +281,8 @@ class TTSEngine:
             s = sentences[idx]
             if s["filtered"]:
                 continue
-            cache_key = self._cache_key(s["text"], voice, speed)
+            effective_speed = self._effective_speed(speed)
+            cache_key = self._cache_key(s["text"], voice, effective_speed)
             with Session(_db.engine) as session:
                 already = session.get(AudioCache, cache_key)
             if already is not None:
@@ -213,7 +290,7 @@ class TTSEngine:
                 await asyncio.sleep(0)
                 continue
             try:
-                results = self._call_kokoro(s["text"], voice, speed)
+                results, effective_speed = self._call_kokoro(s["text"], voice, speed)
                 audio_parts: list[np.ndarray] = []
                 word_timestamps: list[dict] = []
                 audio_offset = 0.0
@@ -223,11 +300,17 @@ class TTSEngine:
                     _, audio_offset = self._collect_result(
                         result, audio_parts, word_timestamps, audio_offset,
                     )
+                    # Kokoro synthesis happens during iteration, so yield between
+                    # results or a long sentence monopolises the event loop.
+                    await asyncio.sleep(0)
                 if audio_parts:
                     self._write_cache_entry(
-                        audio_parts, word_timestamps, cache_key, voice,
+                        audio_parts,
+                        word_timestamps,
+                        self._cache_key(s["text"], voice, effective_speed),
+                        voice,
                     )
             except Exception:
-                pass
+                logger.warning("Prefetch failed for sentence %s", idx, exc_info=True)
             synthesized += 1
             await asyncio.sleep(0)
