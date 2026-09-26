@@ -19,6 +19,23 @@ router = APIRouter(prefix="/documents")
 UPLOAD_DIR = Path("uploads")
 
 
+def _import_response(book_id: str, sentence_count: int, *, already_existed: bool) -> dict:
+    """What both import endpoints report back.
+
+    Upload and text produce the same response shape, and each built it twice —
+    once on the already-existed early return and once on the fresh import — for
+    four copies of a three-field contract. This is what the frontend's
+    `{ book_id, sentence_count, already_existed }` expects, so it lives in one
+    place. `already_existed` is a payload field rather than a control flag: this
+    function does not branch on it.
+    """
+    return {
+        "book_id": book_id,
+        "sentence_count": sentence_count,
+        "already_existed": already_existed,
+    }
+
+
 @router.post("/upload")
 async def upload_document(
     file: UploadFile = File(...),
@@ -30,7 +47,7 @@ async def upload_document(
     existing = session.get(Book, book_id)
     if existing:
         count = len(session.exec(select(Sentence).where(Sentence.book_id == book_id)).all())
-        return {"book_id": book_id, "sentence_count": count, "already_existed": True}
+        return _import_response(book_id, count, already_existed=True)
 
     ext = (file.filename or "file.pdf").rsplit(".", 1)[-1].lower()
     if ext not in ("pdf", "epub"):
@@ -83,7 +100,7 @@ async def upload_document(
     ))
     session.commit()
 
-    return {"book_id": book_id, "sentence_count": len(sentence_objs), "already_existed": False}
+    return _import_response(book_id, len(sentence_objs), already_existed=False)
 
 
 @router.get("/{book_id}/sentences")
@@ -115,7 +132,7 @@ def create_text_book(text_data: dict, session: Session = Depends(get_session)):
     existing = session.get(Book, book_id)
     if existing:
         count = len(session.exec(select(Sentence).where(Sentence.book_id == book_id)).all())
-        return {"book_id": book_id, "sentence_count": count, "already_existed": True}
+        return _import_response(book_id, count, already_existed=True)
     
     # Extract sentences using TextEngine
     engine = TextEngine()
@@ -149,7 +166,7 @@ def create_text_book(text_data: dict, session: Session = Depends(get_session)):
     ))
     session.commit()
     
-    return {"book_id": book_id, "sentence_count": len(sentence_objs), "already_existed": False}
+    return _import_response(book_id, len(sentence_objs), already_existed=False)
 
 
 @router.patch("/text/{book_id}")
