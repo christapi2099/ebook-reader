@@ -4,6 +4,7 @@
   import type { Book, Voice, ExportItem } from '$lib/api'
   import { getLibrary } from '$lib/api'
   import Button from '$lib/ui/Button.svelte'
+  import Dialog from '$lib/ui/Dialog.svelte'
 
   let exports = $state<ExportItem[]>([])
   let books = $state<Book[]>([])
@@ -159,26 +160,31 @@
 </div>
 
 {#if showDialog}
-  <div class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center" onclick={() => (showDialog = false)}>
-    <div class="bg-white rounded-xl p-6 max-w-md w-full shadow-xl mx-4" onclick={(e) => e.stopPropagation()}>
-      <h2 class="text-lg font-bold text-slate-800 mb-4">Export as MP3</h2>
+  <Dialog
+    titleId="mp3-export-title"
+    onClose={() => (showDialog = false)}
+    closeOnBackdrop
+    initialFocus="#book-select"
+  >
+    <div class="bg-surface rounded-xl p-6 max-w-md w-full shadow-3 mx-4">
+      <h2 id="mp3-export-title" class="text-lg font-bold text-fg mb-4">Export as MP3</h2>
 
-      <label for="book-select" class="block text-sm font-medium text-slate-700 mb-1">Book</label>
-      <select id="book-select" bind:value={selectedBookId} class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm mb-3">
+      <label for="book-select" class="block text-sm font-medium text-fg mb-1">Book</label>
+      <select id="book-select" bind:value={selectedBookId} class="w-full px-3 py-2 border border-border-strong bg-surface text-fg rounded-lg text-sm mb-3">
         <option value="">Select a book…</option>
         {#each books as book}
           <option value={book.id}>{book.title}</option>
         {/each}
       </select>
 
-      <label for="voice-select" class="block text-sm font-medium text-slate-700 mb-1">Voice</label>
-      <select id="voice-select" bind:value={selectedVoice} class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm mb-3">
+      <label for="voice-select" class="block text-sm font-medium text-fg mb-1">Voice</label>
+      <select id="voice-select" bind:value={selectedVoice} class="w-full px-3 py-2 border border-border-strong bg-surface text-fg rounded-lg text-sm mb-3">
         {#each voices as voice}
           <option value={voice.id}>{voice.name} ({voice.id})</option>
         {/each}
       </select>
 
-      <label id="speed-label" for="speed-group" class="block text-sm font-medium text-slate-700 mb-1">Speed</label>
+      <label id="speed-label" for="speed-group" class="block text-sm font-medium text-fg mb-1">Speed</label>
       <div id="speed-group" class="flex gap-1 mb-4" role="radiogroup" aria-labelledby="speed-label">
         {#each speeds as s}
           <Button
@@ -211,5 +217,5 @@
         </Button>
       </div>
     </div>
-  </div>
+  </Dialog>
 {/if}
