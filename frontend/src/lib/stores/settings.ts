@@ -28,9 +28,16 @@ export interface SettingsState {
   bionicMode: boolean
   bionicFixation: number
   bionicBoldRatio: number
+  /** Words shorter than this are left unbolded (`BionicOptions.minWordLength`). */
+  bionicMinWordLength: number
+  /** Leave the `COMMON_WORDS` set unbolded (`BionicOptions.skipCommonWords`). */
+  bionicSkipCommonWords: boolean
   highlightEnabled: boolean
   theme: Theme
 }
+
+/** Bounds of the minimum-word-length slider, in characters. */
+export const BIONIC_MIN_WORD_LENGTH_RANGE = { min: 1, max: 8 } as const
 
 const DEFAULTS: SettingsState = {
   voice: 'af_heart',
@@ -40,6 +47,10 @@ const DEFAULTS: SettingsState = {
   bionicMode: false,
   bionicFixation: 1,
   bionicBoldRatio: 0.5,
+  // Match `DEFAULT_BIONIC_OPTIONS`, so an untouched install renders exactly what
+  // the algorithm's own defaults describe.
+  bionicMinWordLength: 3,
+  bionicSkipCommonWords: true,
   highlightEnabled: true,
   theme: 'system',
 }
@@ -50,6 +61,15 @@ function isValidColor(c: string): boolean {
 
 function isValidTheme(t: unknown): t is Theme {
   return t === 'light' || t === 'sepia' || t === 'dark' || t === 'system'
+}
+
+function isMinWordLength(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= BIONIC_MIN_WORD_LENGTH_RANGE.min &&
+    value <= BIONIC_MIN_WORD_LENGTH_RANGE.max
+  )
 }
 
 function resolveTheme(theme: Theme): 'light' | 'sepia' | 'dark' {
@@ -84,6 +104,12 @@ function readFromStorage(): SettingsState {
       bionicBoldRatio: typeof parsed.bionicBoldRatio === 'number' && parsed.bionicBoldRatio >= 0.2 && parsed.bionicBoldRatio <= 0.8
         ? parsed.bionicBoldRatio
         : DEFAULTS.bionicBoldRatio,
+      bionicMinWordLength: isMinWordLength(parsed.bionicMinWordLength)
+        ? parsed.bionicMinWordLength
+        : DEFAULTS.bionicMinWordLength,
+      bionicSkipCommonWords: typeof parsed.bionicSkipCommonWords === 'boolean'
+        ? parsed.bionicSkipCommonWords
+        : DEFAULTS.bionicSkipCommonWords,
       highlightEnabled: typeof parsed.highlightEnabled === 'boolean' ? parsed.highlightEnabled : DEFAULTS.highlightEnabled,
       theme: isValidTheme(parsed.theme) ? parsed.theme : DEFAULTS.theme,
     }
@@ -163,6 +189,19 @@ function createSettingsStore() {
       if (!Number.isFinite(value)) return
       const clamped = Math.max(0.2, Math.min(0.8, Math.round(value * 20) / 20))
       update(s => ({ ...s, bionicBoldRatio: clamped }))
+    },
+
+    setBionicMinWordLength(value: number) {
+      if (!Number.isFinite(value)) return
+      const clamped = Math.max(
+        BIONIC_MIN_WORD_LENGTH_RANGE.min,
+        Math.min(BIONIC_MIN_WORD_LENGTH_RANGE.max, Math.round(value)),
+      )
+      update(s => ({ ...s, bionicMinWordLength: clamped }))
+    },
+
+    toggleBionicSkipCommonWords() {
+      update(s => ({ ...s, bionicSkipCommonWords: !s.bionicSkipCommonWords }))
     },
 
     toggleHighlight() {

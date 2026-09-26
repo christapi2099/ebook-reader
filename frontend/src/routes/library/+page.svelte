@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte'
+  import { get } from 'svelte/store'
   import { goto } from '$app/navigation'
   import {
     createFolder,
@@ -7,12 +8,16 @@
     deleteFolder,
     getFolders,
     getLibrary,
+    getProgress,
+    getSentences,
     renameFolder,
     setBookFolder,
     type Book,
     type Folder,
   } from '$lib/api'
   import { toDetailMessage } from '$lib/utils/errors'
+  import type { StoredProgress } from '$lib/utils/reading-progress'
+  import readerStore from '$lib/stores/reader'
   import BookGrid from '$lib/components/BookGrid.svelte'
   import FolderTile from '$lib/components/FolderTile.svelte'
   import FolderNameDialog from '$lib/components/FolderNameDialog.svelte'
@@ -23,9 +28,14 @@
 
   let books = $state<Book[]>([])
   let folders = $state<Folder[]>([])
+  /** Reading positions for the cards, keyed by book id. */
+  let progress = $state<Record<string, StoredProgress>>({})
   let loading = $state(true)
   let error = $state<string | null>(null)
   let foldersError = $state<string | null>(null)
+
+  /** Discriminates progress loads, so a slow one cannot overwrite a newer one. */
+  let progressRun = 0
 
   /** `null` is the "All books" view; otherwise the folder being browsed. */
   let openFolderId = $state<number | null>(null)
@@ -50,6 +60,8 @@
 
     if (booksResult.status === 'fulfilled') {
       books = booksResult.value
+      // Cards appear first; their progress bars fill in when the reads land.
+      void loadProgress(booksResult.value)
     } else {
       error = 'Could not connect to the backend. Make sure it is running on port 8000.'
     }
@@ -65,6 +77,45 @@
   }
 
   /**
+   * Read every visible book's position.
+   *
+   * `GET /library/{book_id}/progress` is the only place a position lives, and it
+   * returns the sentence index without a total, so the total comes from
+   * `GET /documents/{book_id}/sentences` — asked for only on books that have
+   * actually been started, and skipped when the reader store already holds that
+   * book's sentences from this session. A book whose total cannot be read gets
+   * no bar: an honest gap beats a guessed percentage.
+   */
+  async function loadProgress(forBooks: Book[]) {
+    const run = ++progressRun
+    const loaded = get(readerStore)
+
+    const results = await Promise.allSettled(
+      forBooks.map(async (book): Promise<[string, StoredProgress]> => {
+        const sentenceIndex = await getProgress(book.id)
+        if (sentenceIndex <= 0) return [book.id, { sentenceIndex, totalSentences: null }]
+
+        const totalSentences =
+          loaded.bookId === book.id && loaded.sentences.length > 0
+            ? loaded.sentences.length
+            : (await getSentences(book.id)).length
+
+        return [book.id, { sentenceIndex, totalSentences }]
+      }),
+    )
+
+    if (run !== progressRun) return
+
+    const next: Record<string, StoredProgress> = {}
+    for (const result of results) {
+      if (result.status !== 'fulfilled') continue
+      const [bookId, entry] = result.value
+      next[bookId] = entry
+    }
+    progress = next
+  }
+
+  /**
    * Reload both lists after a change. Failures are reported as a toast rather
    * than replacing the grid, because the change itself already succeeded.
    */
@@ -73,6 +124,7 @@
       const [nextBooks, nextFolders] = await Promise.all([getLibrary(), getFolders()])
       books = nextBooks
       folders = nextFolders
+      void loadProgress(nextBooks)
       forgetClosedFolder()
     } catch (e) {
       toastStore.push({
@@ -362,6 +414,7 @@
       books={visibleBooks}
       {loading}
       {error}
+      {progress}
       onRetry={fetchLibrary}
       onClick={(id) => goto(`/reader/${id}`)}
       onDelete={handleDelete}

@@ -1,8 +1,40 @@
-"""TDD tests for services/tts_engine.py. Mocks Kokoro so no GPU required."""
+"""TDD tests for services/tts_engine.py. Mocks Kokoro so no GPU required.
+
+The cache tests run against a real SQLite database: the autouse guard in
+conftest.py points ``db.database.engine`` at a throwaway in-memory engine, so
+``stream_job``'s AudioCache reads and writes are exercised for real instead of
+being asserted against a Mock of ``Session``.
+"""
+import json
+
 import pytest
 import asyncio
+import numpy as np
 from unittest.mock import MagicMock, patch, AsyncMock
-from services.tts_engine import TTSEngine, SynthJob
+from sqlmodel import Session
+
+from db.models import AudioCache
+from services.tts_engine import SAMPLE_RATE, TTSEngine, SynthJob
+
+
+def _kokoro_spy(inner=None, samples: int = 2400):
+    """A fake pipeline that records every call it receives.
+
+    Returns ``(kokoro, calls)`` where ``calls`` accumulates ``(text, voice,
+    speed)`` tuples, so a test can assert what the engine really passed down
+    without mocking the engine's own collaborators.
+    """
+    if inner is None:
+        def inner(text, voice="af_heart", speed=1.0):
+            yield (None, None, np.ones(samples, dtype=np.float32))
+
+    calls: list[tuple[str, str, float]] = []
+
+    def kokoro(text, voice="af_heart", speed=1.0):
+        calls.append((text, voice, speed))
+        return inner(text, voice=voice, speed=speed)
+
+    return kokoro, calls
 
 
 class TestSynthJob:
@@ -53,32 +85,54 @@ class TestEnqueue:
         assert engine.queue.qsize() == 3
 
 
-class TestCancelFrom:
-    @pytest.mark.asyncio
-    async def test_cancel_marks_indices(self):
-        engine = TTSEngine(kokoro=None)
-        for i in range(5):
-            await engine.enqueue(SynthJob(sentence_index=i, text=f"Sentence {i}."))
-        await engine.cancel_from(sentence_index=2)
-        assert 2 in engine.cancelled
-        assert 3 in engine.cancelled
-        assert 4 in engine.cancelled
+class TestCancellation:
+    """Cancellation as it works after ``cancel_from()`` was removed (04d6cfe).
+
+    The responsibility is split in two now:
+
+    * ``TTSEngine.stream_job`` consults ``engine.cancelled`` and stops emitting
+      for a cancelled index -- tested here against the real method.
+    * ``routers.tts._cancel_and_clear`` owns draining ``engine.queue`` and
+      resetting ``engine.cancelled``; that half is covered end to end in
+      tests/test_websocket_integration.py (stale-session and pause tests), which
+      drive the real WebSocket handler.
+    """
 
     @pytest.mark.asyncio
-    async def test_cancel_clears_queue(self):
-        engine = TTSEngine(kokoro=None)
-        for i in range(5):
-            await engine.enqueue(SynthJob(sentence_index=i, text=f"Sentence {i}."))
-        await engine.cancel_from(sentence_index=0)
-        assert engine.queue.empty()
+    async def test_cancelled_job_yields_nothing_and_skips_synthesis(self):
+        kokoro, calls = _kokoro_spy()
+        engine = TTSEngine(kokoro)
+        engine.cancelled.add(0)
+
+        chunks = [
+            chunk
+            async for chunk in engine.stream_job(SynthJob(sentence_index=0, text="Skipped."))
+        ]
+
+        assert chunks == []
+        assert calls == [], "a cancelled job must not reach the pipeline"
+        assert engine._sentence_meta == {}
 
     @pytest.mark.asyncio
-    async def test_cancel_clears_cancelled_set_after_reset(self):
-        engine = TTSEngine(kokoro=None)
-        await engine.enqueue(SynthJob(sentence_index=0, text="Test."))
-        await engine.cancel_from(sentence_index=0)
-        await engine.enqueue(SynthJob(sentence_index=5, text="New start."))
-        assert engine.queue.qsize() == 1
+    async def test_cancelling_mid_stream_stops_the_audio(self, fake_kokoro_factory):
+        """Cancelling mid-sentence truncates the stream and skips the cache write."""
+        import db.database as database
+
+        engine = TTSEngine(fake_kokoro_factory(4800))  # two 100 ms chunks
+        job = SynthJob(sentence_index=0, text="Long sentence.")
+        stream = engine.stream_job(job)
+
+        first = await stream.__anext__()
+        assert first.startswith(b"RIFF")
+
+        engine.cancelled.add(0)
+        with pytest.raises(StopAsyncIteration):
+            await stream.__anext__()
+
+        with Session(database.engine) as session:
+            key = engine._cache_key(job.text, job.voice, job.speed)
+            assert session.get(AudioCache, key) is None, "half-synthesized audio must not be cached"
+        assert engine._sentence_meta == {}
 
 
 class TestCacheKey:
@@ -119,248 +173,202 @@ class TestCacheKeyWithSpeed:
         assert k1 != k2
 
 
-class TestStreamNext:
-    @pytest.mark.asyncio
-    async def test_skips_cancelled_job(self):
-        from unittest.mock import patch, MagicMock
-        mock_kokoro = MagicMock()
-        mock_kokoro.return_value = [("g", "p", MagicMock())]
-        mock_session = MagicMock()
-        mock_session.get.return_value = None
-        mock_session_context = MagicMock()
-        mock_session_context.__enter__.return_value = mock_session
-        mock_session_context.__exit__.return_value = None
-        with patch('services.tts_engine.Session', return_value=mock_session_context):
-            engine = TTSEngine(kokoro=mock_kokoro)
-            job = SynthJob(sentence_index=0, text="Skipped.")
-            await engine.enqueue(job)
-            engine.cancelled.add(0)
-            chunks = []
-            async for chunk in engine.stream_next():
-                chunks.append(chunk)
-            assert chunks == []
+class TestStreamJob:
+    """``stream_next()`` was replaced by ``stream_job(job)`` (04d6cfe).
+
+    A job is now handed to the generator directly instead of being pulled off
+    ``engine.queue``; ``enqueue``/``queue`` still exist for the router's producer
+    task and are covered by TestEnqueue above.
+    """
 
     @pytest.mark.asyncio
-    async def test_yields_bytes_for_valid_job(self):
-        import numpy as np
-        from unittest.mock import patch, MagicMock
-        mock_audio = np.zeros(24000, dtype=np.float32)
-        mock_kokoro = MagicMock(return_value=[("graphemes", "phonemes", mock_audio)])
-        mock_session = MagicMock()
-        mock_session.get.return_value = None  # cache miss
-        mock_session_context = MagicMock()
-        mock_session_context.__enter__.return_value = mock_session
-        mock_session_context.__exit__.return_value = None
-        with patch('services.tts_engine.Session', return_value=mock_session_context):
-            engine = TTSEngine(kokoro=mock_kokoro)
-            job = SynthJob(sentence_index=0, text="Hello world this is a test.")
-            await engine.enqueue(job)
-            chunks = []
-            async for chunk in engine.stream_next():
-                chunks.append(chunk)
-            assert len(chunks) > 0
-            assert all(isinstance(c, bytes) for c in chunks)
+    async def test_yields_decodable_wav_chunks_for_valid_job(self):
+        import io
+        import soundfile as sf
+
+        kokoro, calls = _kokoro_spy(samples=2400)
+        engine = TTSEngine(kokoro)
+        job = SynthJob(sentence_index=0, text="Hello world this is a test.")
+
+        chunks = [chunk async for chunk in engine.stream_job(job)]
+
+        assert calls == [(job.text, job.voice, job.speed)]
+        assert len(chunks) == 1, "2400 samples is exactly one 100 ms chunk"
+        assert all(isinstance(c, bytes) for c in chunks)
+        decoded, rate = sf.read(io.BytesIO(chunks[0]))
+        assert rate == SAMPLE_RATE
+        assert len(decoded) == 2400
+
+    @pytest.mark.asyncio
+    async def test_yields_nothing_when_no_pipeline_is_loaded(self):
+        """The app can start without Kokoro; that must not raise."""
+        engine = TTSEngine(kokoro=None)
+        chunks = [
+            chunk
+            async for chunk in engine.stream_job(SynthJob(sentence_index=0, text="Test."))
+        ]
+        assert chunks == []
 
 
 class TestAudioCacheIntegration:
-    @pytest.mark.asyncio
-    async def test_cache_hit_skips_kokoro(self):
-        import numpy as np
-        from unittest.mock import patch, MagicMock, call
-        mock_kokoro = MagicMock()
-        mock_audio = np.zeros(24000, dtype=np.float32)
-        cached_entry = MagicMock()
-        cached_entry.audio_data = (mock_audio * 32768).astype(np.int16).tobytes()
-        mock_session = MagicMock()
-        mock_session.get.return_value = cached_entry
-        mock_session_context = MagicMock()
-        mock_session_context.__enter__.return_value = mock_session
-        mock_session_context.__exit__.return_value = None
-        with patch('services.tts_engine.Session', return_value=mock_session_context):
-            engine = TTSEngine(kokoro=mock_kokoro)
-            job = SynthJob(sentence_index=0, text="Cached.")
-            await engine.enqueue(job)
-            chunks = []
-            async for chunk in engine.stream_next():
-                chunks.append(chunk)
-            mock_kokoro.assert_not_called()
-            assert len(chunks) > 0
+    """``stream_job`` cache behaviour against a real AudioCache table.
+
+    The autouse guard in conftest.py points ``db.database.engine`` at a
+    throwaway in-memory database, so these tests exercise the real SQLModel
+    queries. The old versions asserted against a Mock of ``Session``, which is
+    why they could not have caught a broken cache in the first place.
+    """
 
     @pytest.mark.asyncio
-    async def test_cache_miss_calls_kokoro(self):
-        import numpy as np
-        from unittest.mock import patch, MagicMock, call
-        mock_kokoro = MagicMock()
-        mock_audio = np.zeros(24000, dtype=np.float32)
-        mock_kokoro.return_value = [("g", "p", mock_audio)]
-        mock_session = MagicMock()
-        mock_session.get.return_value = None
-        mock_session_context = MagicMock()
-        mock_session_context.__enter__.return_value = mock_session
-        mock_session_context.__exit__.return_value = None
-        with patch('services.tts_engine.Session', return_value=mock_session_context):
-            engine = TTSEngine(kokoro=mock_kokoro)
-            job = SynthJob(sentence_index=0, text="Uncached.")
-            await engine.enqueue(job)
-            chunks = []
-            async for chunk in engine.stream_next():
-                chunks.append(chunk)
-            mock_kokoro.assert_called_once_with(job.text, voice=job.voice, speed=job.speed)
-            assert len(chunks) > 0
+    async def test_cache_hit_skips_kokoro_and_replays_identical_audio(self):
+        kokoro, calls = _kokoro_spy(samples=2400)
+        engine = TTSEngine(kokoro)
+        job = SynthJob(sentence_index=0, text="Cached.")
+
+        first = [chunk async for chunk in engine.stream_job(job)]
+        assert calls == [("Cached.", "af_heart", 1.0)]
+        assert len(first) == 1
+
+        calls.clear()
+        engine._sentence_meta.clear()
+        second = [chunk async for chunk in engine.stream_job(job)]
+
+        assert calls == [], "cache hit must not call Kokoro again"
+        assert second == first, "cache hit must replay the same bytes"
+        assert engine._sentence_meta[0]["duration_ms"] == 100
 
     @pytest.mark.asyncio
-    async def test_cache_write_after_synthesis(self):
-        import numpy as np
-        from unittest.mock import patch, MagicMock, call
-        mock_kokoro = MagicMock()
-        mock_audio = np.zeros(24000, dtype=np.float32)
-        mock_kokoro.return_value = [("g", "p", mock_audio)]
-        mock_session = MagicMock()
-        mock_session.get.return_value = None
-        mock_session.add = MagicMock()
-        mock_session.commit = MagicMock()
-        mock_session_context = MagicMock()
-        mock_session_context.__enter__.return_value = mock_session
-        mock_session_context.__exit__.return_value = None
-        with patch('services.tts_engine.Session', return_value=mock_session_context):
-            engine = TTSEngine(kokoro=mock_kokoro)
-            job = SynthJob(sentence_index=0, text="To cache.")
-            await engine.enqueue(job)
-            chunks = []
-            async for chunk in engine.stream_next():
-                chunks.append(chunk)
-            mock_session.add.assert_called_once()
-            call_arg = mock_session.add.call_args[0][0]
-            assert call_arg.text_hash == engine._cache_key(job.text, job.voice, job.speed)
-            assert call_arg.audio_data is not None
-            mock_session.commit.assert_called_once()
+    async def test_cache_miss_calls_kokoro_with_the_job_speed(self):
+        kokoro, calls = _kokoro_spy(samples=2400)
+        engine = TTSEngine(kokoro)
+        job = SynthJob(sentence_index=0, text="Uncached.", voice="am_adam", speed=1.5)
+
+        chunks = [chunk async for chunk in engine.stream_job(job)]
+
+        assert chunks
+        assert calls == [("Uncached.", "am_adam", 1.5)]
 
     @pytest.mark.asyncio
-    async def test_cache_write_failure_does_not_break_synthesis(self):
-        import numpy as np
-        from unittest.mock import patch, MagicMock
-        mock_kokoro = MagicMock()
-        mock_audio = np.zeros(24000, dtype=np.float32)
-        mock_kokoro.return_value = [("g", "p", mock_audio)]
-        mock_session = MagicMock()
-        mock_session.get.return_value = None
-        mock_session.add = MagicMock()
-        mock_session.commit = MagicMock(side_effect=Exception("DB error"))
-        mock_session_context = MagicMock()
-        mock_session_context.__enter__.return_value = mock_session
-        mock_session_context.__exit__.return_value = None
-        with patch('services.tts_engine.Session', return_value=mock_session_context):
-            engine = TTSEngine(kokoro=mock_kokoro)
-            job = SynthJob(sentence_index=0, text="Cache write fails.")
-            await engine.enqueue(job)
-            chunks = []
-            async for chunk in engine.stream_next():
-                chunks.append(chunk)
-            assert len(chunks) > 0
-            mock_session.commit.assert_called_once()
+    async def test_cache_row_records_key_duration_and_audio(self):
+        import db.database as database
+
+        engine = TTSEngine(_kokoro_spy(samples=2400)[0])
+        job = SynthJob(sentence_index=0, text="To cache.", voice="af_heart", speed=1.5)
+
+        async for _ in engine.stream_job(job):
+            pass
+
+        with Session(database.engine) as session:
+            key = engine._cache_key(job.text, job.voice, job.speed)
+            entry = session.get(AudioCache, key)
+            assert entry is not None
+            assert entry.voice == "af_heart"
+            assert entry.duration_ms == 100
+            assert len(entry.audio_data) == 2400 * 2  # int16 PCM
+            assert entry.word_timestamps is None  # the fake result carries no tokens
+            # The speed is part of the key, so another speed is a different row.
+            assert session.get(AudioCache, engine._cache_key(job.text, job.voice, 1.0)) is None
 
     @pytest.mark.asyncio
-    async def test_cache_hit_yields_correct_chunks(self):
-        import numpy as np
+    async def test_cache_write_failure_does_not_break_synthesis(self, monkeypatch):
+        """A broken cache must cost the user nothing: audio still streams and the
+        duration is still reported, it just cannot be replayed later."""
+        engine = TTSEngine(_kokoro_spy(samples=2400)[0])
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("database is locked")
+
+        monkeypatch.setattr(engine, "_write_cache_entry", boom)
+        job = SynthJob(sentence_index=0, text="Cache write fails.")
+
+        chunks = [chunk async for chunk in engine.stream_job(job)]
+
+        assert len(chunks) == 1
+        assert chunks[0].startswith(b"RIFF")
+        assert engine._sentence_meta[0]["duration_ms"] == 100
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_chunks_decode_to_the_original_audio(self, fake_kokoro_factory):
         import io
         import soundfile as sf
-        from unittest.mock import patch, MagicMock
-        sample_rate = 24000
-        duration = 0.1
-        samples = int(sample_rate * duration)
-        audio = np.sin(2 * np.pi * 440 * np.arange(samples) / sample_rate).astype(np.float32)
-        pcm_bytes = (audio * 32768).astype(np.int16).tobytes()
-        cached_entry = MagicMock()
-        cached_entry.audio_data = pcm_bytes
-        mock_session = MagicMock()
-        mock_session.get.return_value = cached_entry
-        mock_session_context = MagicMock()
-        mock_session_context.__enter__.return_value = mock_session
-        mock_session_context.__exit__.return_value = None
-        with patch('services.tts_engine.Session', return_value=mock_session_context):
-            engine = TTSEngine(kokoro=MagicMock())
-            job = SynthJob(sentence_index=0, text="Cached audio.")
-            await engine.enqueue(job)
-            chunks = []
-            async for chunk in engine.stream_next():
-                chunks.append(chunk)
-            for chunk in chunks:
-                buf = io.BytesIO(chunk)
-                data, sr = sf.read(buf)
-                assert sr == sample_rate
-                assert len(data) > 0
+
+        engine = TTSEngine(fake_kokoro_factory(4800))  # two chunks
+        job = SynthJob(sentence_index=0, text="Two chunks.")
+
+        chunks = [chunk async for chunk in engine.stream_job(job)]
+        assert len(chunks) == 2
+
+        samples = []
+        for chunk in chunks:
+            data, rate = sf.read(io.BytesIO(chunk))
+            assert rate == SAMPLE_RATE
+            samples.extend(data)
+        assert len(samples) == 4800
+        assert all(abs(sample - 1.0) < 0.001 for sample in samples)
 
 
 class TestKokoroSpeedParam:
     @pytest.mark.asyncio
-    async def test_speed_passed_to_kokoro(self):
-        import numpy as np
-        from unittest.mock import patch, MagicMock
-        mock_audio = np.zeros(24000, dtype=np.float32)
-        mock_kokoro = MagicMock(return_value=[("g", "p", mock_audio)])
-        mock_session = MagicMock()
-        mock_session.get.return_value = None
-        mock_session_context = MagicMock()
-        mock_session_context.__enter__.return_value = mock_session
-        mock_session_context.__exit__.return_value = None
-        with patch('services.tts_engine.Session', return_value=mock_session_context):
-            engine = TTSEngine(kokoro=mock_kokoro)
-            job = SynthJob(sentence_index=0, text="Test", speed=1.5)
-            await engine.enqueue(job)
-            chunks = []
-            async for chunk in engine.stream_next():
-                chunks.append(chunk)
-            mock_kokoro.assert_called_once_with(job.text, voice=job.voice, speed=1.5)
+    @pytest.mark.parametrize("speed", [1.0, 1.5, 2.0, 3.0])
+    async def test_speed_reaches_kokoro_and_drives_the_reported_duration(
+        self, speed, fake_kokoro_factory
+    ):
+        """speed goes to KPipeline unchanged, and the duration the router reports
+        is derived from the audio Kokoro actually returned (2400/speed samples),
+        not recomputed from the requested speed."""
+        kokoro, calls = _kokoro_spy(fake_kokoro_factory(2400))
+        engine = TTSEngine(kokoro)
+        job = SynthJob(sentence_index=0, text="Test", speed=speed)
+
+        chunks = [chunk async for chunk in engine.stream_job(job)]
+
+        assert calls == [("Test", "af_heart", speed)]
+        assert chunks
+        expected_ms = int(round(2400 / speed) / SAMPLE_RATE * 1000)
+        assert engine._sentence_meta[0]["duration_ms"] == expected_ms
 
     @pytest.mark.asyncio
     async def test_speed_1x_default(self):
-        import numpy as np
-        from unittest.mock import patch, MagicMock
-        mock_audio = np.zeros(24000, dtype=np.float32)
-        mock_kokoro = MagicMock(return_value=[("g", "p", mock_audio)])
-        mock_session = MagicMock()
-        mock_session.get.return_value = None
-        mock_session_context = MagicMock()
-        mock_session_context.__enter__.return_value = mock_session
-        mock_session_context.__exit__.return_value = None
-        with patch('services.tts_engine.Session', return_value=mock_session_context):
-            engine = TTSEngine(kokoro=mock_kokoro)
-            job = SynthJob(sentence_index=0, text="Test")
-            await engine.enqueue(job)
-            chunks = []
-            async for chunk in engine.stream_next():
-                chunks.append(chunk)
-            mock_kokoro.assert_called_once_with(job.text, voice=job.voice, speed=1.0)
+        kokoro, calls = _kokoro_spy(samples=2400)
+        engine = TTSEngine(kokoro)
+        job = SynthJob(sentence_index=0, text="Test")
+
+        chunks = [chunk async for chunk in engine.stream_job(job)]
+
+        assert calls == [("Test", "af_heart", 1.0)]
+        assert chunks
+        assert engine._sentence_meta[0]["duration_ms"] == 100
 
     @pytest.mark.asyncio
-    async def test_kokoro_type_error_fallback(self):
-        import numpy as np
-        from unittest.mock import patch, MagicMock, call
-        mock_audio = np.zeros(24000, dtype=np.float32)
-        mock_kokoro = MagicMock()
-        # First call raises TypeError (speed param not supported)
-        mock_kokoro.side_effect = [
-            TypeError("speed argument not supported"),
-            [("g", "p", mock_audio)]
-        ]
-        mock_session = MagicMock()
-        mock_session.get.return_value = None
-        mock_session_context = MagicMock()
-        mock_session_context.__enter__.return_value = mock_session
-        mock_session_context.__exit__.return_value = None
-        with patch('services.tts_engine.Session', return_value=mock_session_context):
-            engine = TTSEngine(kokoro=mock_kokoro)
-            job = SynthJob(sentence_index=0, text="Test", speed=1.5)
-            await engine.enqueue(job)
-            chunks = []
-            async for chunk in engine.stream_next():
-                chunks.append(chunk)
-            # Should have called twice: first with speed, second without speed
-            assert mock_kokoro.call_count == 2
-            first_call = mock_kokoro.call_args_list[0]
-            assert first_call == call(job.text, voice=job.voice, speed=1.5)
-            second_call = mock_kokoro.call_args_list[1]
-            assert second_call == call(job.text, voice=job.voice)
+    async def test_callable_without_speed_kwarg_degrades_to_1x(self):
+        """A KPipeline build with no ``speed`` parameter must still synthesize,
+        and the audio produced that way must be cached under 1.0x -- never under
+        the speed that was asked for."""
+        import db.database as database
+
+        calls = []
+
+        def legacy_kokoro(text, voice="af_heart"):
+            calls.append((text, voice))
+            yield (None, None, np.ones(2400, dtype=np.float32))
+
+        engine = TTSEngine(legacy_kokoro)
+        job = SynthJob(sentence_index=0, text="Test", speed=1.5)
+
+        chunks = [chunk async for chunk in engine.stream_job(job)]
+
+        assert chunks, "the fallback call must still produce audio"
+        assert calls == [("Test", "af_heart")]
+        assert engine._speed_kwarg_supported is False
+        meta = engine._sentence_meta[0]
+        assert meta["requested_speed"] == 1.5
+        assert meta["effective_speed"] == 1.0
+
+        with Session(database.engine) as session:
+            assert session.get(AudioCache, engine._cache_key("Test", "af_heart", 1.0)) is not None
+            assert session.get(AudioCache, engine._cache_key("Test", "af_heart", 1.5)) is None, (
+                "1.0x audio must not be stored under the 1.5x key"
+            )
 
 
 # ---------------------------------------------------------------------------

@@ -1,83 +1,54 @@
-"""TDD tests for FastAPI routers. PDF/EPUB engines are mocked for speed."""
+"""TDD tests for FastAPI routers. PDF/EPUB engines are mocked for speed.
+
+The ``db_engine``, ``client``, ``mock_engines`` and ``upload_book`` fixtures come
+from conftest.py; this file used to carry its own copy-pasted pair, which left
+``db.database.engine`` pointing at a dead database for every later test file.
+"""
 import pytest
-import hashlib
-from pathlib import Path
-from fastapi.testclient import TestClient
-from sqlmodel import Session, SQLModel, create_engine
-from sqlalchemy.pool import StaticPool
-from unittest.mock import patch, MagicMock
-
-from main import app
-from db.database import get_session
-from services.base_engine import SentenceRecord as PdfSentence
-
-
-def _fake_sentences(n=5):
-    return [
-        PdfSentence(index=i, text=f"This is sentence number {i} with enough words.", page=0,
-                    x0=10.0, y0=float(i * 20), x1=400.0, y1=float(i * 20 + 15))
-        for i in range(n)
-    ]
-
-
-@pytest.fixture
-def db_engine():
-    from db.models import Book, Sentence, AudioCache, Progress
-    eng = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-    SQLModel.metadata.create_all(eng)
-    return eng
-
-
-@pytest.fixture
-def client(db_engine):
-    def override_session():
-        with Session(db_engine) as session:
-            yield session
-
-    app.dependency_overrides[get_session] = override_session
-
-    with patch("routers.documents.PDFEngine") as mock_pdf, \
-         patch("routers.documents.EPUBEngine") as mock_epub:
-        mock_pdf.return_value.extract_sentences.return_value = _fake_sentences()
-        mock_pdf.return_value.page_count.return_value = 10
-        mock_epub.return_value.extract_sentences.return_value = []
-
-        with TestClient(app, raise_server_exceptions=True) as c:
-            yield c
-
-    app.dependency_overrides.clear()
 
 
 def _upload(client, filename="test.pdf", content=b"fakepdfbytes"):
-    return client.post(
+    response = client.post(
         "/documents/upload",
         files={"file": (filename, content, "application/pdf")},
     )
+    assert response.status_code == 200, response.text
+    return response.json()
 
 
 class TestUploadDocument:
-    def test_upload_pdf_returns_200(self, client):
-        r = _upload(client)
-        assert r.status_code == 200
+    def test_upload_pdf_returns_200_and_a_book_id(self, client):
+        response = _upload(client)
+        assert "book_id" in response
+        assert len(response["book_id"]) == 64
 
-    def test_upload_returns_book_id(self, client):
-        r = _upload(client)
-        data = r.json()
-        assert "book_id" in data
-        assert len(data["book_id"]) == 64
+    @pytest.mark.parametrize("sentence_count", [3, 5])
+    def test_upload_reports_and_stores_one_row_per_extracted_sentence(
+        self, client, mock_engines, upload_book, sentence_count
+    ):
+        """The count in the response must be the number of sentences actually
+        persisted, not just whatever the engine was configured to return."""
+        from services.base_engine import SentenceRecord
 
-    def test_upload_returns_sentence_count(self, client):
-        r = _upload(client)
-        assert r.json()["sentence_count"] == 5
+        mock_engines.pdf.return_value.extract_sentences.return_value = [
+            SentenceRecord(index=i, text=f"Sentence number {i}.", page=0) for i in range(sentence_count)
+        ]
+
+        response = upload_book()
+        assert response["sentence_count"] == sentence_count
+
+        rows = client.get(f"/documents/{response['book_id']}/sentences").json()
+        assert len(rows) == sentence_count
+        assert [row["index"] for row in rows] == list(range(sentence_count))
 
     def test_duplicate_upload_returns_same_id(self, client):
-        ids = [_upload(client, content=b"samebytes").json()["book_id"] for _ in range(2)]
+        ids = [_upload(client, content=b"samebytes")["book_id"] for _ in range(2)]
         assert ids[0] == ids[1]
 
     def test_duplicate_sets_already_existed(self, client):
         _upload(client, content=b"dupbytes")
         r2 = _upload(client, content=b"dupbytes")
-        assert r2.json()["already_existed"] is True
+        assert r2["already_existed"] is True
 
     def test_unsupported_type_returns_400(self, client):
         r = client.post("/documents/upload", files={"file": ("book.txt", b"text", "text/plain")})
@@ -87,7 +58,7 @@ class TestUploadDocument:
 class TestGetSentences:
     @pytest.fixture
     def book_id(self, client):
-        return _upload(client).json()["book_id"]
+        return _upload(client)["book_id"]
 
     def test_get_sentences_returns_list(self, client, book_id):
         r = client.get(f"/documents/{book_id}/sentences")
@@ -112,7 +83,7 @@ class TestLibrary:
         assert isinstance(r.json(), list)
 
     def test_library_contains_uploaded_book(self, client):
-        book_id = _upload(client).json()["book_id"]
+        book_id = _upload(client)["book_id"]
         ids = [b["id"] for b in client.get("/library").json()]
         assert book_id in ids
 
@@ -120,7 +91,7 @@ class TestLibrary:
 class TestProgress:
     @pytest.fixture
     def book_id(self, client):
-        return _upload(client).json()["book_id"]
+        return _upload(client)["book_id"]
 
     def test_save_progress(self, client, book_id):
         r = client.post(f"/library/{book_id}/progress", json={"sentence_index": 42})

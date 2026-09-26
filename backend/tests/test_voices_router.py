@@ -1,18 +1,12 @@
-"""Tests for the voices router."""
-import os
-import tempfile
-from pathlib import Path
+"""Tests for the voices router.
 
-import pytest
-from fastapi.testclient import TestClient
-
-from main import app
-
-
-@pytest.fixture
-def client():
-    with TestClient(app, raise_server_exceptions=True) as c:
-        yield c
+This file used to build ``TestClient(app)`` with no overrides at all. Entering
+that client ran the real lifespan, which loaded the 82M-parameter Kokoro model
+(~17 s) for each of the 11 tests, wrote ``.pt`` files into the repository's
+``backend/voices/`` directory and opened the real database. It now uses the
+shared ``client`` fixture from conftest.py: a fake Kokoro pipeline is installed
+for it, and its ``voices/`` directory is redirected under ``tmp_path``.
+"""
 
 
 class TestListVoices:
@@ -72,11 +66,11 @@ class TestDeleteVoice:
 class TestPreviewVoice:
     def test_preview_built_in_returns_audio(self, client):
         r = client.get("/voices/preview/af_heart")
-        # May return 503 if Kokoro is not loaded; skip in CI
-        if r.status_code == 503:
-            pytest.skip("Kokoro not available")
-        assert r.status_code == 200
+        # The fake pipeline in the conftest guard means this path is always
+        # available; the old version skipped on 503, which hid a broken endpoint.
+        assert r.status_code == 200, r.text
         assert r.headers["content-type"] == "audio/wav"
+        assert r.content.startswith(b"RIFF")
         assert len(r.content) > 100
 
     def test_preview_nonexistent_custom_returns_404(self, client):

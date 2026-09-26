@@ -1,504 +1,317 @@
+"""End-to-end tests for the TTS WebSocket handler in routers/tts.py.
+
+Everything here drives the real handler through a TestClient, against a real
+(per-test, temp-file) SQLite database and a fake Kokoro pipeline -- see the
+fixtures in conftest.py: ``ws_client`` (three plain sentences) and
+``ws_client_factory`` (any book you want).
+
+Two things the previous version of this file got wrong and this one does not:
+
+* Messages are read with the ``ws_read`` collector, which distinguishes text
+  from binary instead of relying on ``except Exception: break`` loops. Those
+  loops silently ended the test whenever anything went wrong, so a broken stream
+  looked the same as a finished one.
+* ``duration_ms`` is asserted against the audio Kokoro actually returned. The
+  old assertions recomputed ``int(chunks * 100 / speed)``, which stopped being
+  the contract in 9eb454a when the router started reporting the real audio
+  length from ``engine._sentence_meta``.
+"""
 import json
-import tempfile
-from contextlib import contextmanager
-from datetime import datetime, UTC
-from unittest.mock import patch
+import time
 
 import numpy as np
 import pytest
-from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
-from sqlmodel import Session, create_engine, SQLModel
 
-import db.database as _db_module
-import routers.tts as tts_router
-from db.models import Book, Sentence
-from routers.tts import set_kokoro
+SENTENCE_SAMPLES = 2400  # 100 ms at 24 kHz -- one streamed chunk
+SPEEDS_AND_DURATIONS = [(0.5, 200), (1.0, 100), (1.5, 66), (2.0, 50)]
 
 
-@pytest.fixture
-def mock_kokoro():
-    def make_kokoro(text, voice, speed):
-        audio = np.ones(2400, dtype=np.float32)
-        yield (None, None, audio)
-
-    return make_kokoro
+def _play(index=0, *, voice="af_heart", speed=1.0, session_id=1, action="play"):
+    key = "from_index" if action == "play" else "to_index"
+    return {"action": action, key: index, "voice": voice, "speed": speed, "session_id": session_id}
 
 
-def _build_engine():
-    db_file = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
-    db_path = db_file.name
-    db_file.close()
-    engine = create_engine(f'sqlite:///{db_path}')
-    SQLModel.metadata.create_all(engine)
-    return engine
+def _texts(messages):
+    return [m["data"] for m in messages if m["channel"] == "text"]
 
 
-@contextmanager
-def _patch_db(eng):
-    _db_module.engine = eng
-    original_func = _db_module.create_engine_and_tables
-    def patched_func(db_url=None):
-        return eng
-    _db_module.create_engine_and_tables = patched_func
-
-    def _set_kokoro_side_effect(val):
-        tts_router._kokoro = val
-
-    try:
-        with patch('main.create_engine_and_tables', patched_func), \
-             patch('routers.tts.set_kokoro', side_effect=_set_kokoro_side_effect):
-            yield
-    finally:
-        _db_module.create_engine_and_tables = original_func
+def _chunks(messages):
+    return [m["data"] for m in messages if m["channel"] == "bytes"]
 
 
-def _seed_data(engine, sentences_by_index):
-    with Session(engine) as session:
-        book = Book(
-            id="test-book",
-            title="Test Book",
-            author="Test Author",
-            file_path="/test/path.pdf",
-            file_type="pdf",
-            page_count=1,
-            cover_page=0,
-            created_at=datetime.now(UTC),
-        )
-        session.add(book)
-        session.commit()
-        for idx, text_val in sentences_by_index.items():
-            sent = Sentence(
-                book_id="test-book",
-                index=idx,
-                text=text_val,
-                page=1,
-                x0=0.0,
-                y0=0.0,
-                x1=100.0,
-                y1=20.0,
-                filtered=False,
-            )
-            session.add(sent)
-        session.commit()
+def _types(messages):
+    return [m["type"] for m in _texts(messages)]
 
 
-@pytest.fixture
-def in_memory_engine():
-    return _build_engine()
+def _speed_aware_kokoro(samples_per_result=SENTENCE_SAMPLES):
+    """Fake pipeline whose audio length follows the speed, as the real one does."""
+
+    def kokoro(text, voice="af_heart", speed=1.0):
+        count = int(round(samples_per_result / (float(speed) or 1.0)))
+        yield (None, None, np.ones(max(1, count), dtype=np.float32))
+
+    return kokoro
 
 
-@pytest.fixture
-def seed_single_sentence(in_memory_engine):
-    _seed_data(in_memory_engine, {0: "Hello world."})
-    return in_memory_engine
+def _slow_kokoro(results=6, delay=0.05, samples=SENTENCE_SAMPLES):
+    """Fake pipeline that takes `results * delay` seconds per sentence."""
+
+    def kokoro(text, voice="af_heart", speed=1.0):
+        for _ in range(results):
+            time.sleep(delay)
+            yield (None, None, np.ones(samples, dtype=np.float32))
+
+    return kokoro
 
 
-@pytest.fixture
-def seed_three_sentences(in_memory_engine):
-    _seed_data(in_memory_engine, {0: "First.", 1: "Second.", 2: "Third."})
-    return in_memory_engine
-
-
-@pytest.fixture
-def ws_client(seed_three_sentences, mock_kokoro):
-    eng = seed_three_sentences
-    with _patch_db(eng):
-        set_kokoro(mock_kokoro)
-        from main import app
-        with TestClient(app) as client:
-            yield client
-
-
-@pytest.fixture
-def ws_client_single(seed_single_sentence, mock_kokoro):
-    eng = seed_single_sentence
-    with _patch_db(eng):
-        set_kokoro(mock_kokoro)
-        from main import app
-        with TestClient(app) as client:
-            yield client
-
-
-class TestWebSocketIntegration:
-    def test_play_sends_sentence_start_before_binary_chunks(self, ws_client):
+class TestPlaybackProtocol:
+    def test_play_sends_sentence_start_before_any_audio(self, ws_client, ws_read):
         with ws_client.websocket_connect("/ws/tts/test-book") as ws:
-            ws.send_json({
-                "action": "play",
-                "from_index": 0,
-                "voice": "af_heart",
-                "speed": 1.0,
-                "session_id": 42,
-            })
+            ws.send_json(_play(0, session_id=42))
+            messages = ws_read(ws, until=("complete",))
 
-            first_msg = ws.receive_text()
-            data = json.loads(first_msg)
-            assert data["type"] == "sentence_start"
-            assert data["index"] == 0
-            assert data["session_id"] == 42
+        assert messages[0]["channel"] == "text"
+        start = messages[0]["data"]
+        assert start == {"type": "sentence_start", "index": 0, "session_id": 42}
+        assert messages[1]["channel"] == "bytes", "audio must follow its sentence_start"
 
-    def test_sentence_end_duration_ms_matches_chunk_count_and_speed(self, seed_three_sentences, mock_kokoro):
-        eng = seed_three_sentences
-        with _patch_db(eng):
-            set_kokoro(mock_kokoro)
-            from main import app
-            with TestClient(app) as client:
+    def test_every_audio_chunk_is_a_wav(self, ws_client, ws_read):
+        with ws_client.websocket_connect("/ws/tts/test-book") as ws:
+            ws.send_json(_play(0, session_id=1))
+            messages = ws_read(ws, until=("complete",))
+
+        chunks = _chunks(messages)
+        assert len(chunks) == 3, "one 100 ms chunk per sentence"
+        assert all(chunk.startswith(b"RIFF") for chunk in chunks)
+
+    @pytest.mark.parametrize("speed,expected_ms", SPEEDS_AND_DURATIONS)
+    def test_sentence_end_duration_is_the_real_audio_length(
+        self, ws_client_factory, monkeypatch, ws_read, speed, expected_ms
+    ):
+        """The reported duration is the audio Kokoro returned, so it shrinks as
+        the speed rises (2400/speed samples at 24 kHz)."""
+        import routers.tts as tts_router
+
+        with ws_client_factory(sentences=[{"index": 0, "text": "Hello."}]) as client:
+            monkeypatch.setattr(tts_router, "_kokoro", _speed_aware_kokoro())
+            with client.websocket_connect("/ws/tts/test-book") as ws:
+                ws.send_json(_play(0, speed=speed, session_id=1))
+                messages = ws_read(ws, until=("complete",))
+
+        ends = [m for m in _texts(messages) if m["type"] == "sentence_end"]
+        assert len(ends) == 1
+        assert ends[0]["duration_ms"] == expected_ms
+
+    def test_slower_speed_reports_a_longer_duration(self, ws_client_factory, monkeypatch, ws_read):
+        import routers.tts as tts_router
+
+        durations = {}
+        with ws_client_factory(sentences=[{"index": 0, "text": "Hello."}]) as client:
+            monkeypatch.setattr(tts_router, "_kokoro", _speed_aware_kokoro())
+            for speed in (0.5, 1.0):
                 with client.websocket_connect("/ws/tts/test-book") as ws:
-                    ws.send_json({"action": "play", "from_index": 0, "voice": "af_heart", "speed": 2.0, "session_id": 99})
-                    chunks = 0
-                    sentence_end = None
-                    while sentence_end is None:
-                        try:
-                            raw = ws.receive_text()
-                            data = json.loads(raw)
-                            if data["type"] == "sentence_end":
-                                sentence_end = data
-                                break
-                        except Exception:
-                            try:
-                                ws.receive_bytes()
-                                chunks += 1
-                            except Exception:
-                                break
-                    assert sentence_end is not None
-                    assert sentence_end["duration_ms"] == int(chunks * 100 / 2.0)
+                    ws.send_json(_play(0, speed=speed, session_id=int(speed * 10)))
+                    ends = [
+                        m
+                        for m in _texts(ws_read(ws, until=("complete",)))
+                        if m["type"] == "sentence_end"
+                    ]
+                durations[speed] = ends[0]["duration_ms"]
 
-    def test_seek_to_index_two_first_sentence_start_is_index_two(self, ws_client):
+        assert durations[0.5] == 2 * durations[1.0]
+
+    def test_sentences_arrive_in_order_and_end_with_complete(self, ws_client, ws_read):
         with ws_client.websocket_connect("/ws/tts/test-book") as ws:
-            ws.send_json({
-                "action": "seek",
-                "to_index": 2,
-                "voice": "af_heart",
-                "speed": 1.0,
-                "session_id": 7,
-            })
+            ws.send_json(_play(0, session_id=9))
+            messages = ws_read(ws, until=("complete",))
 
-            first_msg = ws.receive_text()
-            data = json.loads(first_msg)
-            assert data["type"] == "sentence_start"
-            assert data["index"] == 2
+        starts = [m["index"] for m in _texts(messages) if m["type"] == "sentence_start"]
+        assert starts == [0, 1, 2]
+        assert _types(messages)[-1] == "complete"
 
-    def test_seek_sends_correct_session_id_in_all_messages(self, ws_client):
+    def test_each_sentence_is_started_then_ended(self, ws_client, ws_read):
         with ws_client.websocket_connect("/ws/tts/test-book") as ws:
-            ws.send_json({"action": "seek", "to_index": 1, "voice": "af_heart", "speed": 1.0, "session_id": 123})
-            for _ in range(50):
-                try:
-                    raw = ws.receive_text()
-                    data = json.loads(raw)
-                    assert data["session_id"] == 123
-                    if data["type"] == "complete":
-                        break
-                except Exception:
-                    try:
-                        ws.receive_bytes()
-                    except Exception:
-                        break
+            ws.send_json(_play(0, session_id=7))
+            messages = ws_read(ws, until=("complete",))
 
-    def test_complete_after_last_sentence_of_single_sentence_book(self, ws_client_single):
-        with ws_client_single.websocket_connect("/ws/tts/test-book") as ws:
-            ws.send_json({"action": "play", "from_index": 0, "voice": "af_heart", "speed": 1.0, "session_id": 1})
-            received_complete = False
-            for _ in range(50):
-                try:
-                    raw = ws.receive_text()
-                    data = json.loads(raw)
-                    if data["type"] == "complete":
-                        assert data["session_id"] == 1
-                        received_complete = True
-                        break
-                except Exception:
-                    try:
-                        ws.receive_bytes()
-                    except Exception:
-                        break
-            assert received_complete
+        text_types = _types(messages)
+        assert text_types[0] == "sentence_start"
+        assert "sentence_end" in text_types
+        assert text_types[-1] == "complete"
+        for index in (0, 1, 2):
+            assert text_types.index("sentence_start") < text_types.index("sentence_end")
 
-    def test_filtered_sentence_not_sent(self, mock_kokoro):
-        eng = _build_engine()
-        with Session(eng) as session:
-            book = Book(
-                id="test-book",
-                title="Test Book",
-                author="Test Author",
-                file_path="/test/path.pdf",
-                file_type="pdf",
-                page_count=1,
-                cover_page=0,
-                created_at=datetime.now(UTC),
-            )
-            session.add(book)
-            session.commit()
-            for idx, (text_val, filt) in enumerate([
-                ("Before.", False),
-                ("Filtered.", True),
-                ("After.", False),
-            ]):
-                sent = Sentence(
-                    book_id="test-book",
-                    index=idx,
-                    text=text_val,
-                    page=1,
-                    x0=0.0,
-                    y0=0.0,
-                    x1=100.0,
-                    y1=20.0,
-                    filtered=filt,
-                )
-                session.add(sent)
-            session.commit()
+    def test_from_index_beyond_sentences_sends_complete_only(self, ws_client, ws_read):
+        with ws_client.websocket_connect("/ws/tts/test-book") as ws:
+            ws.send_json(_play(99, session_id=4))
+            messages = ws_read(ws, until=("complete",))
 
-        with _patch_db(eng):
-            set_kokoro(mock_kokoro)
-            from main import app
-            with TestClient(app) as client:
-                with client.websocket_connect("/ws/tts/test-book") as ws:
-                    ws.send_json({
-                        "action": "play",
-                        "from_index": 0,
-                        "voice": "af_heart",
-                        "speed": 1.0,
-                        "session_id": 5,
-                    })
-                    collected_indices = []
-                    for _ in range(30):
-                        try:
-                            raw = ws.receive_text()
-                            data = json.loads(raw)
-                            if data["type"] == "sentence_start":
-                                collected_indices.append(data["index"])
-                            if data["type"] == "complete":
-                                break
-                        except Exception:
-                            try:
-                                ws.receive_bytes()
-                            except Exception:
-                                break
-                    assert 1 not in collected_indices
+        assert _types(messages) == ["complete"]
+        assert _texts(messages)[0]["session_id"] == 4
 
-    def test_invalid_book_id_closes_connection(self, ws_client):
-        with pytest.raises((WebSocketDisconnect, Exception)):
+    def test_seek_starts_at_the_requested_sentence(self, ws_client, ws_read):
+        with ws_client.websocket_connect("/ws/tts/test-book") as ws:
+            ws.send_json(_play(2, session_id=7, action="seek"))
+            messages = ws_read(ws, until=("complete",))
+
+        starts = [m["index"] for m in _texts(messages) if m["type"] == "sentence_start"]
+        assert starts == [2]
+
+    def test_seek_tags_every_message_with_the_session_id(self, ws_client, ws_read):
+        with ws_client.websocket_connect("/ws/tts/test-book") as ws:
+            ws.send_json(_play(1, session_id=123, action="seek"))
+            messages = ws_read(ws, until=("complete",))
+
+        text = _texts(messages)
+        assert text, "the seek produced no text messages"
+        assert {m["session_id"] for m in text} == {123}
+        assert text[-1]["type"] == "complete"
+
+
+class TestBookSelection:
+    def test_single_sentence_book_completes_after_it(self, ws_client_factory, ws_read):
+        with ws_client_factory(sentences=[{"index": 0, "text": "Only."}]) as client:
+            with client.websocket_connect("/ws/tts/test-book") as ws:
+                ws.send_json(_play(0, session_id=1))
+                messages = ws_read(ws, until=("complete",))
+
+        text = _texts(messages)
+        assert [m["type"] for m in text] == ["sentence_start", "sentence_end", "complete"]
+        assert all(m["session_id"] == 1 for m in text)
+
+    def test_filtered_sentences_are_never_sent(self, ws_client_factory, ws_read):
+        sentences = [
+            {"index": 0, "text": "Before.", "filtered": False},
+            {"index": 1, "text": "Filtered.", "filtered": True},
+            {"index": 2, "text": "After.", "filtered": False},
+        ]
+        with ws_client_factory(sentences=sentences) as client:
+            with client.websocket_connect("/ws/tts/test-book") as ws:
+                ws.send_json(_play(0, session_id=5))
+                messages = ws_read(ws, until=("complete",))
+
+        starts = [m["index"] for m in _texts(messages) if m["type"] == "sentence_start"]
+        assert starts == [0, 2], "index 1 is filtered and must be skipped entirely"
+
+    def test_unknown_book_closes_the_socket_with_4004(self, ws_client):
+        with pytest.raises(WebSocketDisconnect) as raised:
             with ws_client.websocket_connect("/ws/tts/does-not-exist") as ws:
                 ws.receive_text()
 
-    def test_multiple_sentences_arrive_in_order(self, ws_client):
-        with ws_client.websocket_connect("/ws/tts/test-book") as ws:
-            ws.send_json({
-                "action": "play",
-                "from_index": 0,
-                "voice": "af_heart",
-                "speed": 1.0,
-                "session_id": 9,
-            })
-            collected = []
-            for _ in range(60):
-                try:
-                    raw = ws.receive_text()
-                    data = json.loads(raw)
-                    if data["type"] == "sentence_start":
-                        collected.append(data["index"])
-                    if data["type"] == "complete":
-                        break
-                except Exception:
-                    try:
-                        ws.receive_bytes()
-                    except Exception:
-                        break
-            assert collected == [0, 1, 2]
+        assert raised.value.code == 4004
 
-    def test_pause_stops_stream(self, ws_client):
-        import threading
+
+class TestSessionHandover:
+    def test_new_play_supersedes_the_previous_session(self, ws_client, ws_read):
         with ws_client.websocket_connect("/ws/tts/test-book") as ws:
-            ws.send_json({
-                "action": "play",
-                "from_index": 0,
-                "voice": "af_heart",
-                "speed": 1.0,
-                "session_id": 11,
-            })
+            ws.send_json(_play(0, session_id=1))
+            ws.send_json(_play(0, session_id=2))
+            messages = ws_read(ws, until=("complete",))
+
+        text = _texts(messages)
+        assert any(m["session_id"] == 2 for m in text), "session 2 produced nothing"
+        first_new = next(i for i, m in enumerate(text) if m["session_id"] == 2)
+        assert {m["session_id"] for m in text[first_new:]} == {2}
+        assert text[-1] == {"type": "complete", "session_id": 2}
+
+    def test_pause_stops_the_stream_without_completing_it(
+        self, ws_client_factory, monkeypatch, ws_read
+    ):
+        """A pause must stop playback mid-book and must not look like the end of
+        the book to the client, which relies on ``complete``."""
+        import routers.tts as tts_router
+
+        sentences = [{"index": i, "text": f"Sentence {i}."} for i in range(20)]
+        with ws_client_factory(sentences=sentences) as client:
+            # ~0.3 s per sentence, so the pause reliably lands mid-stream and a
+            # stream that kept running would reveal itself within the drain.
+            monkeypatch.setattr(tts_router, "_kokoro", _slow_kokoro(results=6, delay=0.05))
+            with client.websocket_connect("/ws/tts/test-book") as ws:
+                ws.send_json(_play(0, session_id=11))
+                started = ws_read(ws, until=("sentence_start",))
+                assert [m["type"] for m in _texts(started)] == ["sentence_start"]
+
+                ws.send_json({"action": "pause"})
+                after_pause = ws_read(ws, expect_silence=True, quiet=1.5)
+
+        text = _texts(after_pause)
+        assert "complete" not in [m["type"] for m in text], (
+            "a pause must not be reported as the end of the book"
+        )
+        started_after = [m["index"] for m in text if m["type"] == "sentence_start"]
+        assert all(index <= 1 for index in started_after), (
+            f"pause did not stop the stream, it went on to sentence(s) {started_after}"
+        )
+
+    def test_stream_continues_when_not_paused(self, ws_client_factory, monkeypatch, ws_read):
+        """Negative control for the pause test above.
+
+        Identical setup and identical drain window, but nothing interrupts the
+        stream: it must run on well past sentence 1. Without this, the pause
+        test's ``index <= 1`` bound could hold simply because the fake had
+        stopped producing.
+        """
+        import routers.tts as tts_router
+
+        sentences = [{"index": i, "text": f"Sentence {i}."} for i in range(20)]
+        with ws_client_factory(sentences=sentences) as client:
+            monkeypatch.setattr(tts_router, "_kokoro", _slow_kokoro(results=6, delay=0.05))
+            with client.websocket_connect("/ws/tts/test-book") as ws:
+                ws.send_json(_play(0, session_id=11))
+                ws_read(ws, until=("sentence_start",))
+                rest = ws_read(ws, quiet=1.5)
+
+        text = _texts(rest)
+        starts = [m["index"] for m in text if m["type"] == "sentence_start"]
+        assert starts and max(starts) >= 2, f"an unpaused stream only reached {starts}"
+        assert _chunks(rest), "no audio was streamed"
+
+    def test_pause_then_play_starts_a_fresh_session(self, ws_client, ws_read):
+        with ws_client.websocket_connect("/ws/tts/test-book") as ws:
             ws.send_json({"action": "pause"})
-            sentence_start_count = 0
-            for _ in range(10):
-                result = [None]
-                def _read():
-                    try:
-                        result[0] = ws.receive_text()
-                    except Exception:
-                        result[0] = None
-                t = threading.Thread(target=_read, daemon=True)
-                t.start()
-                t.join(timeout=3.0)
-                if t.is_alive() or result[0] is None:
-                    break
-                data = json.loads(result[0])
-                if data.get("type") == "sentence_start":
-                    sentence_start_count += 1
-            assert sentence_start_count < 3
+            ws.send_json(_play(1, session_id=77))
+            messages = ws_read(ws, until=("complete",))
 
-    def test_stale_session_replaced_by_new_play(self, mock_kokoro):
-        eng = _build_engine()
-        _seed_data(eng, {0: "First.", 1: "Second.", 2: "Third."})
-        with _patch_db(eng):
-            set_kokoro(mock_kokoro)
-            from main import app
-            with TestClient(app) as client:
-                with client.websocket_connect("/ws/tts/test-book") as ws:
-                    ws.send_json({"action": "play", "from_index": 0, "voice": "af_heart", "speed": 1.0, "session_id": 1})
-                    ws.send_json({"action": "play", "from_index": 0, "voice": "af_heart", "speed": 1.0, "session_id": 2})
+        starts = [m["index"] for m in _texts(messages) if m["type"] == "sentence_start"]
+        assert starts == [1, 2]
+        assert {m["session_id"] for m in _texts(messages)} == {77}
 
-                    text_messages = []
-                    for _ in range(60):
-                        try:
-                            raw = ws.receive_text()
-                            data = json.loads(raw)
-                            text_messages.append(data)
-                            if data["type"] == "complete":
-                                break
-                        except Exception:
-                            try:
-                                ws.receive_bytes()
-                            except Exception:
-                                break
-
-                    assert len(text_messages) > 0
-                    any_id_2 = any(msg["session_id"] == 2 for msg in text_messages)
-                    assert any_id_2, "Expected at least one message with session_id=2"
-                    first_2 = next(i for i, m in enumerate(text_messages) if m["session_id"] == 2)
-                    for msg in text_messages[first_2:]:
-                        assert msg["session_id"] == 2
-
-    def test_speed_half_duration_doubled(self, mock_kokoro):
-        eng = _build_engine()
-        _seed_data(eng, {0: "Hello."})
-        with _patch_db(eng):
-            set_kokoro(mock_kokoro)
-            from main import app
-            with TestClient(app) as client:
-                with client.websocket_connect("/ws/tts/test-book") as ws:
-                    ws.send_json({"action": "play", "from_index": 0, "voice": "af_heart", "speed": 0.5, "session_id": 3})
-
-                    chunks = 0
-                    sentence_end = None
-                    while sentence_end is None:
-                        try:
-                            raw = ws.receive_text()
-                            data = json.loads(raw)
-                            if data["type"] == "sentence_end":
-                                sentence_end = data
-                                break
-                        except Exception:
-                            try:
-                                ws.receive_bytes()
-                                chunks += 1
-                            except Exception:
-                                break
-
-                    assert sentence_end is not None
-                    assert sentence_end["duration_ms"] == int(chunks * 100 / 0.5)
-
-    def test_full_sentence_sequence_start_chunks_end(self, ws_client):
+    def test_client_disconnect_mid_stream_leaves_the_server_healthy(self, ws_client, ws_read):
+        """_consumer_with_events must exit cleanly when the client goes away."""
         with ws_client.websocket_connect("/ws/tts/test-book") as ws:
-            ws.send_json({"action": "play", "from_index": 0, "voice": "af_heart", "speed": 1.0, "session_id": 7})
+            ws.send_json(_play(0, session_id=1))
+            assert ws_read(ws, until=("sentence_start",), quiet=0.5)[0]["data"]["type"] == (
+                "sentence_start"
+            )
+            # Leaving the block closes the socket mid-stream.
 
-            events = []
-            for _ in range(60):
-                try:
-                    raw = ws.receive_text()
-                    data = json.loads(raw)
-                    events.append(("text", data["type"]))
-                    if data["type"] == "complete":
-                        break
-                except Exception:
-                    try:
-                        ws.receive_bytes()
-                        events.append(("bytes", None))
-                    except Exception:
-                        break
-
-            first_text_events = [e for e in events if e[0] == "text"]
-            assert events[0] == ("text", "sentence_start")
-            assert ("text", "sentence_end") in first_text_events
-            assert events[-1] == ("text", "complete")
-
-    def test_from_index_beyond_sentences_sends_complete(self, mock_kokoro):
-        import threading
-        eng = _build_engine()
-        _seed_data(eng, {0: "A.", 1: "B."})
-        with _patch_db(eng):
-            set_kokoro(mock_kokoro)
-            from main import app
-            with TestClient(app) as client:
-                with client.websocket_connect("/ws/tts/test-book") as ws:
-                    ws.send_json({"action": "play", "from_index": 99, "voice": "af_heart", "speed": 1.0, "session_id": 4})
-
-                    text_messages = []
-                    for _ in range(5):
-                        result = [None]
-                        def _read():
-                            try:
-                                result[0] = ws.receive_text()
-                            except Exception:
-                                result[0] = None
-                        t = threading.Thread(target=_read, daemon=True)
-                        t.start()
-                        t.join(timeout=3.0)
-                        if t.is_alive():
-                            break
-                        if result[0] is None:
-                            break
-                        data = json.loads(result[0])
-                        text_messages.append(data)
-
-                    assert any(msg["type"] == "complete" for msg in text_messages)
-
-
-    # Fix 4 — disconnect mid-stream must not raise unhandled exception
-    def test_client_disconnect_mid_stream_does_not_raise(self, ws_client):
-        """_consumer_with_events must exit cleanly when the client closes mid-stream."""
         with ws_client.websocket_connect("/ws/tts/test-book") as ws:
-            ws.send_json({
-                "action": "play", "from_index": 0, "voice": "af_heart",
-                "speed": 1.0, "session_id": 1,
-            })
-            first = json.loads(ws.receive_text())
-            assert first["type"] == "sentence_start"
-            # Exiting the `with` block sends WebSocketDisconnect to the server.
-        # Re-open to confirm the server is still healthy — would fail if the exception
-        # propagated and left the handler in a broken state.
-        with ws_client.websocket_connect("/ws/tts/test-book") as ws2:
-            ws2.send_json({"action": "pause"})
+            ws.send_json({"action": "pause"})
 
 
 class TestSpeedForwarding:
-    """Fix 6 — WS play payload must forward speed to KPipeline at all supported speeds."""
+    """The WS play payload must forward speed to KPipeline at every speed."""
 
     @pytest.mark.parametrize("speed", [1.0, 1.5, 2.0, 3.0])
-    def test_websocket_play_forwards_speed_to_kokoro(self, speed):
-        import numpy as np
-        import routers.tts as _tts_mod
+    def test_websocket_play_forwards_speed_to_kokoro(
+        self, ws_client_factory, monkeypatch, ws_read, speed
+    ):
+        import routers.tts as tts_router
 
-        seen: dict = {}
+        seen: list[float] = []
 
-        def spy_kokoro(text, voice, speed):
-            seen["speed"] = speed
-            # Plain tuple is fine here: spy is called before result.tokens is read,
-            # and sentence_start is sent before stream_job is called.
-            yield (None, None, np.ones(2400, dtype=np.float32))
+        def spy_kokoro(text, voice="af_heart", speed=1.0):
+            seen.append(speed)
+            yield (None, None, np.ones(SENTENCE_SAMPLES, dtype=np.float32))
 
-        eng = _build_engine()
-        _seed_data(eng, {0: "First.", 1: "Second."})
-        with _patch_db(eng):
-            from main import app
-            with TestClient(app) as client:
-                # Set spy AFTER TestClient lifespan has run (which overwrites with real
-                # Kokoro). The TTSSocket handler reads _kokoro at WS-connect time.
-                _tts_mod._kokoro = spy_kokoro
-                with client.websocket_connect("/ws/tts/test-book") as ws:
-                    ws.send_json({
-                        "action": "play", "from_index": 0,
-                        "voice": "af_heart", "speed": speed, "session_id": 1,
-                    })
-                    msg = json.loads(ws.receive_text())
-                    assert msg["type"] == "sentence_start"
+        with ws_client_factory(sentences=[{"index": 0, "text": "First."}]) as client:
+            # The handler reads the module global when the socket connects.
+            monkeypatch.setattr(tts_router, "_kokoro", spy_kokoro)
+            with client.websocket_connect("/ws/tts/test-book") as ws:
+                ws.send_json(_play(0, speed=speed, session_id=1))
+                messages = ws_read(ws, until=("complete",))
 
-        assert seen.get("speed") == speed, \
-            f"Expected speed={speed} delivered to KPipeline, got {seen.get('speed')}"
+        assert _texts(messages)[0]["type"] == "sentence_start"
+        assert seen, "the handler never called the pipeline"
+        assert set(seen) == {speed}, f"expected speed={speed} at KPipeline, got {seen}"

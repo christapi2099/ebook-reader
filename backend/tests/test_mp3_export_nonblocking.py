@@ -39,6 +39,11 @@ from routers import mp3 as mp3_router  # noqa: E402
 
 SENTENCE_COUNT = 6
 
+# Every export now carries its output options (format, bitrate, chapters,
+# metadata) instead of having them implied. These tests are all about the
+# default MP3 export, so they pass the same defaults the API would.
+DEFAULT_OPTIONS = mp3_router.ExportOptions()
+
 
 def _make_engine():
     return create_engine(
@@ -116,7 +121,7 @@ def test_synthesis_runs_off_the_event_loop_thread(seeded, monkeypatch):
 
     async def scenario():
         loop_thread_holder["id"] = threading.get_ident()
-        await mp3_router._run_export(seeded, "bk", "af_heart", 1.0)
+        await mp3_router._run_export(seeded, "bk", "af_heart", 1.0, DEFAULT_OPTIONS)
 
     asyncio.run(scenario())
 
@@ -155,7 +160,7 @@ def test_event_loop_stays_responsive_during_an_export(seeded, monkeypatch):
         await asyncio.sleep(0.05)  # let the heartbeat settle
         before = ticks
         started = time.perf_counter()
-        await mp3_router._run_export(seeded, "bk", "af_heart", 1.0)
+        await mp3_router._run_export(seeded, "bk", "af_heart", 1.0, DEFAULT_OPTIONS)
         elapsed = time.perf_counter() - started
         hb.cancel()
         return ticks - before, elapsed
@@ -183,7 +188,7 @@ def test_a_concurrent_request_is_served_while_synthesis_is_running(seeded, monke
                 served.append(1)
 
         companion = asyncio.create_task(other_request())
-        await mp3_router._run_export(seeded, "bk", "af_heart", 1.0)
+        await mp3_router._run_export(seeded, "bk", "af_heart", 1.0, DEFAULT_OPTIONS)
         await companion
 
     asyncio.run(scenario())
@@ -198,7 +203,7 @@ def test_export_still_completes_with_identical_output(seeded, monkeypatch, engin
     calls: list[str] = []
     _install_kokoro(monkeypatch, calls=calls)
 
-    asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.0))
+    asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.0, DEFAULT_OPTIONS))
 
     with Session(engine) as s:
         export = s.get(MP3Export, seeded)
@@ -226,7 +231,7 @@ def test_filtered_sentences_are_still_skipped(seeded, monkeypatch, engine):
 
     calls: list[str] = []
     _install_kokoro(monkeypatch, calls=calls)
-    asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.0))
+    asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.0, DEFAULT_OPTIONS))
 
     assert len(calls) == SENTENCE_COUNT - 1
     assert "Sentence number 2." not in calls
@@ -246,7 +251,7 @@ def test_progress_is_written_during_the_export(seeded, monkeypatch, engine):
 
     mp3_router._synthesize = spy
     try:
-        asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.0))
+        asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.0, DEFAULT_OPTIONS))
     finally:
         mp3_router._synthesize = original
 
@@ -260,7 +265,7 @@ def test_no_audio_marks_the_export_as_error(seeded, engine, monkeypatch):
     monkeypatch.setattr(mp3_router, "_kokoro", None)
     monkeypatch.setattr(mp3_router, "_engine", None)
 
-    asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.0))
+    asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.0, DEFAULT_OPTIONS))
 
     with Session(engine) as s:
         export = s.get(MP3Export, seeded)
@@ -276,7 +281,7 @@ def test_synthesis_exception_marks_the_export_as_error(seeded, engine, monkeypat
     # into every later test in the file.
     monkeypatch.setattr(mp3_router, "_kokoro", exploding)
     monkeypatch.setattr(mp3_router, "_engine", TTSEngine(exploding))
-    asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.0))
+    asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.0, DEFAULT_OPTIONS))
 
     with Session(engine) as s:
         assert s.get(MP3Export, seeded).status == "error"
@@ -284,7 +289,7 @@ def test_synthesis_exception_marks_the_export_as_error(seeded, engine, monkeypat
 
 def test_missing_book_marks_the_export_as_error(seeded, monkeypatch, engine):
     _install_kokoro(monkeypatch)
-    asyncio.run(mp3_router._run_export(seeded, "does-not-exist", "af_heart", 1.0))
+    asyncio.run(mp3_router._run_export(seeded, "does-not-exist", "af_heart", 1.0, DEFAULT_OPTIONS))
     with Session(engine) as s:
         export = s.get(MP3Export, seeded)
         assert export.status == "error"
@@ -301,7 +306,7 @@ def test_task_registry_is_cleaned_up_on_every_path(seeded, monkeypatch, strategy
         mp3_router._kokoro = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
 
     async def scenario():
-        task = asyncio.create_task(mp3_router._run_export(seeded, "bk", "af_heart", 1.0))
+        task = asyncio.create_task(mp3_router._run_export(seeded, "bk", "af_heart", 1.0, DEFAULT_OPTIONS))
         mp3_router._export_tasks[seeded] = task
         await task
 
@@ -387,7 +392,7 @@ class TestExportRecordsTheRenderedRate:
             row.speed = 1.5
             s.commit()
 
-        asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.5))
+        asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.5, DEFAULT_OPTIONS))
 
         with Session(engine) as s:
             export = s.get(MP3Export, seeded)
@@ -404,7 +409,7 @@ class TestExportRecordsTheRenderedRate:
         monkeypatch.setattr(mp3_router, "_kokoro", kokoro)
         monkeypatch.setattr(mp3_router, "_engine", TTSEngine(kokoro))
 
-        asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.5))
+        asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.5, DEFAULT_OPTIONS))
 
         with Session(engine) as s:
             export = s.get(MP3Export, seeded)
@@ -418,7 +423,7 @@ class TestExportRecordsTheRenderedRate:
         monkeypatch.setattr(mp3_router, "_kokoro", kokoro)
         monkeypatch.setattr(mp3_router, "_engine", TTSEngine(kokoro))
 
-        asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.0))
+        asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.0, DEFAULT_OPTIONS))
         after_first = len(calls)
         assert after_first == SENTENCE_COUNT, (
             f"expected one synthesis per sentence, got {after_first}"
@@ -433,7 +438,7 @@ class TestExportRecordsTheRenderedRate:
             s.refresh(second)
             second_id = second.id
 
-        asyncio.run(mp3_router._run_export(second_id, "bk", "af_heart", 1.0))
+        asyncio.run(mp3_router._run_export(second_id, "bk", "af_heart", 1.0, DEFAULT_OPTIONS))
 
         assert len(calls) == after_first, (
             "the second export re-synthesised audio the reader already had cached"

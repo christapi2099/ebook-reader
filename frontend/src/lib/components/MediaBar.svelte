@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { speedDowngradeStore } from '$lib/stores/audio'
+
   let {
     isPlaying,
     speed,
@@ -38,10 +40,46 @@
   const playbackStatus = $derived(
     isPlaying && buffering ? 'Buffering audio' : isPlaying ? 'Playing' : 'Paused'
   )
+
+  // Read straight from the store rather than a prop: the reader route passes the
+  // reader store's speed and is owned by another change, but the highlighted rate
+  // has to be the rate the engine is actually rendering.
+  const downgrade = $derived($speedDowngradeStore)
+  const activeSpeed = $derived(downgrade?.effective ?? speed)
+  const speedLocked = $derived(downgrade !== null)
+
+  // Dismissing hides the explanation, not the fact — a new refusal brings a new
+  // notice back.
+  const noticeKey = $derived(downgrade ? `${downgrade.requested}→${downgrade.effective}` : null)
+  let dismissedKey = $state<string | null>(null)
+  const showNotice = $derived(noticeKey !== null && noticeKey !== dismissedKey)
 </script>
 
 <div class="flex flex-col items-center gap-2 w-full">
   <span class="sr-only" role="status" aria-live="polite">{playbackStatus}</span>
+
+  {#if showNotice && downgrade}
+    <div
+      class="flex items-start gap-2 w-full max-w-md rounded-lg border border-warning bg-warning-soft px-3 py-2 text-left"
+      role="status"
+    >
+      <p class="min-w-0 flex-1 text-xs text-fg">
+        <span class="font-medium">Speed limited to {downgrade.effective}x.</span>
+        This engine cannot render at {downgrade.requested}x, so playback is running at
+        {downgrade.effective}x.
+      </p>
+      <button
+        type="button"
+        class="min-h-11 min-w-11 -my-2 -mr-1 flex items-center justify-center text-fg-subtle hover:text-fg"
+        aria-label="Dismiss speed notice"
+        onclick={() => (dismissedKey = noticeKey)}
+      >
+        <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+        </svg>
+      </button>
+    </div>
+  {/if}
   <div class="flex items-center justify-center gap-4">
     <button
       onclick={onRewind}
@@ -93,15 +131,28 @@
     </button>
   </div>
 
-  <div class="flex items-center gap-0.5 bg-slate-100 rounded-full px-1 py-1" role="group" aria-label="Playback speed">
+  <div
+    class="flex items-center gap-0.5 bg-slate-100 rounded-full px-1 py-1"
+    role="group"
+    aria-label="Playback speed"
+    aria-describedby={speedLocked ? 'speed-lock-reason' : undefined}
+  >
     {#each speeds as s}
       <button
         onclick={() => onSpeedChange(s)}
-        class="px-2.5 py-1 rounded-full text-xs font-semibold transition-colors {speed === s ? 'bg-blue-500 text-white shadow-sm' : 'text-slate-600 hover:bg-slate-200'}"
-        aria-pressed={speed === s}
+        disabled={speedLocked}
+        class="px-2.5 py-1 rounded-full text-xs font-semibold transition-colors {activeSpeed === s ? 'bg-blue-500 text-white shadow-sm' : 'text-slate-600 hover:bg-slate-200'} disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+        aria-pressed={activeSpeed === s}
       >
         {s}x
       </button>
     {/each}
   </div>
+
+  {#if speedLocked && downgrade}
+    <!-- Stays after the notice is dismissed: disabled controls need a reason. -->
+    <p id="speed-lock-reason" class="text-xs text-fg-subtle">
+      Speed controls are unavailable — this engine only renders {downgrade.effective}x.
+    </p>
+  {/if}
 </div>

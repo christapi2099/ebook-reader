@@ -165,6 +165,13 @@ export async function previewVoice(voiceId: string): Promise<ArrayBuffer> {
   return response.arrayBuffer()
 }
 
+/**
+ * The sentence the preview endpoint synthesises, verbatim from
+ * `backend/routers/voices.py`. The preview dock shows it so the caption
+ * describes the audio that is actually playing instead of a made-up line.
+ */
+export const VOICE_PREVIEW_SAMPLE_TEXT = 'The quick brown fox jumps over the lazy dog.'
+
 export async function deleteBook(bookId: string): Promise<void> {
   await fetchApi<void>(`/library/${bookId}`, { method: 'DELETE' })
 }
@@ -295,6 +302,89 @@ export async function getBook(bookId: string): Promise<Book> {
   return fetchApi<Book>(`/library/${bookId}`)
 }
 
+// System — what the backend can actually do, and which engine is live.
+
+export interface EngineOption {
+  /** `"cpu" | "gpu" | "modal"` — the id `setEngine` accepts. */
+  id: string
+  label: string
+  /** From a real probe: torch import for cpu, CUDA for gpu, Modal for modal. */
+  available: boolean
+  /** Why it is unavailable. `null` when it is available. */
+  reason: string | null
+}
+
+export interface EngineState {
+  /** What the user last chose; `null` means the env default decided. */
+  selected: string | null
+  /** The engine that is live right now; `null` before the first build. */
+  active: string | null
+  switching: boolean
+  phase: string
+  options: EngineOption[]
+}
+
+export interface LocalCapabilities {
+  torch_version: string | null
+  torch_cuda_version: string | null
+  cuda_available: boolean
+  cuda_device_count: number
+  gpu_name: string | null
+  /** Device the live local pipeline was built on; `null` when it is not local. */
+  device_in_use: string | null
+  model_repo: string | null
+  error: string | null
+}
+
+export interface RemoteCapabilities {
+  app_name?: string
+  function_name?: string
+  transport?: string
+  /** Ask-time GPU preference for the deploy, not evidence of what is deployed. */
+  gpu_preference?: string | null
+  timeout_s?: number
+  health_url?: string | null
+  configured: boolean
+  resolved_transport: string | null
+  credentials_present: boolean
+  reachable: boolean
+  error: string | null
+  /** The transport that would be used if the remote backend were selected. */
+  would_use: string | null
+}
+
+export interface SystemCapabilities {
+  active_backend: string
+  requested_backend: string
+  synthesis_available: boolean
+  sample_rate: number
+  local: LocalCapabilities
+  remote: RemoteCapabilities
+  errors: { startup: string | null; remote: string | null }
+}
+
+/** Live probe of the device, the torch build and remote reachability. */
+export async function getCapabilities(): Promise<SystemCapabilities> {
+  return fetchApi<SystemCapabilities>('/api/system/capabilities')
+}
+
+/** Which engine is live, which one was chosen, and what each one needs. */
+export async function getEngineState(): Promise<EngineState> {
+  return fetchApi<EngineState>('/api/system/engine')
+}
+
+/**
+ * Switch the live synthesis engine. Genuinely slow — a local model load or a
+ * Modal container boot — so callers must show a pending state. Rejects with the
+ * server's `detail` (409 when the probe says this machine cannot run it).
+ */
+export async function setEngine(engineId: string): Promise<EngineState> {
+  return fetchApi<EngineState>('/api/system/engine', {
+    method: 'POST',
+    body: JSON.stringify({ engine: engineId }),
+  })
+}
+
 export class TTSSocket {
   private ws: WebSocket | null = null
   private bookId: string
@@ -306,6 +396,12 @@ export class TTSSocket {
   onSentenceStart: (index: number, sessionId: number) => void = () => {}
   onSentenceEnd: (index: number, durationMs: number, sessionId: number, wordTimestamps?: WordTimestamp[]) => void = () => {}
   onComplete: (sessionId: number) => void = () => {}
+  /**
+   * The engine cannot render at the requested rate, so it is producing
+   * `effectiveSpeed` instead. Sent at most once per connection, before that
+   * sentence's `sentence_end`.
+   */
+  onSpeedUnavailable?: (requestedSpeed: number, effectiveSpeed: number, sessionId: number) => void
 
   constructor(bookId: string) {
     this.bookId = bookId
@@ -332,6 +428,13 @@ export class TTSSocket {
           const sid = typeof msg.session_id === 'number' ? msg.session_id : 0
           if (msg.type === 'sentence_start') this.onSentenceStart(msg.index, sid)
           else if (msg.type === 'sentence_end') this.onSentenceEnd(msg.index, msg.duration_ms, sid, msg.word_timestamps)
+          else if (msg.type === 'speed_unavailable') {
+            // Only report a rate the engine actually named; a malformed message
+            // must not silently rewrite the UI's idea of the playback speed.
+            if (typeof msg.requested_speed === 'number' && typeof msg.effective_speed === 'number') {
+              this.onSpeedUnavailable?.(msg.requested_speed, msg.effective_speed, sid)
+            }
+          }
           else if (msg.type === 'complete') this.onComplete(sid)
         } catch {}
       }

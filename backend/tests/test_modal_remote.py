@@ -18,7 +18,7 @@ from services.modal_remote import (
     ModalKokoroClient,
     RemoteConfig,
     RemoteSynthesisError,
-    decode_response,
+    decode_results,
     modal_credentials_present,
     probe,
     reset_probe_cache,
@@ -47,7 +47,11 @@ def _wire_chunk(audio=None, graphemes="Hello world.", phonemes="həˈloʊ wɜːl
 
 
 def _wire(audio=None, tokens=()) -> dict:
-    return {"sample_rate": 24000, "device": "cuda", "chunks": [_wire_chunk(audio, tokens=tokens)]}
+    return {"sample_rate": 24000, "device": "cuda", "results": [_wire_result(audio, tokens=tokens)]}
+
+
+def _wire_result(audio=None, tokens=(), text="Hello world.") -> dict:
+    return {"text": text, "chunks": [_wire_chunk(audio, tokens=tokens)]}
 
 
 def _env(**overrides) -> dict:
@@ -115,7 +119,12 @@ class TestClientCall:
 
         client = _client(invoke, lang_code="b")
         client("Text.", voice="am_michael", speed=1.5)
-        assert seen == {"text": "Text.", "voice": "am_michael", "speed": 1.5, "lang_code": "b"}
+        assert seen == {
+            "texts": ["Text."],
+            "voice": "am_michael",
+            "speed": 1.5,
+            "lang_code": "b",
+        }
 
     def test_blank_text_never_calls_the_backend(self):
         def invoke(payload):  # pragma: no cover - must not run
@@ -125,6 +134,64 @@ class TestClientCall:
 
     def test_injected_invoke_is_reported_as_injected(self):
         assert _client(lambda payload: _wire()).transport == "injected"
+
+
+class TestBatchCalls:
+    """One call can cover a whole chapter; KModel handles batch size 1 only."""
+
+    def test_synthesize_many_returns_one_group_per_input(self):
+        def invoke(payload):
+            return {
+                "sample_rate": 24000,
+                "results": [
+                    _wire_result(text=text, audio=np.full(1200, i, dtype=np.float32))
+                    for i, text in enumerate(payload["texts"])
+                ],
+            }
+
+        client = _client(invoke)
+        groups = client.synthesize_many(["One.", "Two.", "Three."])
+        assert [len(group) for group in groups] == [1, 1, 1]
+        assert [group[0].audio[0] for group in groups] == [0.0, 1.0, 2.0]
+
+    def test_synthesize_many_sends_every_text_in_one_request(self):
+        calls = []
+
+        def invoke(payload):
+            calls.append(payload)
+            return {"sample_rate": 24000, "results": [_wire_result() for _ in payload["texts"]]}
+
+        _client(invoke).synthesize_many(["A.", "B."])
+        assert calls == [
+            {"texts": ["A.", "B."], "voice": "af_heart", "speed": 1.0, "lang_code": "a"}
+        ]
+
+    def test_synthesize_many_with_no_texts_makes_no_call(self):
+        def invoke(payload):  # pragma: no cover - must not run
+            raise AssertionError("nothing to synthesize")
+
+        assert _client(invoke).synthesize_many([]) == []
+
+    def test_mismatched_group_count_is_rejected(self):
+        def invoke(payload):
+            return {"sample_rate": 24000, "results": [_wire_result()]}
+
+        with pytest.raises(RemoteSynthesisError, match="1 result group"):
+            _client(invoke).synthesize_many(["One.", "Two."])
+
+
+class TestWarmup:
+    def test_warmup_spawns_without_waiting(self):
+        spawned = []
+        client = _client(lambda payload: _wire(), lang_code="a")
+        client.warm = lambda payload: spawned.append(payload) or "fc-123"
+        assert client.warmup() is True
+        assert spawned[0]["texts"] == [modal_remote.WARMUP_TEXT]
+
+    def test_warmup_needs_the_sdk_transport(self):
+        client = _client(lambda payload: _wire())
+        with pytest.raises(RemoteSynthesisError, match="requires the Modal SDK transport"):
+            client.warmup()
 
 
 class TestErrorHandling:
@@ -158,49 +225,49 @@ class TestErrorHandling:
             client("Hello.")
 
 
-class TestDecodeResponse:
+class TestDecodeResults:
     def test_wrong_sample_rate_is_rejected(self):
         client = _client(lambda payload: {})
         with pytest.raises(RemoteSynthesisError, match="sample_rate"):
-            decode_response({"sample_rate": 16000, "chunks": [_wire_chunk()]}, client.config)
+            decode_results({"sample_rate": 16000, "results": [_wire_result()]}, client.config)
 
-    def test_missing_chunks_is_rejected(self):
+    def test_missing_results_is_rejected(self):
         client = _client(lambda payload: {})
-        with pytest.raises(RemoteSynthesisError, match="no audio chunks"):
-            decode_response({"sample_rate": 24000, "chunks": []}, client.config)
+        with pytest.raises(RemoteSynthesisError, match="no results"):
+            decode_results({"sample_rate": 24000, "results": []}, client.config)
 
     def test_missing_audio_is_rejected(self):
         client = _client(lambda payload: {})
-        bad = {"sample_rate": 24000, "chunks": [{"graphemes": "g"}]}
+        bad = {"sample_rate": 24000, "results": [{"text": "g", "chunks": [{"graphemes": "g"}]}]}
         with pytest.raises(RemoteSynthesisError, match="missing audio_b64"):
-            decode_response(bad, client.config)
+            decode_results(bad, client.config)
 
     def test_empty_audio_is_rejected(self):
         client = _client(lambda payload: {})
         with pytest.raises(RemoteSynthesisError, match="missing audio_b64"):
-            decode_response(_wire(audio=np.zeros(0, dtype=np.float32)), client.config)
+            decode_results(_wire(audio=np.zeros(0, dtype=np.float32)), client.config)
 
     def test_garbage_audio_is_rejected(self):
         client = _client(lambda payload: {})
-        bad = {"sample_rate": 24000, "chunks": [{"audio_b64": "!!!!"}]}
+        bad = {"sample_rate": 24000, "results": [{"text": "x", "chunks": [{"audio_b64": "!!!!"}]}]}
         with pytest.raises(RemoteSynthesisError, match="zero samples"):
-            decode_response(bad, client.config)
+            decode_results(bad, client.config)
 
     def test_non_dict_payload_is_rejected(self):
         client = _client(lambda payload: {})
         with pytest.raises(RemoteSynthesisError, match="expected a dict"):
-            decode_response(["nope"], client.config)
+            decode_results(["nope"], client.config)
 
     def test_undecodable_audio_is_rejected(self):
         client = _client(lambda payload: {})
-        bad = {"sample_rate": 24000, "chunks": [{"audio_b64": "a"}]}
+        bad = {"sample_rate": 24000, "results": [{"text": "x", "chunks": [{"audio_b64": "a"}]}]}
         with pytest.raises(RemoteSynthesisError, match="float32"):
-            decode_response(bad, client.config)
+            decode_results(bad, client.config)
 
     def test_tokens_are_rehydrated_into_objects(self):
         client = _client(lambda payload: {})
         wire = _wire(tokens=[{"text": "Hello", "phonemes": "həˈloʊ", "start_ts": 0.1, "end_ts": 0.6}])
-        chunk = decode_response(wire, client.config)[0]
+        chunk = decode_results(wire, client.config)[0][0]
         assert isinstance(chunk.tokens[0], KokoroToken)
         assert chunk.tokens[0].text == "Hello"
         assert chunk.tokens[0].end_ts == 0.6
@@ -269,7 +336,7 @@ class TestSdkTransport:
         client = ModalKokoroClient(config=RemoteConfig(transport="sdk"))
         chunks = client("Hello.")
         assert len(chunks) == 1
-        assert calls[0]["text"] == "Hello."
+        assert calls[0]["texts"] == ["Hello."]
 
     def test_function_handle_is_cached_between_calls(self, monkeypatch):
         lookups = []
@@ -560,3 +627,90 @@ class TestProbe:
         env = _env(MODAL_TOKEN_ID="id", MODAL_TOKEN_SECRET="supersecret", MODAL_KOKORO_TRANSPORT="sdk")
         result = probe(env=env, checker=lambda: None)
         assert "supersecret" not in str(result)
+
+
+class TestSdkReachabilityCheck:
+    """``Function.from_name`` is lazy, so the probe must hydrate to mean anything.
+
+    Regression: on modal 1.5.5 ``from_name`` returns a handle in 0.00s for a
+    non-existent app *and* on a machine with no network at all, which made the
+    capability endpoint report ``reachable: true`` while offline.
+    """
+
+    def _install_fake_modal(self, monkeypatch, hydrate):
+        calls = []
+
+        def hydrate_handle():
+            calls.append(1)
+            return hydrate()
+
+        handle = types.SimpleNamespace(hydrate=hydrate_handle)
+        module = types.ModuleType("modal")
+        module.Function = types.SimpleNamespace(from_name=lambda app, name: handle)
+        monkeypatch.setitem(sys.modules, "modal", module)
+        monkeypatch.setattr(modal_remote, "modal_credentials_present", lambda env=None: True)
+        return calls
+
+    def test_hydrate_is_actually_called(self, monkeypatch):
+        calls = self._install_fake_modal(monkeypatch, lambda: None)
+        modal_remote._check_sdk("kokoro-tts", "synthesize")
+        assert calls == [1]
+
+    def test_missing_function_fails_the_check(self, monkeypatch):
+        not_found = type("NotFoundError", (Exception,), {})
+        self._install_fake_modal(monkeypatch, lambda: (_ for _ in ()).throw(not_found("gone")))
+        with pytest.raises(RemoteSynthesisError, match="has `modal deploy` been run"):
+            modal_remote._check_sdk("kokoro-tts", "synthesize")
+
+    def test_unreachable_api_fails_the_check(self, monkeypatch):
+        connection_error = type("ConnectionError", (Exception,), {})
+        self._install_fake_modal(
+            monkeypatch, lambda: (_ for _ in ()).throw(connection_error("no route"))
+        )
+        with pytest.raises(RemoteSynthesisError, match="Could not reach the Modal API"):
+            modal_remote._check_sdk("kokoro-tts", "synthesize")
+
+    def test_probe_prefers_the_health_url_when_configured(self, monkeypatch):
+        called = []
+        monkeypatch.setattr(modal_remote, "_check_health_url", lambda url, timeout: called.append(url))
+        monkeypatch.setattr(
+            modal_remote, "_check_sdk", lambda app, fn: called.append("sdk")
+        )
+        env = _env(
+            MODAL_TOKEN_ID="id",
+            MODAL_TOKEN_SECRET="secret",
+            MODAL_KOKORO_HEALTH_URL="https://x.modal.run",
+        )
+        result = probe(env=env, force=True)
+        assert called == ["https://x.modal.run"]
+        assert result["reachable"] is True
+
+    def test_deployed_config_is_reported_from_the_health_payload(self, monkeypatch):
+        """`gpu_preference` is a local guess; `deployed` is what the app reports."""
+        monkeypatch.setattr(
+            modal_remote,
+            "_check_health_url",
+            lambda url, timeout: {"status": "ok", "gpu": "L4,A10,T4", "max_inputs": 4},
+        )
+        env = _env(MODAL_KOKORO_HEALTH_URL="https://x.modal.run", MODAL_KOKORO_GPU="T4")
+        result = probe(env=env, force=True)
+        assert result["gpu_preference"] == "T4"
+        assert result["deployed"]["gpu"] == "L4,A10,T4"
+        assert result["deployed"]["max_inputs"] == 4
+
+    def test_sdk_probe_reports_no_deployed_detail(self, monkeypatch):
+        monkeypatch.setattr(modal_remote, "_check_sdk", lambda app, fn: None)
+        env = _env(MODAL_TOKEN_ID="id", MODAL_TOKEN_SECRET="secret", MODAL_KOKORO_TRANSPORT="sdk")
+        result = probe(env=env, force=True)
+        assert result["reachable"] is True
+        assert result["deployed"] is None
+
+    def test_probe_uses_the_sdk_when_no_health_url_is_configured(self, monkeypatch):
+        called = []
+        monkeypatch.setattr(
+            modal_remote, "_check_sdk", lambda app, fn: called.append((app, fn))
+        )
+        env = _env(MODAL_TOKEN_ID="id", MODAL_TOKEN_SECRET="secret", MODAL_KOKORO_TRANSPORT="sdk")
+        result = probe(env=env, force=True)
+        assert called == [("kokoro-tts", "synthesize")]
+        assert result["reachable"] is True

@@ -1,16 +1,31 @@
 <script lang="ts">
-  import { onMount } from 'svelte'
+  import { onMount, onDestroy } from 'svelte'
   import { get } from 'svelte/store'
-  import { getVoices, uploadVoice, deleteVoice, previewVoice, API_BASE } from '$lib/api'
+  import { getVoices, uploadVoice, deleteVoice, previewVoice } from '$lib/api'
   import type { Voice } from '$lib/api'
   import { settingsStore } from '$lib/stores/settings'
+  import VoicePreviewDock from '$lib/components/VoicePreviewDock.svelte'
+
+  /** `loading` until the real audio element is ready to play. */
+  type PreviewStatus = 'loading' | 'playing' | 'paused'
 
   let voices = $state<Voice[]>([])
   let loading = $state(true)
   let error = $state<string | null>(null)
   let selectedVoice = $state(get(settingsStore).voice)
-  let previewingId: string | null = $state(null)
-  let currentAudio: HTMLAudioElement | null = null
+
+  // Preview. The audio path is the one that was already here — real bytes from
+  // previewVoice, one object URL, one HTMLAudioElement — extended with a dock
+  // that controls and visualises that same element.
+  let previewVoiceId = $state<string | null>(null)
+  let previewStatus = $state<PreviewStatus>('loading')
+  let previewAudio = $state<HTMLAudioElement | null>(null)
+  let previewBytes = $state<ArrayBuffer | null>(null)
+  let previewError = $state<string | null>(null)
+  let currentAudioUrl: string | null = null
+  // Bumped whenever the preview target changes, so a slow fetch for a voice the
+  // user has already moved on from cannot hijack the dock.
+  let previewToken = 0
 
   async function fetchVoices() {
     loading = true
@@ -29,29 +44,93 @@
     settingsStore.setVoice(id)
   }
 
-  let currentAudioUrl: string | null = null
+  function releaseAudio() {
+    previewToken++
+    if (previewAudio) {
+      previewAudio.pause()
+      previewAudio.removeAttribute('src')
+    }
+    if (currentAudioUrl) {
+      URL.revokeObjectURL(currentAudioUrl)
+      currentAudioUrl = null
+    }
+    previewAudio = null
+    previewBytes = null
+  }
 
-  async function handlePreview(voiceId: string) {
-    if (previewingId === voiceId) {
-      currentAudio?.pause()
-      if (currentAudioUrl) { URL.revokeObjectURL(currentAudioUrl); currentAudioUrl = null }
-      previewingId = null
+  function stopPreview() {
+    releaseAudio()
+    previewVoiceId = null
+    previewError = null
+    previewStatus = 'paused'
+  }
+
+  /**
+   * Drive the dock's state from the element's own events rather than from the
+   * click, so a play() the browser refuses cannot leave the UI saying "playing".
+   */
+  function attachHandlers(audio: HTMLAudioElement, token: number) {
+    audio.onplay = () => {
+      if (token === previewToken) previewStatus = 'playing'
+    }
+    audio.onpause = () => {
+      if (token === previewToken && !audio.ended) previewStatus = 'paused'
+    }
+    audio.onended = () => {
+      if (token !== previewToken) return
+      previewStatus = 'paused'
+      // Rewound rather than released: the object URL stays valid until the
+      // preview is stopped or replaced, so Play restarts the same sample.
+      audio.currentTime = 0
+    }
+    audio.onerror = () => {
+      if (token !== previewToken) return
+      previewStatus = 'paused'
+      previewError = 'The preview audio could not be decoded.'
+    }
+  }
+
+  async function startPreview(voiceId: string) {
+    if (previewVoiceId === voiceId && previewAudio) {
+      togglePreviewPlayback()
       return
     }
-    currentAudio?.pause()
-    if (currentAudioUrl) { URL.revokeObjectURL(currentAudioUrl); currentAudioUrl = null }
-    previewingId = voiceId
+    stopPreview()
+    const token = ++previewToken
+    previewVoiceId = voiceId
+    previewStatus = 'loading'
     try {
       const buf = await previewVoice(voiceId)
-      const blob = new Blob([buf], { type: 'audio/wav' })
-      const url = URL.createObjectURL(blob)
+      if (token !== previewToken) return
+      previewBytes = buf
+      const url = URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }))
       currentAudioUrl = url
       const audio = new Audio(url)
-      audio.onended = () => { previewingId = null; URL.revokeObjectURL(url); if (currentAudioUrl === url) currentAudioUrl = null }
-      currentAudio = audio
-      audio.play()
-    } catch {
-      previewingId = null
+      previewAudio = audio
+      attachHandlers(audio, token)
+      await audio.play()
+    } catch (e: any) {
+      if (token !== previewToken) return
+      previewError = e?.message
+        ? `Could not play this preview · ${e.message}`
+        : 'Could not play this preview · the backend did not return audio'
+    }
+  }
+
+  function togglePreviewPlayback() {
+    if (!previewVoiceId) return
+    const audio = previewAudio
+    if (!audio) {
+      // A failed load leaves the dock up with the reason, and Play retries it.
+      void startPreview(previewVoiceId)
+      return
+    }
+    if (audio.paused) {
+      audio.play().catch(() => {
+        previewError = 'The browser blocked playback. Press Play again.'
+      })
+    } else {
+      audio.pause()
     }
   }
 
@@ -75,6 +154,7 @@
   async function handleDelete(voiceId: string) {
     try {
       await deleteVoice(voiceId)
+      if (previewVoiceId === voiceId) stopPreview()
       voices = voices.filter(v => v.id !== voiceId)
     } catch (e: any) {
       error = e?.message ?? 'Delete failed'
@@ -86,11 +166,15 @@
     return labels[lang] || lang
   }
 
+  const previewTarget = $derived(voices.find(v => v.id === previewVoiceId) ?? null)
+
   onMount(fetchVoices)
+  onDestroy(releaseAudio)
 </script>
 
-<div class="p-4 md:p-6">
-  <div class="flex items-center justify-between mb-6">
+<div class="flex min-h-full flex-col">
+  <div class="flex-1 p-4 md:p-6">
+    <div class="flex items-center justify-between mb-6">
     <h1 class="text-xl md:text-2xl font-bold text-slate-800">Voices</h1>
     <button
       class="px-3 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 font-medium transition-colors text-sm"
@@ -141,15 +225,25 @@
             </div>
             <button
               class="w-8 h-8 rounded-full bg-slate-100 hover:bg-blue-100 text-slate-500 hover:text-blue-600 flex items-center justify-center transition-colors"
-              onclick={(e) => { e.stopPropagation(); handlePreview(voice.id) }}
-              aria-label="Preview voice"
+              onclick={(e) => { e.stopPropagation(); startPreview(voice.id) }}
+              aria-label={previewVoiceId === voice.id && previewStatus === 'playing'
+                ? `Pause preview of ${voice.name}`
+                : `Preview ${voice.name}`}
             >
-              {#if previewingId === voice.id}
+              {#if previewVoiceId === voice.id && previewStatus === 'playing'}
                 <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16" /><rect x="14" y="4" width="4" height="16" /></svg>
               {:else}
                 <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>
               {/if}
             </button>
+            {#if previewVoiceId === voice.id && previewStatus === 'playing'}
+              <!-- Shows that this card's preview is really playing; it is not a level meter. -->
+              <span class="flex h-4 items-end gap-[2px]" aria-hidden="true">
+                <span class="w-[3px] h-2 rounded-sm bg-blue-500 motion-safe:animate-pulse"></span>
+                <span class="w-[3px] h-4 rounded-sm bg-blue-500 motion-safe:animate-pulse" style="animation-delay: 150ms"></span>
+                <span class="w-[3px] h-3 rounded-sm bg-blue-500 motion-safe:animate-pulse" style="animation-delay: 300ms"></span>
+              </span>
+            {/if}
           </div>
           <p class="font-semibold text-slate-800 text-sm">{voice.name}</p>
           <p class="text-xs text-slate-500 mt-0.5">{voice.id}</p>
@@ -160,5 +254,20 @@
         </div>
       {/each}
     </div>
+  {/if}
+  </div>
+
+  {#if previewTarget}
+    <VoicePreviewDock
+      voice={previewTarget}
+      audio={previewAudio}
+      bytes={previewBytes}
+      status={previewStatus}
+      selected={selectedVoice === previewTarget.id}
+      error={previewError}
+      onTogglePlay={togglePreviewPlayback}
+      onStop={stopPreview}
+      onUseVoice={() => selectVoice(previewTarget.id)}
+    />
   {/if}
 </div>

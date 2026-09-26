@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { settingsStore, type SettingsState } from '$lib/stores/settings'
+import { settingsStore, BIONIC_MIN_WORD_LENGTH_RANGE, type SettingsState } from '$lib/stores/settings'
+import { DEFAULT_BIONIC_OPTIONS } from '$lib/utils/bionic-reading'
 import { get } from 'svelte/store'
 
 // Mirrors the store's DEFAULTS. Updated for the design-system revamp:
@@ -13,6 +14,8 @@ const DEFAULTS: SettingsState = {
   bionicMode: false,
   bionicFixation: 1,
   bionicBoldRatio: 0.5,
+  bionicMinWordLength: 3,
+  bionicSkipCommonWords: true,
   theme: 'system',
 }
 
@@ -176,6 +179,67 @@ describe('settingsStore', () => {
       expect(state.bionicMode).toBe(false)
       expect(state.bionicFixation).toBe(1)
       expect(state.bionicBoldRatio).toBe(0.5)
+    })
+
+    it('has bionicMinWordLength defaulting to the algorithm default of 3', () => {
+      expect(get(settingsStore).bionicMinWordLength).toBe(DEFAULT_BIONIC_OPTIONS.minWordLength)
+    })
+
+    it('has bionicSkipCommonWords defaulting to the algorithm default', () => {
+      expect(get(settingsStore).bionicSkipCommonWords).toBe(DEFAULT_BIONIC_OPTIONS.skipCommonWords)
+    })
+
+    it('setBionicMinWordLength clamps to the slider range', () => {
+      settingsStore.setBionicMinWordLength(0)
+      expect(get(settingsStore).bionicMinWordLength).toBe(BIONIC_MIN_WORD_LENGTH_RANGE.min)
+      settingsStore.setBionicMinWordLength(99)
+      expect(get(settingsStore).bionicMinWordLength).toBe(BIONIC_MIN_WORD_LENGTH_RANGE.max)
+      settingsStore.setBionicMinWordLength(5)
+      expect(get(settingsStore).bionicMinWordLength).toBe(5)
+    })
+
+    it('setBionicMinWordLength rounds and ignores NaN', () => {
+      settingsStore.setBionicMinWordLength(4.6)
+      expect(get(settingsStore).bionicMinWordLength).toBe(5)
+      settingsStore.setBionicMinWordLength(NaN)
+      expect(get(settingsStore).bionicMinWordLength).toBe(5)
+    })
+
+    it('toggleBionicSkipCommonWords flips the option', () => {
+      settingsStore.toggleBionicSkipCommonWords()
+      expect(get(settingsStore).bionicSkipCommonWords).toBe(false)
+      settingsStore.toggleBionicSkipCommonWords()
+      expect(get(settingsStore).bionicSkipCommonWords).toBe(true)
+    })
+
+    it('persists the two extra bionic options to localStorage', () => {
+      settingsStore.setBionicMinWordLength(6)
+      settingsStore.toggleBionicSkipCommonWords()
+      const saved = JSON.parse(localStorage.getItem('kokoro-settings') || '{}')
+      expect(saved.bionicMinWordLength).toBe(6)
+      expect(saved.bionicSkipCommonWords).toBe(false)
+    })
+
+    it('loads the two extra bionic options from localStorage', () => {
+      localStorage.setItem('kokoro-settings', JSON.stringify({
+        ...DEFAULTS,
+        bionicMinWordLength: 7,
+        bionicSkipCommonWords: false,
+      }))
+      settingsStore.reloadFromStorage()
+      const state = get(settingsStore)
+      expect(state.bionicMinWordLength).toBe(7)
+      expect(state.bionicSkipCommonWords).toBe(false)
+    })
+
+    it('rejects an out-of-range or non-integer stored min word length', () => {
+      localStorage.setItem('kokoro-settings', JSON.stringify({ ...DEFAULTS, bionicMinWordLength: 40 }))
+      settingsStore.reloadFromStorage()
+      expect(get(settingsStore).bionicMinWordLength).toBe(DEFAULTS.bionicMinWordLength)
+
+      localStorage.setItem('kokoro-settings', JSON.stringify({ ...DEFAULTS, bionicMinWordLength: 2.5 }))
+      settingsStore.reloadFromStorage()
+      expect(get(settingsStore).bionicMinWordLength).toBe(DEFAULTS.bionicMinWordLength)
     })
   })
 })

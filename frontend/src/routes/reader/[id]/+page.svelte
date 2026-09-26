@@ -7,12 +7,14 @@ import { audioStore, type AudioState } from '$lib/stores/audio'
 import { settingsStore, type SettingsState } from '$lib/stores/settings'
 import { createBookmark, getBook } from '$lib/api'
 import { registerHotkeys, unregisterHotkeys } from '$lib/utils/hotkeys'
+import { buildPageIndex, pageForSentenceIndex } from '$lib/utils/page-index'
 import PDFViewer from '$lib/components/PDFViewer.svelte'
 import TextViewer from '$lib/components/TextViewer.svelte'
 import MediaBar from '$lib/components/MediaBar.svelte'
 import TopToolbar from '$lib/components/TopToolbar.svelte'
 import AudioProgressBar from '$lib/components/AudioProgressBar.svelte'
 import PageNavigator from '$lib/components/PageNavigator.svelte'
+import PagesOverlay from '$lib/components/PagesOverlay.svelte'
 import SettingsOverlay from '$lib/components/SettingsOverlay.svelte'
 import SearchOverlay from '$lib/components/SearchOverlay.svelte'
 import BookmarkPanel from '$lib/components/BookmarkPanel.svelte'
@@ -29,9 +31,15 @@ let pageToScroll = $state<number | null>(null)
 let settingsOpen = $state(false)
 let searchOpen = $state(false)
 let bookmarksOpen = $state(false)
+let pagesOpen = $state(false)
 
 let bookMeta = $state<{file_type: string; title: string; page_count: number} | null>(null)
 let totalPages = $derived(bookMeta?.page_count ?? reader.sentences.length)
+
+// PDFs number their own pages; every other format has one page per sentence.
+const isPageBased = $derived(bookMeta?.file_type === 'pdf')
+/** Every page of the book and the sentence it starts at — the skim overlay's list. */
+let pageIndex = $derived(buildPageIndex(reader.sentences, totalPages, isPageBased))
 
 // Search state
 let searchMatches = $state<number[]>([])
@@ -84,10 +92,29 @@ onDestroy(() => {
   unregisterHotkeys()
 })
 
+/**
+ * Jump to a 0-based page. Both the page indicator and the skim overlay come
+ * through here, and both end at `seek()` — the route's one way to move the
+ * reading position, so the page, the highlight, the audio and the saved
+ * progress never disagree.
+ */
 function handlePageJump(page: number) {
-  pageToScroll = page
-  setTimeout(() => { pageToScroll = null }, 100)
+  const entry = pageIndex.find(e => e.page === page)
+  if (!entry) return
+  // PDFs keep the existing page-level scroll affordance as well; the sentence
+  // seek drives the text view, the highlight and everything else.
+  if (isPageBased) {
+    pageToScroll = page
+    setTimeout(() => { pageToScroll = null }, 100)
+  }
+  void handleSeek(entry.sentenceIndex)
 }
+
+/** The indicator follows the reader's own position, whatever moved it. */
+$effect(() => {
+  const page = pageForSentenceIndex(pageIndex, reader.currentIndex)
+  if (page !== null) currentPage = page
+})
 
 $effect(() => {
   if (!audio.isPlaying && reader.isPlaying) setPlaying(false)
@@ -115,10 +142,6 @@ function handlePause() {
 async function handleSeek(index: number) {
   if (seeking) return
   seeking = true
-
-  // Sync page indicator immediately from sentence metadata
-  const sentenceForPage = reader.sentences.find(s => s.index === index)
-  if (sentenceForPage != null) currentPage = sentenceForPage.page
 
   if (reader.isPlaying) {
     audioStore.seek(index)
@@ -174,7 +197,7 @@ function handleBackToLibrary() {
 </script>
 
 <div class="flex flex-col h-full">
-  <div class="border-b border-slate-200 bg-white">
+  <div class="border-b border-border bg-surface">
     {#if searchOpen}
       <SearchOverlay
         sentences={reader.sentences}
@@ -187,14 +210,27 @@ function handleBackToLibrary() {
         <!-- Back button -->
         <button
           onclick={handleBackToLibrary}
-          class="p-2 rounded-md hover:bg-slate-100 text-slate-600"
+          class="flex h-11 w-11 items-center justify-center rounded-md hover:bg-surface-sunken text-fg-muted"
           aria-label="Back to library"
         >
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
           </svg>
         </button>
         <PageNavigator currentPage={currentPage} totalPages={totalPages} onGoToPage={handlePageJump} />
+        <button
+          type="button"
+          class="flex min-h-11 items-center gap-1.5 rounded-md px-2 text-sm text-fg-muted hover:bg-surface-sunken hover:text-fg disabled:opacity-40"
+          aria-haspopup="dialog"
+          aria-expanded={pagesOpen}
+          disabled={pageIndex.length === 0}
+          onclick={() => (pagesOpen = true)}
+        >
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25A2.25 2.25 0 0113.5 18v-2.25z"/>
+          </svg>
+          Pages
+        </button>
       </div>
       <div class="flex justify-center">
     <MediaBar
@@ -283,6 +319,16 @@ function handleBackToLibrary() {
 
 {#if settingsOpen}
   <SettingsOverlay onClose={() => (settingsOpen = false)} />
+{/if}
+
+{#if pagesOpen}
+  <PagesOverlay
+    pages={pageIndex}
+    {currentPage}
+    bookTitle={bookMeta?.title ?? 'This book'}
+    onJump={(page) => { pagesOpen = false; handlePageJump(page) }}
+    onClose={() => (pagesOpen = false)}
+  />
 {/if}
 
 {#if bookmarksOpen}

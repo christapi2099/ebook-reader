@@ -11,20 +11,48 @@ in this file imports torch, kokoro or numpy at module level: those imports
 happen inside the container so that ``modal deploy`` itself stays fast and the
 local backend never needs this module to be importable.
 
+Cost model
+----------
+The GPU is a *fallback list* (``L4, A10, T4``) rather than one pinned type,
+because the right optimisation is cost per hour of **audio**, not cost per hour
+of GPU (docs/research/kokoro-runtime-picks.md §4): L4 81x realtime at $0.80/h is
+~$0.10 per 9-hour book, A10 96x at $1.10/h is ~$0.12, T4 36x at $0.59/h is
+~$0.18.  Idle time, however, is what actually dominates a single reader's bill —
+an L4 kept warm for a month is ~$575 — so the container is never kept warm:
+``min_containers=0`` (scale to zero) with ``scaledown_window`` of
+``MODAL_KOKORO_IDLE_SECONDS`` (default 60 s).  Billing therefore stops within a
+minute of the last sentence, and the per-audio-hour figure is what is left.
+
+No region is pinned, so Modal schedules wherever the chosen GPU is free.
+
+Concurrency
+-----------
+``@modal.concurrent(max_inputs=4)`` lets one container take up to four
+requests at once.  That is *not* batching: ``KModel.forward_with_tokens``
+handles batch size 1 only, so a batch API would buy nothing.  What it does buy
+is overlapping container start-up and volume/socket I/O; the forward pass itself
+is serialised by ``_forward_lock`` because the pipeline is not re-entrant.
+
 Wire contract (see ``services/modal_remote.py`` for the client half):
 
-    request   {"text": str, "voice": str, "speed": float, "lang_code": str}
-    response  {"sample_rate": 24000, "chunks": [{"graphemes": str,
-               "phonemes": str, "audio_b64": str, "tokens": [...]}], ...}
+    request   {"texts": [str, ...], "voice": str, "speed": float,
+               "lang_code": str}
+    response  {"sample_rate": 24000, "results": [{"text": str, "chunks":
+               [{"graphemes": str, "phonemes": str, "audio_b64": str,
+                 "tokens": [...]}]}], ...}
 
-``audio_b64`` is base64 over little-endian float32 mono PCM at 24000 Hz, which
-is exactly the dtype/rate ``TTSEngine`` already consumes.
+``texts`` takes a list so one call can cover a whole chapter (the reader
+currently sends one sentence per call).  ``audio_b64`` is base64 over
+little-endian float32 mono PCM at 24000 Hz, which is exactly the dtype/rate
+``TTSEngine`` already consumes.
 """
 
 from __future__ import annotations
 
 import base64
+import io
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -33,11 +61,32 @@ import modal
 
 APP_NAME = os.environ.get("MODAL_KOKORO_APP_NAME", "kokoro-tts")
 FUNCTION_NAME = os.environ.get("MODAL_KOKORO_FUNCTION_NAME", "synthesize")
+EXPORT_FUNCTION_NAME = os.environ.get("MODAL_KOKORO_EXPORT_FUNCTION_NAME", "synthesize_batch")
 VOLUME_NAME = os.environ.get("MODAL_KOKORO_VOLUME_NAME", "kokoro-hf-cache")
-# T4 is the cheapest GPU Modal offers (~$0.59/h) and is ample for an 82M model.
-# Override with e.g. MODAL_KOKORO_GPU=L4 (~$0.80/h) for faster cold starts.
-GPU_TYPE = os.environ.get("MODAL_KOKORO_GPU", "T4")
+# Cheapest per hour of audio first; see the module docstring. A single name
+# ("T4") is still accepted and means "only that GPU".
+GPU_FALLBACK = tuple(
+    name.strip()
+    for name in os.environ.get("MODAL_KOKORO_GPU", "L4,A10,T4").split(",")
+    if name.strip()
+)
 IDLE_SECONDS = int(os.environ.get("MODAL_KOKORO_IDLE_SECONDS", "60"))
+# Bulk export is compute-bound, not idle-bound, so it optimises the other way
+# round from interactive reading: the cheapest GPU per synthesized hour, more
+# containers at once, and an almost immediate scale-down.
+EXPORT_GPU = os.environ.get("MODAL_KOKORO_EXPORT_GPU", "L4")
+EXPORT_MAX_CONTAINERS = int(os.environ.get("MODAL_KOKORO_EXPORT_MAX_CONTAINERS", "6"))
+EXPORT_IDLE_SECONDS = int(os.environ.get("MODAL_KOKORO_EXPORT_IDLE_SECONDS", "5"))
+EXPORT_TIMEOUT_SECONDS = int(os.environ.get("MODAL_KOKORO_EXPORT_TIMEOUT_SECONDS", "1800"))
+# Alpha Modal feature: off unless explicitly asked for, so the snapshot-free
+# path is the supported and always-working one.
+GPU_SNAPSHOT = os.environ.get("MODAL_KOKORO_GPU_SNAPSHOT", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+MAX_CONCURRENT_INPUTS = int(os.environ.get("MODAL_KOKORO_MAX_INPUTS", "4"))
 
 SAMPLE_RATE = 24000
 MODEL_REPO = "hexgrad/Kokoro-82M"
@@ -118,6 +167,10 @@ app = modal.App(APP_NAME)
 # --------------------------------------------------------------------------
 
 _pipelines: dict[str, Any] = {}
+# The Kokoro model is not re-entrant and handles one input at a time; with
+# @modal.concurrent(max_inputs=4) up to four requests share this container, so
+# every forward pass (and the one-off pipeline build) is serialised here.
+_forward_lock = threading.Lock()
 
 
 def _get_pipeline(lang_code: str) -> Any:
@@ -166,41 +219,125 @@ def _encode_tokens(result: Any) -> list[dict[str, Any]]:
     ]
 
 
+def _synthesize_audio(text: str, voice: str, speed: float, pipeline: Any) -> Any:
+    """Synthesize one string to a single float32 array.
+
+    The pipeline handles batch size 1 only, so a "batch" call is simply this
+    function applied to each text in turn while other requests wait on the lock.
+    """
+    import numpy as np
+
+    parts = []
+    with _forward_lock:
+        for result in pipeline(text, voice=voice, speed=speed):
+            parts.append(_to_float32(result.audio))
+    if not parts:
+        raise ValueError(f"Kokoro produced no audio for {len(text)} characters of text")
+    return np.concatenate(parts) if len(parts) > 1 else parts[0]
+
+
+def _render_one(text: str, voice: str, speed: float, pipeline: Any) -> list[dict[str, Any]]:
+    """Synthesize one string, returning its wire-format chunks."""
+    chunks: list[dict[str, Any]] = []
+    with _forward_lock:
+        for result in pipeline(text, voice=voice, speed=speed):
+            audio = _to_float32(result.audio)
+            chunks.append(
+                {
+                    "graphemes": result.graphemes,
+                    "phonemes": result.phonemes,
+                    "audio_b64": base64.b64encode(audio.tobytes()).decode("ascii"),
+                    "samples": int(audio.size),
+                    "tokens": _encode_tokens(result),
+                }
+            )
+    if not chunks:
+        raise ValueError(f"Kokoro produced no audio for {len(text)} characters of text")
+    return chunks
+
+
 def _render(payload: dict[str, Any]) -> dict[str, Any]:
-    """Synthesize ``payload["text"]`` and return the wire-format response."""
-    text = payload["text"]
+    """Synthesize ``payload["texts"]`` and return the wire-format response."""
+    texts = payload.get("texts")
+    if texts is None:
+        texts = [payload["text"]]
+    if isinstance(texts, str):
+        texts = [texts]
+    if not texts:
+        raise ValueError("no texts to synthesize")
+
     voice = payload.get("voice") or DEFAULT_VOICE
     speed = float(payload.get("speed", 1.0))
     lang_code = payload.get("lang_code") or DEFAULT_LANG_CODE
 
-    pipeline = _get_pipeline(lang_code)
+    # Held across the whole batch: the first call may still be loading the
+    # checkpoint, and a second thread must not build a second 327 MB pipeline.
+    with _forward_lock:
+        pipeline = _get_pipeline(lang_code)
+
     started = time.perf_counter()
-
-    chunks: list[dict[str, Any]] = []
-    for result in pipeline(text, voice=voice, speed=speed):
-        audio = _to_float32(result.audio)
-        chunks.append(
-            {
-                "graphemes": result.graphemes,
-                "phonemes": result.phonemes,
-                "audio_b64": base64.b64encode(audio.tobytes()).decode("ascii"),
-                "samples": int(audio.size),
-                "tokens": _encode_tokens(result),
-            }
-        )
-
-    if not chunks:
-        raise ValueError(f"Kokoro produced no audio for {len(text)} characters of text")
+    results = [
+        {"text": text, "chunks": _render_one(text, voice, speed, pipeline)} for text in texts
+    ]
 
     import torch
 
+    cuda = torch.cuda.is_available()
     return {
         "sample_rate": SAMPLE_RATE,
-        "device": "cuda" if torch.cuda.is_available() else "cpu",
-        "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+        "device": "cuda" if cuda else "cpu",
+        "gpu": torch.cuda.get_device_name(0) if cuda else None,
         "voice": voice,
         "speed": speed,
-        "chunks": chunks,
+        "results": results,
+        "elapsed_ms": round((time.perf_counter() - started) * 1000, 1),
+    }
+
+
+def _render_batch(payload: dict[str, Any]) -> dict[str, Any]:
+    """Render a batch of sentences and return them as one FLAC blob."""
+    import numpy as np
+    import soundfile as sf
+
+    batch_index = int(payload.get("batch_index", 0))
+    sentences = payload.get("sentences") or []
+    if not sentences:
+        raise ValueError(f"batch {batch_index} carries no sentences")
+
+    voice = payload.get("voice") or DEFAULT_VOICE
+    speed = float(payload.get("speed", 1.0))
+    lang_code = payload.get("lang_code") or DEFAULT_LANG_CODE
+
+    # Same warm pipeline as interactive synthesis: a batch and a play request
+    # can share one container, and neither may build a second 327 MB checkpoint.
+    with _forward_lock:
+        pipeline = _get_pipeline(lang_code)
+
+    started = time.perf_counter()
+    parts: list[Any] = []
+    for text in (sentence.get("text") or "" for sentence in sentences):
+        if not text.strip():
+            # Keep the sentence list and the sample-count list the same length,
+            # so the caller can turn sample offsets into sentence offsets.
+            parts.append(None)
+            continue
+        parts.append(_synthesize_audio(text, voice, speed, pipeline))
+
+    if all(part is None for part in parts):
+        raise ValueError(f"batch {batch_index} produced no audio")
+
+    audio = np.concatenate([part for part in parts if part is not None]).astype("<f4", copy=False)
+    buf = io.BytesIO()
+    sf.write(buf, audio, SAMPLE_RATE, format="FLAC", subtype="PCM_16")
+
+    return {
+        "batch_index": batch_index,
+        "sample_rate": SAMPLE_RATE,
+        "samples": int(audio.size),
+        # Per input sentence, in order: what the caller needs to place chapter
+        # marks on the assembled file without guessing from word counts.
+        "sentence_samples": [0 if part is None else int(part.size) for part in parts],
+        "flac_b64": base64.b64encode(buf.getvalue()).decode("ascii"),
         "elapsed_ms": round((time.perf_counter() - started) * 1000, 1),
     }
 
@@ -209,18 +346,65 @@ def _render(payload: dict[str, Any]) -> dict[str, Any]:
 # Deployed functions
 # --------------------------------------------------------------------------
 
-@app.function(
-    name=FUNCTION_NAME,
-    image=image,
-    gpu=GPU_TYPE,
-    volumes={HF_CACHE_PATH: _hf_cache},
-    timeout=300,
-    scaledown_window=IDLE_SECONDS,
-    max_containers=4,
-)
+def _deploy_options() -> dict[str, Any]:
+    """Modal options shared by the GPU function, incl. the opt-in alpha snapshot."""
+    options: dict[str, Any] = {
+        "name": FUNCTION_NAME,
+        "image": image,
+        "gpu": list(GPU_FALLBACK),
+        "volumes": {HF_CACHE_PATH: _hf_cache},
+        "timeout": 300,
+        # Scale to zero, always. Idle GPU time is the dominant cost, so the
+        # container is only ever alive for scaledown_window seconds after the
+        # last sentence.
+        "min_containers": 0,
+        "scaledown_window": IDLE_SECONDS,
+        "max_containers": 4,
+    }
+    if GPU_SNAPSHOT:
+        # Alpha: ~10-20 s cold start down to ~2-4 s when it works. Opt-in only;
+        # the deployment below is fully functional with this switched off.
+        options["enable_memory_snapshot"] = True
+        options["experimental_options"] = {"enable_gpu_snapshot": True}
+    return options
+
+
+@app.function(**_deploy_options())
+@modal.concurrent(max_inputs=MAX_CONCURRENT_INPUTS)
 def synthesize(payload: dict[str, Any]) -> dict[str, Any]:
     """GPU Kokoro synthesis. Called over the Modal SDK by the local backend."""
     return _render(payload)
+
+
+def _export_options() -> dict[str, Any]:
+    """Options for the bulk-export function.
+
+    Export is compute-bound rather than idle-bound, so it asks for the cheapest
+    GPU *per synthesized hour* (L4 by default) instead of the interactive
+    fallback list, runs more containers at once, and scales down almost
+    immediately: by the time a batch finishes, the next one is already queued.
+    """
+    options = _deploy_options()
+    options["name"] = EXPORT_FUNCTION_NAME
+    options["gpu"] = [g for g in EXPORT_GPU.split(",") if g.strip()]
+    options["max_containers"] = EXPORT_MAX_CONTAINERS
+    options["scaledown_window"] = EXPORT_IDLE_SECONDS
+    options["timeout"] = EXPORT_TIMEOUT_SECONDS
+    options.pop("min_containers", None)
+    return options
+
+
+@app.function(**_export_options())
+def synthesize_batch(payload: dict[str, Any]) -> dict[str, Any]:
+    """Synthesize a whole batch of sentences and return it as one FLAC blob.
+
+    One call per chapter-sized batch means one container start per batch instead
+    of one per sentence, and ``.map()`` on the client fans the batches out over
+    several containers at once. FLAC rather than raw float32 because a ten-minute
+    batch is ~10-15 MB that way instead of ~60 MB, and it round-trips to exactly
+    the same sample count.
+    """
+    return _render_batch(payload)
 
 
 @app.function(image=health_image)
@@ -229,13 +413,16 @@ def health() -> dict[str, Any]:
     """Public, torch-free liveness probe (CPU only, a few milliseconds).
 
     It intentionally does *not* start a GPU container: an internet-reachable
-    endpoint that spins up a T4 would be a standing cost risk.
+    endpoint that spins up a GPU container would be a standing cost risk.
     """
     return {
         "status": "ok",
         "app": APP_NAME,
         "function": FUNCTION_NAME,
-        "gpu": GPU_TYPE,
+        "export_function": EXPORT_FUNCTION_NAME,
+        "gpu": ",".join(GPU_FALLBACK),
+        "export_gpu": EXPORT_GPU,
+        "max_inputs": MAX_CONCURRENT_INPUTS,
         "sample_rate": SAMPLE_RATE,
     }
 
@@ -243,10 +430,11 @@ def health() -> dict[str, Any]:
 @app.local_entrypoint()
 def main(text: str = "The quick brown fox jumps over the lazy dog.", voice: str = DEFAULT_VOICE) -> None:
     """Smoke-test the deployed function: ``modal run backend/modal_kokoro.py``."""
-    result = synthesize.remote({"text": text, "voice": voice, "speed": 1.0})
-    total_samples = sum(chunk["samples"] for chunk in result["chunks"])
+    result = synthesize.remote({"texts": [text], "voice": voice, "speed": 1.0})
+    chunks = result["results"][0]["chunks"]
+    total_samples = sum(chunk["samples"] for chunk in chunks)
     print(
-        f"{result['device']} ({result['gpu']}): {len(result['chunks'])} chunk(s), "
+        f"{result['device']} ({result['gpu']}): {len(chunks)} chunk(s), "
         f"{total_samples} samples = {total_samples / result['sample_rate']:.2f}s, "
         f"{result['elapsed_ms']} ms"
     )

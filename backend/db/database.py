@@ -61,6 +61,12 @@ def _migrate(engine):
         if 'highlight_enabled' not in us_cols:
             conn.execute(text("ALTER TABLE usersettings ADD COLUMN highlight_enabled INTEGER DEFAULT 1"))
             conn.commit()
+        # The engine chosen in Settings, so the choice survives a restart without
+        # editing KOKORO_BACKEND. Nullable on purpose: NULL means "never chosen",
+        # which is what lets the env var keep deciding for existing installs.
+        if 'tts_engine' not in us_cols:
+            conn.execute(text("ALTER TABLE usersettings ADD COLUMN tts_engine TEXT DEFAULT NULL"))
+            conn.commit()
 
         # MP3 exports record the rate actually rendered alongside the rate that
         # was requested, so the exports list cannot claim a tempo the file does
@@ -68,6 +74,24 @@ def _migrate(engine):
         exp_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(mp3export)"))}
         if 'effective_speed' not in exp_cols:
             conn.execute(text("ALTER TABLE mp3export ADD COLUMN effective_speed REAL"))
+        # Phase reporting (services/engine_manager.py vocabulary) and batch
+        # counters, so a Modal export can say "warming up the GPU" or
+        # "processing 4/12 batches" instead of an opaque percentage. Both
+        # nullable/defaulted: existing rows simply have no phase.
+        if 'phase' not in exp_cols:
+            conn.execute(text("ALTER TABLE mp3export ADD COLUMN phase TEXT DEFAULT NULL"))
+        if 'batches_done' not in exp_cols:
+            conn.execute(text("ALTER TABLE mp3export ADD COLUMN batches_done INTEGER DEFAULT 0"))
+        if 'batches_total' not in exp_cols:
+            conn.execute(text("ALTER TABLE mp3export ADD COLUMN batches_total INTEGER DEFAULT 0"))
+        # Output format and its options. Defaulted to 'mp3' because every row
+        # written before this column existed is an MP3.
+        if 'format' not in exp_cols:
+            conn.execute(text("ALTER TABLE mp3export ADD COLUMN format TEXT DEFAULT 'mp3'"))
+        if 'bitrate_kbps' not in exp_cols:
+            conn.execute(text("ALTER TABLE mp3export ADD COLUMN bitrate_kbps INTEGER DEFAULT NULL"))
+        if 'options' not in exp_cols:
+            conn.execute(text("ALTER TABLE mp3export ADD COLUMN options TEXT DEFAULT NULL"))
         conn.commit()
 
         # Folders (handoff task 1). create_all() creates the new `folder` table on

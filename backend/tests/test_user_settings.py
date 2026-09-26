@@ -1,36 +1,13 @@
-"""TDD tests for User Settings router."""
-import pytest
-from datetime import datetime
-from fastapi.testclient import TestClient
-from sqlmodel import Session, SQLModel, create_engine
-from sqlalchemy.pool import StaticPool
+"""TDD tests for User Settings router.
 
-from main import app
-from db.database import get_session
-from db.models import UserSettings, Book
+The ``db_engine``/``client`` fixtures live in conftest.py and are shared with the
+other router tests; this file used to carry its own copy-pasted pair.
+"""
+from datetime import UTC, datetime
 
+from sqlmodel import Session
 
-@pytest.fixture
-def db_engine():
-    """Create an in-memory database for testing."""
-    eng = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-    SQLModel.metadata.create_all(eng)
-    return eng
-
-
-@pytest.fixture
-def client(db_engine):
-    """Create a test client with overridden session."""
-    def override_session():
-        with Session(db_engine) as session:
-            yield session
-
-    app.dependency_overrides[get_session] = override_session
-
-    with TestClient(app, raise_server_exceptions=True) as c:
-        yield c
-
-    app.dependency_overrides.clear()
+from db.models import Book, UserSettings
 
 
 class TestGetUserSettings:
@@ -54,7 +31,7 @@ class TestGetUserSettings:
                 file_path="/test/path.pdf",
                 file_type="pdf",
                 page_count=10,
-                created_at=datetime.now()
+                created_at=datetime.now(UTC)
             )
             session.add(book)
             

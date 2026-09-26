@@ -103,9 +103,28 @@ class MP3Export(SQLModel, table=True):
     file_size: int | None = None
     error_message: str | None = None
     created_at: datetime
+    # Which stage the work is in, in the shared vocabulary from
+    # services/engine_manager.py (starting / warming_up / processing / encoding /
+    # complete). `status` stays pending/processing/done/error so existing clients
+    # keep working; `phase` is the finer-grained view the UI shows for Modal
+    # work, whose slow part — container boot plus model load — used to be
+    # completely invisible. NULL for rows written before this column.
+    phase: str | None = None
+    # Batch progress, for exports fanned out over Modal containers.
+    batches_done: int = 0
+    batches_total: int = 0
+    # Output format and the options it was rendered with, so a finished export
+    # can be described (and re-downloaded with the right extension and content
+    # type) without re-deriving them. `options` is JSON.
+    format: str = "mp3"
+    bitrate_kbps: int | None = None
+    options: str | None = None
 
 class UserSettings(SQLModel, table=True):
     id: int = Field(primary_key=True, default=1)
     last_book_id: str | None = Field(foreign_key='book.id', nullable=True)
     last_sentence_index: int = 0
     highlight_enabled: bool = Field(default=True)
+    # The synthesis engine the user last chose in Settings ("cpu" | "gpu" |
+    # "modal"). NULL means "never chosen", in which case KOKORO_BACKEND decides.
+    tts_engine: str | None = None

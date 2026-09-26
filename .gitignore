@@ -44,3 +44,18 @@ backend/tests/.logs/
 .memory/
 .opencode/deepseek_research.md
 .opencode/glm_speed_analysis.md
+
+# Local implementation plans (not committed)
+docs/plans/
+
+# Agent safety-net snapshots (scripts/agent-safety.sh)
+.snapshots/
+
+# Scratch diagnostics written by agents (logs, captured runs, DB fingerprints)
+.final_backend.txt
+.full_run.txt
+.slow_run.out
+.stall_probe.txt
+.db_before_full
+.pw_install*.log
+*_run.txt

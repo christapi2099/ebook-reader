@@ -1,11 +1,17 @@
 <script lang="ts">
   import LibraryCard from '$lib/components/LibraryCard.svelte'
   import type { Book } from '$lib/api'
+  import type { StoredProgress } from '$lib/utils/reading-progress'
 
-  let { books, loading, error, onRetry, onClick, onDelete, onMove, onDragStart, onDragEnd }: {
+  let { books, loading, error, progress = {}, onRetry, onClick, onDelete, onMove, onDragStart, onDragEnd }: {
     books: Book[]
     loading: boolean
     error: string | null
+    /**
+     * Real reading positions by book id, from the server. A book with no entry
+     * (or an unknown sentence total) shows no progress rather than a guess.
+     */
+    progress?: Record<string, StoredProgress>
     onRetry: () => void
     onClick: (id: string) => void
     onDelete?: (id: string) => void
@@ -42,7 +48,16 @@
 {:else}
   <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3 md:gap-4">
     {#each books as book (book.id)}
-      <LibraryCard {book} {onClick} {onDelete} {onMove} {onDragStart} {onDragEnd} />
+      <LibraryCard
+        {book}
+        sentenceIndex={progress[book.id]?.sentenceIndex ?? null}
+        totalSentences={progress[book.id]?.totalSentences ?? null}
+        {onClick}
+        {onDelete}
+        {onMove}
+        {onDragStart}
+        {onDragEnd}
+      />
     {/each}
   </div>
 {/if}

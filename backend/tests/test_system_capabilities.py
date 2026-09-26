@@ -12,6 +12,13 @@ from main import app
 from services import kokoro_runtime
 from services.modal_remote import RemoteConfig, RemoteSynthesisError, reset_probe_cache
 
+# ``conftest.isolate_from_real_resources`` replaces ``main._init_kokoro`` with a
+# fake before every test (so no test loads the real model). Keep a reference to
+# the genuine selector for the tests that are *about* the selection logic; it
+# still resolves ``_init_local_kokoro`` / ``_init_remote_kokoro`` through the
+# module globals, so those stay monkeypatchable.
+_REAL_INIT_KOKORO = main_module._init_kokoro
+
 
 @pytest.fixture(autouse=True)
 def _clean_runtime():
@@ -184,7 +191,7 @@ class TestBackendSelection:
 
         monkeypatch.setattr(main_module, "_init_remote_kokoro", forbidden)
 
-        assert main_module._init_kokoro() is sentinel
+        assert _REAL_INIT_KOKORO() is sentinel
         assert kokoro_runtime.runtime.active_backend == "local"
         assert kokoro_runtime.runtime.device == "cuda"
         assert kokoro_runtime.runtime.requested_backend == "local"
@@ -195,7 +202,7 @@ class TestBackendSelection:
         monkeypatch.setattr(main_module, "_init_remote_kokoro", lambda requested: (None, "no credentials"))
         monkeypatch.setattr(main_module, "_init_local_kokoro", lambda: (sentinel, "cuda", None))
 
-        assert main_module._init_kokoro() is sentinel
+        assert _REAL_INIT_KOKORO() is sentinel
         assert kokoro_runtime.runtime.remote_error == "no credentials"
         assert kokoro_runtime.runtime.active_backend == "local"
 
@@ -211,7 +218,7 @@ class TestBackendSelection:
 
         monkeypatch.setattr(main_module, "_init_local_kokoro", forbidden)
 
-        assert main_module._init_kokoro() is client
+        assert _REAL_INIT_KOKORO() is client
         assert kokoro_runtime.runtime.active_backend == "remote"
 
     def test_total_failure_is_recorded_not_silent(self, monkeypatch):
@@ -220,7 +227,7 @@ class TestBackendSelection:
             main_module, "_init_local_kokoro", lambda: (None, None, "ImportError: no torch")
         )
 
-        assert main_module._init_kokoro() is None
+        assert _REAL_INIT_KOKORO() is None
         assert kokoro_runtime.runtime.active_backend == "none"
         assert kokoro_runtime.runtime.error == "ImportError: no torch"
 

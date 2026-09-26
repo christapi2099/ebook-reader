@@ -22,6 +22,26 @@ export interface AudioState {
   sentenceDurations: Record<number, number>
 }
 
+/**
+ * A rate the engine refused, and the one it used instead — both as the backend
+ * reported them in its `speed_unavailable` message.
+ */
+export interface SpeedDowngrade {
+  requested: number
+  effective: number
+}
+
+/**
+ * The engine's own answer when it cannot honour a requested playback rate.
+ *
+ * `null` means "the engine has not refused anything on this connection". It is
+ * a plain store beside the playback state because the MediaBar has to override
+ * its `speed` prop with it: the reader route passes the reader store's speed and
+ * cannot be asked to thread this through, but the highlighted rate must not be
+ * a rate the reader is not getting.
+ */
+export const speedDowngradeStore = writable<SpeedDowngrade | null>(null)
+
 function createAudioStore() {
   const { subscribe, set, update } = writable<AudioState>({
     isPlaying: false,
@@ -296,6 +316,9 @@ function createAudioStore() {
       sentenceDurations = new Map()
       elapsedSeconds = 0
       update(s => ({ ...s, elapsedSeconds: 0, sentenceDurations: {} }))
+      // A new connection means a new engine session: whatever rate the previous
+      // one refused says nothing about this one.
+      speedDowngradeStore.set(null)
 
       socket = new TTSSocket(bid)
 
@@ -332,6 +355,29 @@ function createAudioStore() {
         if (sid !== sessionId) return
         update(s => ({ ...s, isPlaying: false, buffering: false }))
         stopRaf()
+      }
+
+      // The engine cannot render at the requested rate and is producing
+      // `effectiveSpeed` instead. Playing 1.0x audio under a 1.5x highlight is
+      // the UI telling the reader something untrue, so the store takes the
+      // engine's word for it: the speed becomes the effective rate, and the
+      // refusal is published for the transport controls to explain.
+      socket.onSpeedUnavailable = (requested: number, effective: number, sid: number) => {
+        if (sid !== sessionId) return
+        // A queued speed change would re-request the rate the engine just
+        // refused, and would overwrite the effective speed below.
+        if (speedChangeTimer) { clearTimeout(speedChangeTimer); speedChangeTimer = null }
+        pendingSpeed = 0
+        const changed = effective !== get({ subscribe }).speed
+        update(s => ({ ...s, speed: effective }))
+        // Every duration measured so far describes the rate this engine was
+        // assumed to be rendering at; none of them describe `effective`.
+        if (changed) {
+          sentenceDurations = new Map()
+          elapsedSeconds = 0
+          update(s => ({ ...s, elapsedSeconds: 0, sentenceDurations: {} }))
+        }
+        speedDowngradeStore.set({ requested, effective })
       }
 
       socket.connect()
@@ -416,6 +462,7 @@ function createAudioStore() {
       ctx = null
       sentenceDurations = new Map()
       elapsedSeconds = 0
+      speedDowngradeStore.set(null)
       set({
         isPlaying: false,
         speed: 1.0,

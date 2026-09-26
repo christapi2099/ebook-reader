@@ -21,6 +21,10 @@ vi.mock('$lib/api', async (importOriginal) => {
     setBookFolder: vi.fn(),
     deleteBook: vi.fn(),
     getUserSettings: vi.fn(),
+    // The cards read their reading positions from these; mocking them keeps the
+    // suite off the network.
+    getProgress: vi.fn(),
+    getSentences: vi.fn(),
   }
 })
 
@@ -91,6 +95,8 @@ describe('Library folders UI', () => {
     vi.mocked(api.getLibrary).mockResolvedValue(BOOKS)
     vi.mocked(api.getFolders).mockResolvedValue(FOLDERS)
     vi.mocked(api.getUserSettings).mockResolvedValue({ last_book_id: null, last_sentence_index: 0 })
+    vi.mocked(api.getProgress).mockResolvedValue(0)
+    vi.mocked(api.getSentences).mockResolvedValue([])
     vi.mocked(api.setBookFolder).mockResolvedValue({ ok: true, folder_id: 7 })
     vi.mocked(api.createFolder).mockResolvedValue({
       id: 9,

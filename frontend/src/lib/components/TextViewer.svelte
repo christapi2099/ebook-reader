@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { bionifyText, bionifyTextToSegments, type BionicWord } from '$lib/utils/bionic-reading'
+  import { bionifyText, bionifyTextToSegments, toBionicOptions, type BionicWord } from '$lib/utils/bionic-reading'
+  import { settingsStore } from '$lib/stores/settings'
 
   let {
     sentences,
@@ -13,6 +14,8 @@
     bionicMode = false,
     bionicFixation = 1,
     bionicBoldRatio = 0.5,
+    bionicMinWordLength,
+    bionicSkipCommonWords,
     onSentenceClick,
   }: {
     sentences: Array<{ index: number; text: string; filtered: boolean }>
@@ -26,13 +29,25 @@
     bionicMode?: boolean
     bionicFixation?: number
     bionicBoldRatio?: number
+    bionicMinWordLength?: number
+    bionicSkipCommonWords?: boolean
     onSentenceClick?: (index: number) => void
   } = $props()
 
   const currentSentence = $derived(sentences.find(s => s.index === currentIndex) || null)
   const words = $derived(currentSentence?.text.split(/\s+/) || [])
 
-  const bionicOpts = $derived({ fixationPoint: bionicFixation, boldRatio: bionicBoldRatio })
+  // The reader route passes fixation and bold ratio but not the other two, so
+  // those come from the settings store — the same store the Settings panel
+  // writes. Without this, two of its four controls would change nothing while
+  // reading. An explicitly passed prop still wins.
+  const storedBionic = $derived(toBionicOptions($settingsStore))
+  const bionicOpts = $derived({
+    fixationPoint: bionicFixation,
+    boldRatio: bionicBoldRatio,
+    minWordLength: bionicMinWordLength ?? storedBionic.minWordLength,
+    skipCommonWords: bionicSkipCommonWords ?? storedBionic.skipCommonWords,
+  })
 
   const currentBionicWords = $derived(
     currentSentence && bionicMode

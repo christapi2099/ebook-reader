@@ -1,32 +1,12 @@
-"""TDD tests for text book endpoints."""
-import pytest
-from fastapi.testclient import TestClient
-from sqlmodel import Session, SQLModel, create_engine, select
-from sqlalchemy.pool import StaticPool
-from datetime import datetime, UTC
+"""TDD tests for text book endpoints.
 
-from main import app
-from db.database import get_session
+The ``db_engine``/``client`` fixtures come from conftest.py.
+"""
+from datetime import UTC, datetime, timedelta
+
+from sqlmodel import Session, select
+
 from db.models import Book, Sentence
-
-
-@pytest.fixture
-def db_engine():
-    from db.models import Book, Sentence, Progress
-    eng = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-    SQLModel.metadata.create_all(eng)
-    return eng
-
-
-@pytest.fixture
-def client(db_engine):
-    def override_session():
-        with Session(db_engine) as session:
-            yield session
-
-    app.dependency_overrides[get_session] = override_session
-    yield TestClient(app, raise_server_exceptions=True)
-    app.dependency_overrides.clear()
 
 
 class TestCreateTextBook:
@@ -166,27 +146,54 @@ class TestGetBookEndpoint:
 
 
 class TestCleanupEphemeral:
-    def test_cleanup_deletes_old_ephemeral_books(self, client, db_engine):
-        # Create an ephemeral book
+    def test_cleanup_deletes_ephemeral_books_older_than_24h(self, client, db_engine):
+        """The endpoint deletes by age, so the row has to *be* older than 24 h.
+
+        The old version set ``created_at = datetime.now(UTC)`` -- i.e. now -- and
+        only asserted a 200, so it proved nothing about the cutoff.
+        """
         r = client.post("/documents/text", json={"text": "This is old ephemeral text."})
         book_id = r.json()["book_id"]
 
-        # Manually set created_at to be older than 24h
         with Session(db_engine) as session:
             book = session.get(Book, book_id)
-            book.created_at = datetime.now(UTC)
+            book.created_at = datetime.now(UTC) - timedelta(hours=25)
             session.add(book)
             session.commit()
 
-        # Run cleanup (call the endpoint)
         r = client.delete("/documents/text/cleanup")
         assert r.status_code == 200
+        assert r.json()["deleted_count"] == 1
+
+        with Session(db_engine) as session:
+            assert session.get(Book, book_id) is None, "the stale book must be gone"
+            remaining = session.exec(
+                select(Sentence).where(Sentence.book_id == book_id)
+            ).all()
+            assert remaining == [], "its sentences must be gone too"
+
+    def test_cleanup_keeps_recent_ephemeral_books(self, client, db_engine):
+        """The other half of the cutoff: a fresh ephemeral book must survive."""
+        book_id = client.post("/documents/text", json={"text": "Fresh text here."}).json()["book_id"]
+
+        r = client.delete("/documents/text/cleanup")
+
+        assert r.json()["deleted_count"] == 0
+        assert client.get(f"/library/{book_id}").status_code == 200
 
     def test_cleanup_presists_non_ephemeral_books(self, client, db_engine):
         # Create and persist a text book
         r = client.post("/documents/text", json={"text": "Saved text."})
         book_id = r.json()["book_id"]
         client.patch(f"/documents/text/{book_id}")
+
+        with Session(db_engine) as session:
+            book = session.get(Book, book_id)
+            book.created_at = datetime.now(UTC) - timedelta(hours=25)
+            session.add(book)
+            session.commit()
+
+        assert client.delete("/documents/text/cleanup").json()["deleted_count"] == 0
 
         # Book should still exist after cleanup
         r = client.get(f"/library/{book_id}")

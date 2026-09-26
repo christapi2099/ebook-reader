@@ -17,15 +17,12 @@ from routers import bookmarks as bookmarks_router
 from routers import folders as folders_router
 from routers import user as user_router
 from routers import system as system_router
-from services import audio_cache, kokoro_runtime, modal_remote
+from services import audio_cache, engine_manager, kokoro_runtime
 
 logger = logging.getLogger(__name__)
 
-KOKORO_MODEL_REPO = "hexgrad/Kokoro-82M"
-KOKORO_LANG_CODE = "a"
-# How long KOKORO_BACKEND=auto may spend proving the remote backend is usable
-# before it gives up and starts local. Startup must never hang on the network.
-REMOTE_STARTUP_PROBE_SECONDS = 5.0
+# The model identity lives in services/engine_manager.py, which owns the engine
+# choice now; main only decides *when* to start one.
 
 
 def _load_env_file() -> None:
@@ -49,97 +46,45 @@ def _load_env_file() -> None:
 
 
 def _init_local_kokoro() -> tuple[Any | None, str | None, str | None]:
-    """Build the in-process Kokoro pipeline.
+    """Build the in-process Kokoro pipeline on the device torch reports.
 
-    Returns ``(pipeline, device, error)``. The error string is kept so the
-    capability endpoint can explain *why* there is no local pipeline instead of
-    reporting a bare ``null``.
+    Kept as the single place the *device* is decided for the startup path; the
+    actual build lives in ``engine_manager.build_local`` so the runtime switch in
+    Settings can ask for an explicit device instead of taking pot luck.
+    Returns ``(pipeline, device, error)``.
     """
-    try:
-        import torch
-        from kokoro import KPipeline
-
-        os.environ.setdefault("HF_HUB_OFFLINE", "1")
-        # The device is computed once, logged, returned to the caller and then
-        # actually passed to KPipeline — never thrown away.
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        logger.info("[kokoro] initializing local pipeline on %s", device)
-        pipeline = KPipeline(
-            lang_code=KOKORO_LANG_CODE,
-            repo_id=KOKORO_MODEL_REPO,
-            device=device,
-        )
-    except Exception as exc:
-        # Broad on purpose (a broken CUDA install can raise almost anything), but
-        # loud: the traceback is the whole point, and the reason is recorded so
-        # /api/system/capabilities can show it.
-        logger.exception("[kokoro] local pipeline failed to initialise")
-        return None, None, f"{type(exc).__name__}: {exc}"
-
-    logger.info("[kokoro] local pipeline ready on %s", device)
+    device = "cuda" if engine_manager._cuda_available() else "cpu"
+    pipeline, error = engine_manager.build_local(device)
+    if pipeline is None:
+        return None, None, error
     return pipeline, device, None
 
 
-def _init_remote_kokoro(requested: str) -> tuple[Any | None, str | None]:
-    """Build the Modal client, or explain why it could not be built."""
-    config = modal_remote.RemoteConfig.from_env()
-    transport = modal_remote.resolve_transport(config)
-    if transport is None:
-        return None, (
-            "no Modal credentials (MODAL_TOKEN_ID/MODAL_TOKEN_SECRET or ~/.modal.toml) "
-            "and no MODAL_KOKORO_HEALTH_URL"
-        )
-    if requested == "auto":
-        status = modal_remote.probe(config=config, timeout_s=REMOTE_STARTUP_PROBE_SECONDS)
-        if not status["reachable"]:
-            return None, f"remote backend not reachable: {status['error']}"
-    return modal_remote.ModalKokoroClient(config=config), None
-
-
 def _init_kokoro() -> Any | None:
-    """Choose the Kokoro backend: ``local`` (default), ``remote`` or ``auto``.
+    """Choose the Kokoro backend at startup.
 
-    ``auto`` means "remote only when credentials exist *and* a probe says the
-    deployed app answers"; every failure path falls back to local so the reader
-    keeps working without a network.
+    Thin wrapper over :mod:`services.engine_manager`, which owns the choice from
+    here on. Order: the engine persisted in Settings, then ``KOKORO_BACKEND``
+    (``local`` → GPU if this machine has one, else CPU; ``remote`` → Modal;
+    ``auto`` → Modal only when a probe says it answers), then local. Every
+    failure path falls back so the reader keeps working without a network.
     """
-    requested = kokoro_runtime.normalize_backend(os.environ.get("KOKORO_BACKEND"))
-    state = kokoro_runtime.runtime
-    state.requested_backend = requested
-    remote_error: str | None = None
+    return engine_manager.manager.startup(os.environ.get("KOKORO_BACKEND"))
 
-    if requested in ("remote", "auto"):
-        try:
-            client, remote_error = _init_remote_kokoro(requested)
-        except Exception as exc:
-            logger.exception("[kokoro] building the Modal remote client failed")
-            client, remote_error = None, f"{type(exc).__name__}: {exc}"
-        if client is not None:
-            state.record_remote()
-            logger.info(
-                "[kokoro] using remote backend transport=%s app=%s function=%s",
-                client.transport,
-                client.config.app_name,
-                client.config.function_name,
-            )
-            return client
-        state.remote_error = remote_error
-        logger.warning(
-            "[kokoro] KOKORO_BACKEND=%s could not use the remote backend (%s); falling back to local",
-            requested,
-            remote_error,
-        )
 
-    pipeline, device, local_error = _init_local_kokoro()
-    if pipeline is not None:
-        state.record_local(device=device or "cpu", model_repo=KOKORO_MODEL_REPO)
-        return pipeline
+def _apply_kokoro(kokoro: Any) -> None:
+    """Push the live engine into every router that holds one.
 
-    state.record_failure(local_error or remote_error or "no Kokoro backend available")
-    logger.error(
-        "[kokoro] no Kokoro backend is available, TTS will produce no audio: %s", state.error
-    )
-    return None
+    Registered with the engine manager, so a runtime switch in Settings reaches
+    the WebSocket, voice preview and export paths through exactly this function
+    instead of three ad-hoc assignments scattered around startup.
+    """
+    tts_router.set_kokoro(kokoro)
+    voices_router.set_kokoro(kokoro)
+    mp3_router.set_kokoro(kokoro)
+
+
+engine_manager.register_applier(_apply_kokoro)
 
 
 _load_env_file()
@@ -149,10 +94,7 @@ _load_env_file()
 async def lifespan(app: FastAPI):
     engine = create_engine_and_tables()
     Path("uploads").mkdir(exist_ok=True)
-    kokoro = _init_kokoro()
-    tts_router.set_kokoro(kokoro)
-    voices_router.set_kokoro(kokoro)
-    mp3_router.set_kokoro(kokoro)
+    _apply_kokoro(_init_kokoro())
     # Audio cache eviction lives here, not in the write path: one sweep at
     # startup, then the periodic task below for the life of the process, so
     # every writer is covered instead of only the flows we remembered

@@ -4,7 +4,8 @@
   import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
   import type { Sentence, WordBbox } from '$lib/api'
   import { getPdfUrl } from '$lib/api'
-  import { bionifyTextToSegments, bionifyWord } from '$lib/utils/bionic-reading'
+  import { bionifyTextToSegments, bionifyWord, toBionicOptions } from '$lib/utils/bionic-reading'
+  import { settingsStore } from '$lib/stores/settings'
 
   pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl
 
@@ -25,6 +26,8 @@
     bionicMode = false,
     bionicFixation = 1,
     bionicBoldRatio = 0.5,
+    bionicMinWordLength,
+    bionicSkipCommonWords,
   }: {
     bookId: string
     sentences: Sentence[]
@@ -42,6 +45,8 @@
     bionicMode?: boolean
     bionicFixation?: number
     bionicBoldRatio?: number
+    bionicMinWordLength?: number
+    bionicSkipCommonWords?: boolean
   } = $props()
 
   function hexToRgba(hex: string, alpha: number): string {
@@ -82,7 +87,17 @@
   let zoomLevel = $state(1.0)
   let finalScale = $derived(effectiveScale * zoomLevel)
 
-  const bionicOpts = $derived({ fixationPoint: bionicFixation, boldRatio: bionicBoldRatio })
+  // The reader route passes fixation and bold ratio but not the other two, so
+  // those come from the settings store — the same store the Settings panel
+  // writes. Without this, two of its four controls would change nothing in the
+  // PDF overlay. An explicitly passed prop still wins.
+  const storedBionic = $derived(toBionicOptions($settingsStore))
+  const bionicOpts = $derived({
+    fixationPoint: bionicFixation,
+    boldRatio: bionicBoldRatio,
+    minWordLength: bionicMinWordLength ?? storedBionic.minWordLength,
+    skipCommonWords: bionicSkipCommonWords ?? storedBionic.skipCommonWords,
+  })
 
   let sentencesByPage = $derived(
     sentences.reduce((acc, s) => {
