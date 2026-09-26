@@ -59,3 +59,6 @@ docs/plans/
 .db_before_full
 .pw_install*.log
 *_run.txt
+
+# Per-agent worktrees (scripts/agent-worktree.sh)
+.worktrees/
