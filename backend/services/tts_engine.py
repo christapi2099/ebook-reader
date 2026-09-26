@@ -1,8 +1,10 @@
 import asyncio
 import hashlib
+import inspect
 import io
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, UTC
 from typing import AsyncGenerator, Any
@@ -20,11 +22,17 @@ INT16_MAX = 32767
 SAMPLE_RATE = 24000
 
 # Speeds are normalised to this many decimals before being hashed into a cache
-# key. The UI only offers multiples of 0.25 in [0.5, 3.0], so two decimals is
-# lossless for every reachable input while collapsing float noise
-# (1.15 vs 1.1500000000000001) onto a single key. `_cache_key` must keep emitting
-# the legacy `f"{speed}"` spelling for these values, or every row on disk is
-# orphaned; see TestCacheKeyBackwardCompatibility.
+# key. Two decimals is lossless for every speed the UI offers (multiples of 0.25
+# in [0.5, 3.0]) while collapsing float noise (1.15 vs 1.1500000000000001) onto a
+# single key. `_cache_key` must keep emitting the legacy `f"{speed}"` spelling for
+# those values, or every row already on disk is orphaned; see
+# TestCacheKeyBackwardCompatibility.
+#
+# Caveat: two *client-supplied* speeds inside the same 0.01 bucket do collide
+# (1.149 and 1.15 share a key), which bounds the worst-case rate error at 1.92%
+# at the 0.5x end. Unreachable from the UI. The durable fix is to quantise once
+# at the transport boundary so the key, the argument handed to Kokoro and the
+# rate reported back can never disagree.
 SPEED_PRECISION = 2
 
 _g2p = None
@@ -53,6 +61,72 @@ def _is_spoken_token(token: Any) -> bool:
     word highlighting visibly shifted underneath the user.
     """
     return bool(token.phonemes) and any(c.isalnum() for c in token.text)
+
+
+# Kokoro inference is synchronous and a single sentence can take tens of seconds,
+# so it is run on a dedicated worker thread. Without this the whole event loop
+# freezes for the length of every sentence: WebSocket frames stall, /health stops
+# answering, and asyncio cancellation is not observed until the sentence ends.
+# (Measured on this codebase: 83 consecutive seconds with zero event-loop turns.)
+#
+# max_workers=1 is deliberate and load-bearing:
+#   * it SERIALISES synthesis, so a prefetch can never render concurrently with
+#     the sentence the user is actually waiting for;
+#   * it stops torch oversubscribing - two concurrent inferences would contend
+#     for the same cores and the same CUDA context.
+# The pool is module-level because routers/tts.py builds a TTSEngine per
+# WebSocket connection, so a per-instance pool would permit exactly the
+# concurrency max_workers=1 exists to prevent.
+_synthesis_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="kokoro-synth")
+
+# Number of sentences currently waiting on the synthesis worker for playback.
+# Module-level for the same reason as the pool. Prefetch reads it and stands
+# down while it is non-zero, so a batch can never starve live audio.
+_playback_waiting = 0
+
+_SYNTHESIS_EXHAUSTED = object()
+
+
+def _next_chunk(iterator: Any) -> Any:
+    """Pull the next item from a Kokoro result iterator, or the sentinel.
+
+    Runs on the synthesis worker thread. For a generator-based Kokoro, *nexting*
+    the iterator is what actually performs inference for that chunk, so this is
+    the call that has to be off the event loop.
+    """
+    try:
+        return next(iterator)
+    except StopIteration:
+        return _SYNTHESIS_EXHAUSTED
+
+
+def _playback_wait_begin() -> None:
+    """Mark that a sentence the user is waiting for needs the synth worker."""
+    global _playback_waiting
+    _playback_waiting += 1
+
+
+def _playback_wait_end() -> None:
+    global _playback_waiting
+    _playback_waiting -= 1
+
+
+def _accepts_speed(kokoro: Any) -> bool:
+    """Whether `kokoro` accepts a ``speed=`` keyword.
+
+    Probing the signature is strictly better than calling and catching TypeError.
+    A TypeError can originate anywhere inside a callable that is not a generator
+    function — an unrelated bug, a particular input, a remote transport, or a
+    plain ``None`` — and treating any of those as "this build has no speed
+    support" silently and *permanently* downgrades a healthy engine to 1.0x for
+    the rest of the session. Only a genuine signature mismatch should do that.
+    """
+    try:
+        return "speed" in inspect.signature(kokoro).parameters
+    except (TypeError, ValueError):
+        # Not introspectable (builtins, some C callables). Give it the benefit of
+        # the doubt and let any real error surface from the call itself.
+        return True
 
 
 @dataclass
@@ -118,28 +192,24 @@ class TTSEngine:
         """Synthesize `text`, returning ``(results, effective_speed)``.
 
         ``effective_speed`` is the rate the audio was really produced at. It can
-        only differ from ``speed`` on a Kokoro build that rejects the ``speed``
-        kwarg, in which case this engine degrades to 1.0x for the rest of the
-        session. Callers must key any cache on ``effective_speed`` and never on
-        the requested value: keying on the request stored a 1.0x render under the
-        1.5x key, permanently, so every later 1.5x request replayed the wrong
-        rate straight out of the cache.
+        only differ from ``speed`` when the injected Kokoro callable takes no
+        ``speed`` keyword, in which case this engine degrades to 1.0x for the rest
+        of the session. Callers must key any cache on ``effective_speed`` and
+        never on the requested value: keying on the request stored a 1.0x render
+        under the 1.5x key, permanently, so every later 1.5x request replayed the
+        wrong rate straight out of the cache.
         """
-        if self._speed_kwarg_supported is False:
-            return self.kokoro(text, voice=voice), 1.0
+        if self._speed_kwarg_supported is None:
+            self._speed_kwarg_supported = _accepts_speed(self.kokoro)
+            if not self._speed_kwarg_supported:
+                logger.warning(
+                    "Injected Kokoro callable takes no speed= keyword; "
+                    "synthesising at 1.0x and labelling the audio as such"
+                )
 
-        try:
-            results = self.kokoro(text, voice=voice, speed=speed)
-        except TypeError:
-            logger.warning(
-                "Installed Kokoro does not accept the speed= kwarg; "
-                "synthesising at 1.0x and labelling the audio as such"
-            )
-            self._speed_kwarg_supported = False
+        if not self._speed_kwarg_supported:
             return self.kokoro(text, voice=voice), 1.0
-
-        self._speed_kwarg_supported = True
-        return results, speed
+        return self.kokoro(text, voice=voice, speed=speed), speed
 
     def _collect_result(
         self,
@@ -229,27 +299,41 @@ class TTSEngine:
             return
 
         # This call may be the one that discovers the installed Kokoro cannot
-        # honour `speed`, so it hands back the rate it actually used.
-        results, effective_speed = self._call_kokoro(job.text, job.voice, job.speed)
-        audio_parts: list[np.ndarray] = []
-        word_timestamps: list[dict] = []
-        audio_offset = 0.0
-        chunk_samples = SAMPLE_RATE // 10
-
-        for result in results:
-            await asyncio.sleep(0)
-            if job.sentence_index in self.cancelled:
-                return
-            audio_chunk, audio_offset = self._collect_result(
-                result, audio_parts, word_timestamps, audio_offset,
+        # honour `speed`, so it hands back the rate it actually used. It goes to
+        # the worker thread as well: for a generator-based Kokoro the call itself
+        # is cheap, but not every build is a generator.
+        loop = asyncio.get_running_loop()
+        _playback_wait_begin()
+        try:
+            results, effective_speed = await loop.run_in_executor(
+                _synthesis_pool, self._call_kokoro, job.text, job.voice, job.speed,
             )
-            for start in range(0, len(audio_chunk), chunk_samples):
+            audio_parts: list[np.ndarray] = []
+            word_timestamps: list[dict] = []
+            audio_offset = 0.0
+            chunk_samples = SAMPLE_RATE // 10
+
+            iterator = iter(results)
+            while True:
+                result = await loop.run_in_executor(
+                    _synthesis_pool, _next_chunk, iterator,
+                )
+                if result is _SYNTHESIS_EXHAUSTED:
+                    break
                 if job.sentence_index in self.cancelled:
                     return
-                chunk = audio_chunk[start:start + chunk_samples]
-                buf = io.BytesIO()
-                sf.write(buf, chunk, SAMPLE_RATE, format="WAV", subtype="PCM_16")
-                yield buf.getvalue()
+                audio_chunk, audio_offset = self._collect_result(
+                    result, audio_parts, word_timestamps, audio_offset,
+                )
+                for start in range(0, len(audio_chunk), chunk_samples):
+                    if job.sentence_index in self.cancelled:
+                        return
+                    chunk = audio_chunk[start:start + chunk_samples]
+                    buf = io.BytesIO()
+                    sf.write(buf, chunk, SAMPLE_RATE, format="WAV", subtype="PCM_16")
+                    yield buf.getvalue()
+        finally:
+            _playback_wait_end()
 
         if audio_parts and job.sentence_index not in self.cancelled:
             # Re-derive the key: `_call_kokoro` above may have just proved the
@@ -281,7 +365,20 @@ class TTSEngine:
         speed: float,
         cancel: asyncio.Event,
     ) -> None:
-        """Pre-synthesize up to `count` sentences into AudioCache starting at `from_index`."""
+        """Pre-synthesize up to `count` sentences into AudioCache starting at `from_index`.
+
+        Prefetch shares the one synthesis worker with live playback, so it stands
+        down whenever a sentence the user is waiting for needs that worker.
+        Without the gate a batch would hold the worker for all `count` sentences
+        and live audio would queue behind it — and on CPU the prefetcher cannot
+        keep up anyway (it is slower than real time), so its work during playback
+        buys nothing while costing latency. It therefore warms ahead when the user
+        is not waiting, and yields when they are.
+        """
+        if self.kokoro is None:
+            return
+
+        loop = asyncio.get_running_loop()
         synthesized = 0
         for idx in sorted(sentences.keys()):
             if idx < from_index:
@@ -291,6 +388,12 @@ class TTSEngine:
             s = sentences[idx]
             if s["filtered"]:
                 continue
+
+            while _playback_waiting and not cancel.is_set():
+                await asyncio.sleep(0.05)
+            if cancel.is_set():
+                return
+
             effective_speed = self._effective_speed(speed)
             cache_key = self._cache_key(s["text"], voice, effective_speed)
             with Session(_db.engine) as session:
@@ -300,19 +403,24 @@ class TTSEngine:
                 await asyncio.sleep(0)
                 continue
             try:
-                results, effective_speed = self._call_kokoro(s["text"], voice, speed)
+                results, effective_speed = await loop.run_in_executor(
+                    _synthesis_pool, self._call_kokoro, s["text"], voice, speed,
+                )
                 audio_parts: list[np.ndarray] = []
                 word_timestamps: list[dict] = []
                 audio_offset = 0.0
-                for result in results:
+                iterator = iter(results)
+                while True:
+                    result = await loop.run_in_executor(
+                        _synthesis_pool, _next_chunk, iterator,
+                    )
+                    if result is _SYNTHESIS_EXHAUSTED:
+                        break
                     if cancel.is_set():
                         return
                     _, audio_offset = self._collect_result(
                         result, audio_parts, word_timestamps, audio_offset,
                     )
-                    # Kokoro synthesis happens during iteration, so yield between
-                    # results or a long sentence monopolises the event loop.
-                    await asyncio.sleep(0)
                 if audio_parts:
                     self._write_cache_entry(
                         audio_parts,

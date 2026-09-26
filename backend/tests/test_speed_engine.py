@@ -11,13 +11,16 @@ audio on the *requested* speed. That silently and permanently cached 1.0x audio
 under e.g. the 1.5x key, so every later request at 1.5x replayed the wrong rate.
 """
 import asyncio
+import contextlib
 import hashlib
+import time
 
 import numpy as np
 import pytest
 from sqlmodel import Session, create_engine
 
 from db.models import AudioCache
+from routers.tts import _requested_speed
 from services.tts_engine import TTSEngine, SynthJob
 
 SAMPLE_RATE = 24000
@@ -186,8 +189,12 @@ class TestCacheKeyBackwardCompatibility:
     reveal.
     """
 
-    # The reader's full speed range as offered by the UI.
-    UI_SPEEDS = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0]
+    # The speeds the reader actually offers (`MediaBar.svelte:24` is the only
+    # place that list exists), plus every other multiple of 0.25 the API can be
+    # handed by a client that is not the UI. Every value here must keep its
+    # legacy key spelling.
+    UI_SPEEDS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0]
+    MULTIPLES_OF_025 = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0]
 
     @staticmethod
     def _legacy_key(text: str, voice: str, speed: float) -> str:
@@ -201,9 +208,142 @@ class TestCacheKeyBackwardCompatibility:
             "Hello world.", "af_heart", speed
         ), f"speed {speed} no longer resolves to its legacy cache key"
 
+    @pytest.mark.parametrize("speed", MULTIPLES_OF_025)
+    def test_every_quarter_step_maps_to_its_legacy_key(self, speed):
+        """The API accepts any float, so guard the rest of the 0.25 grid too."""
+        engine = TTSEngine(kokoro_speed_supported)
+        assert engine._cache_key("Hello world.", "af_heart", speed) == self._legacy_key(
+            "Hello world.", "af_heart", speed
+        ), f"speed {speed} no longer resolves to its legacy cache key"
+
     def test_int_speed_still_reaches_float_rows(self):
         """A caller passing `speed=1` must still find rows written for `1.0`."""
         engine = TTSEngine(kokoro_speed_supported)
         assert engine._cache_key("Hello.", "af_heart", 1) == self._legacy_key(
             "Hello.", "af_heart", 1.0
         )
+
+
+class TestTransportSpeedValidation:
+    """`speed` is validated and quantised once, at the transport boundary.
+
+    Without this a client could send 0 (which divides by zero inside Kokoro into
+    a `RuntimeError: repeats can not be negative` that nothing on the synthesis
+    path catches), NaN, or an unquantised value that would render at one rate and
+    be filed under another.
+    """
+
+    @pytest.mark.parametrize("raw", [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0])
+    def test_ui_speeds_pass_through_unchanged(self, raw):
+        assert _requested_speed({"speed": raw}) == raw
+
+    def test_missing_speed_defaults_to_one(self):
+        assert _requested_speed({}) == 1.0
+
+    def test_speed_is_quantised_to_two_decimals(self):
+        """Matching the cache key's normalisation, so key and render agree."""
+        assert _requested_speed({"speed": 1.149}) == 1.15
+
+    @pytest.mark.parametrize("raw", [0, 0.0, -1.0, -0.5])
+    def test_non_positive_speeds_are_rejected(self, raw):
+        with pytest.raises(ValueError):
+            _requested_speed({"speed": raw})
+
+    @pytest.mark.parametrize("raw", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_speeds_are_rejected(self, raw):
+        with pytest.raises(ValueError):
+            _requested_speed({"speed": raw})
+
+    @pytest.mark.parametrize("raw", ["fast", None, [1.5], {"a": 1}])
+    def test_non_numeric_speeds_are_rejected(self, raw):
+        with pytest.raises(ValueError):
+            _requested_speed({"speed": raw})
+
+    def test_out_of_band_speeds_are_clamped(self):
+        assert _requested_speed({"speed": 99}) == 3.0
+        assert _requested_speed({"speed": 0.001}) == 0.5
+
+    def test_the_quantised_value_is_what_the_cache_key_uses(self):
+        """Key, Kokoro argument and reported rate must not disagree."""
+        engine = TTSEngine(kokoro_speed_supported)
+        speed = _requested_speed({"speed": 1.149})
+        assert speed == 1.15
+        assert engine._cache_key("t", "af_heart", speed) == engine._cache_key(
+            "t", "af_heart", 1.15
+        )
+
+
+class TestSynthesisDoesNotBlockTheEventLoop:
+    """The measured cause of the reader's lag, pinned as a regression test.
+
+    Synthesis used to run synchronously *on* the asyncio event loop: for a
+    generator-based Kokoro a single `next()` performs the entire inference, so one
+    sentence froze the loop for tens of seconds — measured at 83 consecutive
+    seconds with zero event-loop turns. WebSocket frames, `/health` and asyncio
+    cancellation were all stuck behind it, which is what made the app feel hung
+    and made pause/seek unresponsive.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_loop_ticks_while_a_slow_sentence_is_synthesised(self, test_engine):
+        ticks = 0
+
+        async def heartbeat():
+            nonlocal ticks
+            while True:
+                ticks += 1
+                await asyncio.sleep(0.005)
+
+        def slow_kokoro(text, voice=None, speed=1.0):
+            time.sleep(0.30)  # stands in for real inference
+            return [(None, None, np.full(2400, 0.5, dtype=np.float32))]
+
+        engine = TTSEngine(slow_kokoro)
+        beat = asyncio.create_task(heartbeat())
+        try:
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr("services.tts_engine._db.engine", test_engine)
+                async for _ in engine.stream_job(
+                    SynthJob(sentence_index=0, text="A slow sentence.", speed=1.0)
+                ):
+                    pass
+        finally:
+            beat.cancel()
+
+        assert ticks >= 10, (
+            f"the event loop ticked only {ticks} times during a 0.30s synthesis, "
+            "so synthesis is still running on the loop"
+        )
+
+    @pytest.mark.asyncio
+    async def test_prefetch_stands_down_while_playback_needs_the_worker(self, test_engine):
+        """A batch must not hold the single synthesis worker while audio is awaited."""
+        from services import tts_engine as engine_module
+
+        synthesised: list[str] = []
+
+        def kokoro(text, voice=None, speed=1.0):
+            synthesised.append(text)
+            return [(None, None, np.full(240, 0.5, dtype=np.float32))]
+
+        sentences = {i: {"text": f"Batch sentence {i}.", "filtered": False} for i in range(20)}
+        engine = TTSEngine(kokoro)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("services.tts_engine._db.engine", test_engine)
+            # Pretend the user is waiting for audio for the whole window.
+            engine_module._playback_wait_begin()
+            task = asyncio.create_task(engine.prefetch(
+                sentences, from_index=0, count=20, voice="af_heart",
+                speed=1.0, cancel=asyncio.Event(),
+            ))
+            await asyncio.sleep(0.25)
+            try:
+                assert synthesised == [], (
+                    "prefetch claimed the synthesis worker while playback was waiting"
+                )
+            finally:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+                engine_module._playback_wait_end()

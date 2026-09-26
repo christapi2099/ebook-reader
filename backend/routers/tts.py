@@ -1,6 +1,7 @@
 import asyncio
 import io
 import json
+import math
 from typing import Any
 
 import numpy as np
@@ -11,6 +12,37 @@ from sqlmodel import Session, select
 import db.database as _db
 from db.models import Book, Sentence
 from services.tts_engine import TTSEngine, SynthJob
+
+# Kokoro's duration predictor divides the predicted frame durations by `speed`
+# and then floors every phoneme at one 25 ms frame, so the delivered rate
+# saturates well below the requested one — a 3.0x request renders at roughly
+# 2.2x — and a non-positive speed divides by zero into a `torch.round(inf)`
+# failure that nothing on this path catches (it happens during iteration, outside
+# `_call_kokoro`), killing the session.
+#
+# Speed is therefore validated and quantised once, here at the transport
+# boundary, so the cache key, the argument handed to Kokoro and the rate reported
+# back to the client can never disagree about which rate was asked for. The
+# quantisation matches `TTSEngine._cache_key`'s 2-decimal normalisation.
+MIN_SPEED = 0.5
+MAX_SPEED = 3.0
+
+
+def _requested_speed(msg: dict) -> float:
+    """Validate and normalise the `speed` field of an inbound message.
+
+    Raises ValueError with a client-safe message so the caller can report it
+    rather than letting a bad value reach Kokoro.
+    """
+    try:
+        speed = float(msg.get("speed", 1.0))
+    except (TypeError, ValueError):
+        raise ValueError("speed must be a number")
+    if not math.isfinite(speed):
+        raise ValueError("speed must be finite")
+    if speed <= 0:
+        raise ValueError("speed must be greater than zero")
+    return round(min(max(speed, MIN_SPEED), MAX_SPEED), 2)
 
 router = APIRouter()
 
@@ -197,8 +229,14 @@ async def tts_websocket(websocket: WebSocket, book_id: str):
                 else:
                     from_index = int(msg.get("to_index", 0))
                 voice = str(msg.get("voice", "af_heart"))
-                speed = float(msg.get("speed", 1.0))
                 session_id = int(msg.get("session_id", 0))
+                try:
+                    speed = _requested_speed(msg)
+                except ValueError as exc:
+                    await websocket.send_text(json.dumps({
+                        "type": "error", "message": str(exc), "session_id": session_id,
+                    }))
+                    continue
                 await _cancel_and_clear()
                 producer_task = asyncio.create_task(_producer(from_index, voice, speed))
                 consumer_task = asyncio.create_task(_consumer_with_events(session_id))
@@ -212,9 +250,12 @@ async def tts_websocket(websocket: WebSocket, book_id: str):
                 # Warm cache at a new speed without interrupting playback.
                 # Triggered immediately when user changes speed (before debounce fires).
                 pf_voice = str(msg.get("voice", "af_heart"))
-                pf_speed = float(msg.get("speed", 1.0))
                 pf_from = int(msg.get("from_index", 0))
-                if pf_speed <= 0:
+                try:
+                    pf_speed = _requested_speed(msg)
+                except ValueError:
+                    # A malformed speed is not worth interrupting playback over;
+                    # the next well-formed message will re-warm the cache.
                     continue
                 prefetch_cancel.set()
                 if prefetch_task and not prefetch_task.done():

@@ -34,7 +34,7 @@ test-results/
 playwright-report/
 blob-report/
 # Scratch output from test-timing runs.
-.perfile_timing.txt
+.perfile_timing*.txt
 backend/tests/.logs/
 
 # Code intelligence / local tooling
