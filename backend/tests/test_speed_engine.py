@@ -288,7 +288,17 @@ class TestSynthesisDoesNotBlockTheEventLoop:
 
     @pytest.mark.asyncio
     async def test_the_loop_ticks_while_a_slow_sentence_is_synthesised(self, test_engine):
+        """Causal, not a speed ratio.
+
+        The old form asserted ``ticks >= 10`` after a 0.30 s sleep, i.e. "the
+        machine managed at least a third of the 60 ticks the sleep allowed". The
+        property is an ordering: the heartbeat must get a turn *during* the
+        synthesis, which cannot happen if the synthesis occupies the loop. The
+        tick counter is therefore sampled inside the slow pipeline, before and
+        after its sleep, and the two samples must differ.
+        """
         ticks = 0
+        ticks_around_inference: list[tuple[int, int]] = []
 
         async def heartbeat():
             nonlocal ticks
@@ -297,7 +307,9 @@ class TestSynthesisDoesNotBlockTheEventLoop:
                 await asyncio.sleep(0.005)
 
         def slow_kokoro(text, voice=None, speed=1.0):
+            before = ticks
             time.sleep(0.30)  # stands in for real inference
+            ticks_around_inference.append((before, ticks))
             return [(None, None, np.full(2400, 0.5, dtype=np.float32))]
 
         engine = TTSEngine(slow_kokoro)
@@ -312,9 +324,12 @@ class TestSynthesisDoesNotBlockTheEventLoop:
         finally:
             beat.cancel()
 
-        assert ticks >= 10, (
-            f"the event loop ticked only {ticks} times during a 0.30s synthesis, "
-            "so synthesis is still running on the loop"
+        assert ticks_around_inference, "the slow pipeline never ran"
+        before, after = ticks_around_inference[0]
+        assert after > before, (
+            "the event loop did not turn once during a 0.30s synthesis "
+            f"(tick counter stayed at {before}), so synthesis is still running on "
+            "the loop"
         )
 
     @pytest.mark.asyncio

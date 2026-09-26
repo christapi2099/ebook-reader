@@ -30,9 +30,11 @@ Layout of this file
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import shutil
+import socket
 import sys
 import tempfile
 import threading
@@ -50,6 +52,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
+from services import export_encoding
 from services.base_engine import SentenceRecord
 
 # --------------------------------------------------------------------------- #
@@ -109,6 +112,49 @@ def _make_working_sandbox() -> Path:
 _SANDBOX = _make_working_sandbox()
 _ORIGINAL_CWD = Path.cwd()
 os.chdir(_SANDBOX)
+
+
+def _block_dotenv_file() -> None:
+    """Keep ``backend/.env`` out of the suite's environment.
+
+    ``main.py`` calls ``_load_env_file()`` at *import* time, and that file is the
+    developer's own configuration. Importing ``main`` -- which half the suite
+    does at collection -- therefore used to copy its contents into ``os.environ``
+    for the whole process: measured here, ``KOKORO_BACKEND=local``, a live
+    ``MODAL_KOKORO_HEALTH_URL`` and the real ``MODAL_TOKEN_ID`` /
+    ``MODAL_TOKEN_SECRET`` all appeared the moment ``import main`` ran.
+
+    Two things then depended on the developer's machine rather than on the
+    commit. Tests that read ``os.environ`` (``RemoteConfig.from_env(os.environ)``
+    in the capabilities payload, ``probe_remote``) saw Modal "configured" on a
+    developer box and "not configured" in a container. And module-level constants
+    such as ``engine_manager.WARMUP_WATCH_SECONDS`` and
+    ``modal_remote.WARM_MODEL_WINDOW`` are read once, at import, so which value
+    won depended on *import order* -- whether ``services.engine_manager`` or
+    ``main`` was imported first.
+
+    Neutering ``dotenv.load_dotenv`` rather than deleting specific keys is
+    deliberate: it removes the file as an input entirely instead of guessing
+    which of its keys matter today. Real environment variables exported by the
+    operator still apply, because those are a deliberate choice rather than a
+    file the test suite happened to find.
+    """
+    try:
+        import dotenv
+    except ImportError:  # pragma: no cover - python-dotenv is a project dependency
+        return
+    dotenv.load_dotenv = lambda *args, **kwargs: False
+
+
+_block_dotenv_file()
+
+#: Every name present before any test module was imported. A variable that
+#: appears *after* this point was introduced by an import side effect (the
+#: ``load_dotenv`` above is the one that used to do it), not by the operator's
+#: deliberate configuration. ``tests/test_suite_hermeticity.py`` asserts against
+#: it; comparing against ``os.environ`` wholesale would instead fail whenever
+#: somebody exported a variable on purpose.
+ENV_KEYS_AT_IMPORT = frozenset(os.environ)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -384,6 +430,132 @@ def isolate_from_real_resources(
             "create_engine_and_tables",
             lambda db_url=None: database.engine,
         )
+
+
+# --------------------------------------------------------------------------- #
+# 3b. Optional external tools and the network
+# --------------------------------------------------------------------------- #
+# These three guards exist for the same reason as the ones above: a test's
+# verdict must not depend on the machine it happens to run on. They cover the
+# three inputs the suite used to read straight from the host -- whether `ffmpeg`
+# is on PATH, whether a socket can reach the internet, and whether the spaCy
+# model package is installed (whose fallback downloads it).
+
+#: The genuine probe, kept for the tests that deliberately want ffmpeg.
+REAL_FFMPEG_AVAILABLE = export_encoding.ffmpeg_available
+
+
+@pytest.fixture
+def real_ffmpeg(monkeypatch) -> None:
+    """Opt back in to the real ``ffmpeg`` availability probe.
+
+    Request this from a test (or an autouse fixture in a class) that genuinely
+    runs ffmpeg. Everything else sees ``ffmpeg_available() is False``, so the
+    suite's verdict is identical on a machine with ffmpeg and one without.
+    """
+    monkeypatch.setattr(export_encoding, "ffmpeg_available", REAL_FFMPEG_AVAILABLE)
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_ffmpeg(monkeypatch, request) -> None:
+    """Make ``ffmpeg`` on PATH irrelevant unless a test asks for it.
+
+    The export router gates M4B/Opus/MP3 export on ``shutil.which("ffmpeg")``, so
+    without this pin a POST /mp3/export would answer 200 on the developer's
+    machine and 503 on a fresh CI container: the same commit, two verdicts. The
+    pin turns that into an immediate, local failure instead -- an export that
+    really needs ffmpeg raises ``EncodingError`` here, which is what the one
+    class that opts back in via ``real_ffmpeg`` is for.
+
+    Tests that need a *successful* export ask for WAV, the format
+    ``services.export_encoding`` writes through soundfile with no external
+    process.
+    """
+    if "real_ffmpeg" in request.fixturenames:
+        return
+    monkeypatch.setattr(export_encoding, "ffmpeg_available", lambda: False)
+
+
+class NetworkAccessError(RuntimeError):
+    """A test tried to open a connection to something other than loopback."""
+
+
+def _is_loopback(address: Any) -> bool:
+    if not isinstance(address, tuple) or not address:
+        return False  # AF_UNIX and friends: local by construction
+    host = address[0]
+    if host in ("localhost", "::1", ""):
+        return True
+    try:
+        import ipaddress
+
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+@pytest.fixture(autouse=True)
+def _no_network(monkeypatch) -> None:
+    """Refuse outbound connections, so no test can pass *because* it reached one.
+
+    ``backend/.env`` points at a live Modal deployment and ``~/.modal.toml`` may
+    exist, so "the tests fake the transport" is a claim about today's test bodies
+    rather than a property of the suite. This makes it a property: a connect to
+    anything that is not loopback raises here, with the address in the message,
+    instead of quietly making the run depend on the network being up.
+
+    Loopback is left alone because it costs nothing to allow and something as
+    mundane as a library's local helper would otherwise fail for the wrong
+    reason. Unix sockets are local by construction and are allowed too.
+    """
+    real_connect = socket.socket.connect
+    real_connect_ex = socket.socket.connect_ex
+
+    def guarded_connect(self, address):  # pragma: no cover - exercised only on failure
+        if not _is_loopback(address):
+            raise NetworkAccessError(
+                f"the test suite must not reach the network; refused a connection "
+                f"to {address!r}. Fake the transport instead."
+            )
+        return real_connect(self, address)
+
+    def guarded_connect_ex(self, address):  # pragma: no cover - see above
+        if not _is_loopback(address):
+            raise NetworkAccessError(
+                f"the test suite must not reach the network; refused a connection "
+                f"to {address!r}. Fake the transport instead."
+            )
+        return real_connect_ex(self, address)
+
+    monkeypatch.setattr(socket.socket, "connect", guarded_connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", guarded_connect_ex)
+
+
+@pytest.fixture(autouse=True)
+def _no_spacy_download(monkeypatch) -> None:
+    """Forbid the ``spacy download`` fallback in ``BaseEngine.__init__``.
+
+    When ``en_core_web_sm`` is missing, ``services/base_engine.py`` shells out to
+    ``python -m spacy download`` -- a network call with a 180 s bound, on the
+    request path, from whichever test first constructs a ``BaseEngine``. A test
+    that runs on a machine without the model would therefore either hang for
+    three minutes or pass because the network *was* up. It now fails at once with
+    the install command in the message.
+    """
+    base_engine = importlib.import_module("services.base_engine")
+
+    class _NoDownload:
+        """Everything ``base_engine`` uses ``subprocess`` for is the download."""
+
+        @staticmethod
+        def run(*args, **kwargs):
+            raise ModuleNotFoundError(
+                "spaCy model en_core_web_sm is not installed and the test suite "
+                "will not download it. Install it offline with: "
+                f"{sys.executable} -m spacy download en_core_web_sm"
+            )
+
+    monkeypatch.setattr(base_engine, "subprocess", _NoDownload, raising=False)
 
 
 # --------------------------------------------------------------------------- #

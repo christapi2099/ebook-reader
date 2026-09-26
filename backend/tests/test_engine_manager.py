@@ -4,7 +4,6 @@ No torch, no Modal and no network: the builders and both probes are injected, so
 these exercise the *decision* logic — which engine is built, what happens when a
 build fails, what the selector is told, and what is persisted.
 """
-import time
 from dataclasses import dataclass, field
 
 import pytest
@@ -302,10 +301,24 @@ class TestPlaybackPhase:
 
 
 class TestWarmupWatcher:
+    #: A hang guard for the join below, not a performance budget.
+    JOIN_TIMEOUT = 10.0
+
     def _wait_for_ready(self, manager) -> None:
-        deadline = time.monotonic() + 5
-        while manager.phase != engine_manager.PHASE_READY and time.monotonic() < deadline:
-            time.sleep(0.02)
+        """Join the watcher thread instead of polling ``manager.phase``.
+
+        ``_watch_warmup`` sets ``PHASE_READY`` as its last action, so joining the
+        thread *is* the synchronisation a polling loop imitates -- and it cannot
+        be satisfied by an older ready phase left over from something else, which
+        a phase comparison can. The timeout only turns a stuck watcher into a
+        failure rather than a hung suite.
+        """
+        thread = manager._warmup_thread
+        assert thread is not None, "the warm-up watcher was never started"
+        thread.join(self.JOIN_TIMEOUT)
+        assert not thread.is_alive(), (
+            "the warm-up watcher was still running after its call had answered"
+        )
 
     def test_warmup_reports_ready_once_the_call_answers(self, builders, monkeypatch):
         manager = make_manager(builders)
@@ -328,6 +341,74 @@ class TestWarmupWatcher:
         manager._start_warmup(engine)
         self._wait_for_ready(manager)
         assert manager.phase == engine_manager.PHASE_READY
+
+
+class TestPerEngineAvailability:
+    """``availability(id)``: one engine's verdict, from that engine's own probe.
+
+    The rest of this file drives ``options()`` / ``switch()`` / ``startup()``, none
+    of which calls ``availability()`` directly, so its own contract was uncovered
+    — including the one property its docstring claims in prose: deciding whether a
+    *local* engine can run must not probe Modal, because probing the network to
+    decide whether to start Kokoro on the CPU would make the local-first path
+    depend on the internet.
+    """
+
+    @staticmethod
+    def _manager(builders, *, cuda=True, remote=None):
+        return make_manager(builders, cuda=cuda, remote=remote)
+
+    @pytest.mark.parametrize("engine_id", [CPU, GPU])
+    def test_a_local_verdict_never_probes_the_remote(self, builders, engine_id):
+        manager = make_manager(builders, cuda=True)
+
+        def forbidden(**kwargs):  # pragma: no cover - must not run
+            raise AssertionError(f"availability({engine_id!r}) probed Modal")
+
+        manager._remote_probe = forbidden
+        option = manager.availability(engine_id)
+
+        assert option.id == engine_id
+        assert option.available is True
+        # Asking is a question, not an action: no engine may be built.
+        assert builders.local_calls == []
+
+    def test_cpu_is_available_without_a_gpu(self, builders):
+        option = self._manager(builders, cuda=False).availability(CPU)
+        assert option.available is True
+        assert option.reason is None
+
+    def test_gpu_is_unavailable_without_cuda(self, builders):
+        option = self._manager(builders, cuda=False).availability(GPU)
+        assert option.available is False
+        assert "CUDA" in option.reason
+
+    def test_a_missing_torch_disables_both_local_engines(self, builders):
+        manager = EngineManager(
+            local_builder=builders.build_local,
+            remote_builder=builders.build_remote,
+            torch_probe=lambda: torch_info(cuda=False, version=None, error="ImportError: no torch"),
+            remote_probe=lambda **kwargs: remote_info(reachable=True),
+        )
+        for engine_id in (CPU, GPU):
+            option = manager.availability(engine_id)
+            assert option.available is False, engine_id
+            assert "no torch" in option.reason, engine_id
+
+    def test_modal_availability_comes_from_the_probe(self, builders):
+        reachable = self._manager(builders, remote=remote_info(reachable=True)).availability(MODAL)
+        unreachable = self._manager(
+            builders, remote=remote_info(reachable=False, configured=False, error="not deployed")
+        ).availability(MODAL)
+
+        assert reachable.available is True and reachable.reason is None
+        assert unreachable.available is False
+        assert unreachable.reason
+
+    def test_an_unknown_engine_raises_rather_than_reporting_unavailable(self, builders):
+        """A typo must not look like "this machine cannot run it"."""
+        with pytest.raises(UnknownEngine, match="gpu-cluster"):
+            self._manager(builders).availability("gpu-cluster")
 
 
 class TestFailureMessages:

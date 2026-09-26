@@ -173,6 +173,11 @@ def export_env(tmp_path, monkeypatch):
             )
         export = MP3Export(
             book_id="bk", voice="af_heart", speed=1.0, status="pending", progress=0,
+            # The same options every test below renders with, because
+            # `create_export` is what normally records them: a row that disagreed
+            # with the options would let the export label its file wrongly with
+            # nothing in the suite to notice.
+            format="wav", bitrate_kbps=None,
             created_at=datetime.now(timezone.utc),
         )
         session.add(export)
@@ -180,6 +185,18 @@ def export_env(tmp_path, monkeypatch):
         session.refresh(export)
         export_id = export.id
     return engine, export_id
+
+
+def wav_options(**overrides):
+    """Export options for a format that needs no external encoder.
+
+    These tests are about the *batching* path -- how a book is split, dispatched
+    and reassembled -- not about the container, and ``conftest._hermetic_ffmpeg``
+    pins ``ffmpeg_available`` off so that a verdict here cannot depend on whether
+    the host happens to have ffmpeg installed. WAV is written by soundfile, so
+    the export really completes and really produces a file on any machine.
+    """
+    return mp3_router.ExportOptions(format="wav", bitrate_kbps=None, **overrides)
 
 
 def install_modal_engine(mapper, monkeypatch) -> modal_remote.ModalKokoroClient:
@@ -203,7 +220,7 @@ class TestModalExportPath:
             return [batch_result(p["batch_index"], [2400] * len(p["sentences"])) for p in payloads]
 
         install_modal_engine(mapper, monkeypatch)
-        mp3_router._run_export_blocking(export_id, "bk", "af_heart", 1.0, mp3_router.ExportOptions())
+        mp3_router._run_export_blocking(export_id, "bk", "af_heart", 1.0, wav_options())
 
         assert seen == [[0, 1]]
         row = read_export(engine, export_id)
@@ -213,6 +230,17 @@ class TestModalExportPath:
         assert row.phase == "complete"
 
     def test_out_of_order_completion_is_reassembled_in_sentence_order(self, export_env, monkeypatch):
+        """Batches that arrive out of order must be concatenated by *index*.
+
+        The two batches carry distinguishable audio for exactly this reason, and
+        the file is decoded to check it: asserting ``status == "done"`` and a
+        non-zero size, as this test used to, passes just as happily when the
+        export concatenates in *arrival* order -- which is the bug it is named
+        after. Chapter 1 arrives first (0.9) and chapter 0 second (0.1, 0.1); the
+        written track must read 0.1, 0.1, 0.9.
+        """
+        import soundfile as sf
+
         engine, export_id = export_env
 
         def mapper(payloads):
@@ -221,14 +249,25 @@ class TestModalExportPath:
 
         install_modal_engine(mapper, monkeypatch)
         mp3_router._run_export_blocking(
-            export_id, "bk", "af_heart", 1.0, mp3_router.ExportOptions(chapters=False)
+            export_id, "bk", "af_heart", 1.0, wav_options(chapters=False)
         )
 
         row = read_export(engine, export_id)
         assert row.status == "done", row.error_message
-        # The file is one concatenated track; ordering is proven by the chapter
-        # marks the export built from the per-sentence sample offsets.
         assert row.file_size and row.file_size > 0
+
+        audio, rate = sf.read(str(row.file_path), dtype="float32")
+        assert rate == 24000
+        assert audio.size == 3 * 2400, (
+            f"expected three sentence buffers in the track, got {audio.size} samples"
+        )
+        per_sentence = [
+            float(audio[start:start + 2400].mean()) for start in (0, 2400, 4800)
+        ]
+        assert per_sentence == pytest.approx([0.1, 0.1, 0.9], abs=1e-3), (
+            "the track is not in sentence order: chapter 1 (0.9) arrived first and "
+            f"was written first, giving means {per_sentence}"
+        )
 
     def test_progress_counts_finished_batches(self, export_env, monkeypatch):
         engine, export_id = export_env
@@ -240,7 +279,7 @@ class TestModalExportPath:
                 yield batch_result(payload["batch_index"], [2400] * len(payload["sentences"]))
 
         install_modal_engine(mapper, monkeypatch)
-        mp3_router._run_export_blocking(export_id, "bk", "af_heart", 1.0, mp3_router.ExportOptions())
+        mp3_router._run_export_blocking(export_id, "bk", "af_heart", 1.0, wav_options())
         assert progress == [("sent", 0), ("sent", 1)]
         assert read_export(engine, export_id).progress == 100
 
@@ -256,7 +295,7 @@ class TestModalExportPath:
 
         client = install_modal_engine(mapper, monkeypatch)
         # The first run raises, the router re-runs the missing batches.
-        mp3_router._run_export_blocking(export_id, "bk", "af_heart", 1.0, mp3_router.ExportOptions())
+        mp3_router._run_export_blocking(export_id, "bk", "af_heart", 1.0, wav_options())
 
         row = read_export(engine, export_id)
         assert attempts["n"] >= 2, "the batch run was not retried"
@@ -269,7 +308,7 @@ class TestModalExportPath:
             raise RuntimeError("gpu fell over")
 
         install_modal_engine(mapper, monkeypatch)
-        mp3_router._run_export_blocking(export_id, "bk", "af_heart", 1.0, mp3_router.ExportOptions())
+        mp3_router._run_export_blocking(export_id, "bk", "af_heart", 1.0, wav_options())
 
         row = read_export(engine, export_id)
         assert row.status == "error"
@@ -285,14 +324,16 @@ class TestModalExportPath:
             return [(None, None, np.full(2400, 0.2, dtype=np.float32))]
 
         monkeypatch.setattr(mp3_router, "_engine", TTSEngine(kokoro))
-        mp3_router._run_export_blocking(export_id, "bk", "af_heart", 1.0, mp3_router.ExportOptions())
+        mp3_router._run_export_blocking(export_id, "bk", "af_heart", 1.0, wav_options())
 
         row = read_export(engine, export_id)
         assert row.status == "done", row.error_message
         # Three unfiltered sentences, synthesised one at a time.
         assert len(calls) == 3
         assert row.batches_total == 0
-        assert row.format == "mp3"
+        # The row and the file it points at must agree about what was written.
+        assert row.format == "wav"
+        assert Path(row.file_path).suffix == f".{row.format}"
 
     def test_a_local_export_never_claims_to_be_starting_a_gpu(self, export_env, monkeypatch):
         engine, export_id = export_env
@@ -312,7 +353,7 @@ class TestExportFormatsThroughTheRouter:
             return [(None, None, np.full(2400, 0.2, dtype=np.float32))]
 
         monkeypatch.setattr(mp3_router, "_engine", TTSEngine(kokoro))
-        options = mp3_router.ExportOptions(format="wav", bitrate_kbps=None)
+        options = wav_options()
         mp3_router._run_export_blocking(export_id, "bk", "af_heart", 1.0, options)
 
         row = read_export(engine, export_id)
@@ -334,7 +375,7 @@ class TestExportFormatsThroughTheRouter:
             return original(audio, path, **kwargs)
 
         monkeypatch.setattr(mp3_router.export_encoding, "encode", spy)
-        mp3_router._run_export_blocking(export_id, "bk", "af_heart", 1.0, mp3_router.ExportOptions())
+        mp3_router._run_export_blocking(export_id, "bk", "af_heart", 1.0, wav_options())
 
         assert "[CHAPTER]" in seen["metadata"]
         assert "title=Chapter 0" in seen["metadata"]
@@ -356,7 +397,7 @@ class TestExportFormatsThroughTheRouter:
 
         monkeypatch.setattr(mp3_router.export_encoding, "encode", spy)
         mp3_router._run_export_blocking(
-            export_id, "bk", "af_heart", 1.0, mp3_router.ExportOptions(chapters=False)
+            export_id, "bk", "af_heart", 1.0, wav_options(chapters=False)
         )
         assert "[CHAPTER]" not in (seen["metadata"] or "")
 
@@ -368,7 +409,7 @@ class TestExportFormatsThroughTheRouter:
 
         monkeypatch.setattr(mp3_router, "_engine", TTSEngine(kokoro))
         mp3_router._run_export_blocking(
-            export_id, "bk", "af_heart", 1.0, mp3_router.ExportOptions(split_by_chapter=True)
+            export_id, "bk", "af_heart", 1.0, wav_options(split_by_chapter=True)
         )
 
         row = read_export(engine, export_id)
@@ -387,7 +428,11 @@ class TestExportFormatsEndpoint:
         from fastapi.testclient import TestClient
 
         import main
+        from services import export_encoding
 
+        # Pinned rather than read from the host: without this the "available"
+        # flags below would be whatever `shutil.which` says on this machine.
+        monkeypatch.setattr(export_encoding, "ffmpeg_available", lambda: True)
         body = TestClient(main.app).get("/mp3/formats").json()
         by_id = {entry["id"]: entry for entry in body}
         assert set(by_id) == {"mp3", "m4b", "opus", "wav"}
@@ -396,6 +441,11 @@ class TestExportFormatsEndpoint:
         assert by_id["wav"]["default_bitrate"] is None
         assert by_id["wav"]["available"] is True
         assert by_id["mp3"]["content_type"] == "audio/mpeg"
+        # With an encoder present every format is offered, and nothing carries a
+        # "why not" reason.
+        for entry in body:
+            assert entry["available"] is True, entry
+            assert entry["reason"] is None, entry
 
     def test_m4b_is_unavailable_without_ffmpeg(self, monkeypatch):
         from fastapi.testclient import TestClient
@@ -409,3 +459,4 @@ class TestExportFormatsEndpoint:
         assert by_id["m4b"]["available"] is False
         assert "ffmpeg" in by_id["m4b"]["reason"]
         assert by_id["wav"]["available"] is True
+        assert by_id["mp3"]["available"] is False

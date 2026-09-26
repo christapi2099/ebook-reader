@@ -5,11 +5,27 @@ inside it (SQLite, Kokoro inference, soundfile) is blocking, so once the task wa
 scheduled it owned the single uvicorn event loop until the whole book had been
 synthesized. Measured before the fix: 0 heartbeat ticks over a 0.45 s export that
 should have allowed ~45 — every other request and the TTS WebSocket frozen for the
-duration, and the POST that started it did not return until it was over.
+duration.
 
 The fix offloads the blocking body with `run_in_threadpool`. The synthesis logic
 and the output format are deliberately unchanged, and these tests pin both halves
 of that: responsiveness *and* identical results.
+
+How "responsive" is asserted
+----------------------------
+No test in this file measures a duration. A stopwatch cannot express "the export
+did not own the loop": it only expresses "this machine was fast enough while the
+suite was running", which is why `elapsed < 0.5` passed in isolation and failed
+under load. Every check below instead compares two *observed counts* — a
+heartbeat's tick counter, or how far a concurrent coroutine had got — taken at
+the first and the last synthesis call. If the export runs on the loop, those two
+counts are equal; if it does not, they differ. That verdict is exact at any
+machine speed and under any load, because the artificial synthesis work here is
+gated on `threading.Event`s rather than on sleeps.
+
+The only wall clock left is `HANG_GUARD`, and it is never compared against
+anything the machine's speed can change: it exists so that a genuine deadlock
+fails in ten seconds instead of hanging the suite for ever.
 """
 import asyncio
 import inspect
@@ -19,6 +35,8 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import numpy as np
 import pytest
@@ -28,6 +46,7 @@ from sqlalchemy import inspect as sa_inspect, text
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, Session, create_engine
 
+from services import export_encoding
 from services.tts_engine import TTSEngine
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -38,11 +57,34 @@ from db.models import Book, MP3Export, Sentence  # noqa: E402
 from routers import mp3 as mp3_router  # noqa: E402
 
 SENTENCE_COUNT = 6
+TERMINAL_STATUSES = ("done", "error")
+
+#: A hang guard, not a performance budget. It bounds every wait below so that a
+#: real deadlock (or a background task that never finishes) fails the test rather
+#: than stalling the suite. Nothing asserts "and it was faster than this".
+HANG_GUARD = 10.0
 
 # Every export now carries its output options (format, bitrate, chapters,
-# metadata) instead of having them implied. These tests are all about the
-# default MP3 export, so they pass the same defaults the API would.
-DEFAULT_OPTIONS = mp3_router.ExportOptions()
+# metadata) instead of having them implied. These tests are about the export
+# *orchestration*, not about the container, so they ask for WAV: the one format
+# `services.export_encoding` writes through soundfile with no external process.
+# That keeps the file runnable on a machine without ffmpeg, which
+# ``_no_ffmpeg_dependency`` below enforces rather than assumes.
+WAV_OPTIONS = mp3_router.ExportOptions(format="wav", bitrate_kbps=None)
+
+
+@pytest.fixture(autouse=True)
+def _no_ffmpeg_dependency(monkeypatch):
+    """Make `ffmpeg` on PATH irrelevant here, and say so loudly if it comes back.
+
+    Nothing in this file is about encoding containers, so the encoder probe is
+    pinned off: on a machine without ffmpeg these exports behave exactly as they
+    do on a machine with it, instead of the POST returning 503. The pin is an
+    assertion of intent as much as a stub — if a future change routes one of
+    these exports through ffmpeg, the export fails here immediately instead of
+    quietly depending on the developer's PATH.
+    """
+    monkeypatch.setattr(export_encoding, "ffmpeg_available", lambda: False)
 
 
 def _make_engine():
@@ -62,7 +104,13 @@ def engine():
 
 @pytest.fixture
 def seeded(engine, monkeypatch, tmp_path):
-    """A pending export row for a 6-sentence book, with all IO redirected to tmp."""
+    """A pending export row for a 6-sentence book, with all IO redirected to tmp.
+
+    The row carries the same output options every test in this file passes to
+    ``_run_export``, because ``create_export`` is what normally records them: a
+    row built here for a different format than the one rendered would let the
+    export label its file wrongly and no assertion would notice.
+    """
     monkeypatch.setattr(_db, "engine", engine)
     monkeypatch.setattr(mp3_router, "EXPORTS_DIR", tmp_path / "exports")
     mp3_router._export_tasks.clear()
@@ -74,7 +122,9 @@ def seeded(engine, monkeypatch, tmp_path):
             s.add(Sentence(book_id="bk", index=i, text=f"Sentence number {i}.", page=0,
                            x0=0.0, y0=0.0, x1=1.0, y1=1.0, filtered=False))
         export = MP3Export(book_id="bk", voice="af_heart", speed=1.0, status="pending",
-                           progress=0, created_at=datetime.now(timezone.utc))
+                           progress=0, format=WAV_OPTIONS.format,
+                           bitrate_kbps=WAV_OPTIONS.bitrate_kbps,
+                           created_at=datetime.now(timezone.utc))
         s.add(export)
         s.commit()
         s.refresh(export)
@@ -103,6 +153,36 @@ def _drain_exports(timeout: float = 15.0) -> None:
         time.sleep(0.02)
 
 
+def _await_status(client: TestClient, export_id: int, timeout: float = HANG_GUARD) -> str:
+    """Poll the status endpoint until the export reaches a terminal state.
+
+    A wait, not an assertion about speed: the alternative to polling is an event
+    the running server does not publish, so it is bounded by ``HANG_GUARD`` and
+    the caller asserts the value it got.
+    """
+    deadline = time.monotonic() + timeout
+    status = "unknown"
+    while time.monotonic() < deadline:
+        status = client.get(f"/mp3/exports/{export_id}/status").json()["status"]
+        if status in TERMINAL_STATUSES:
+            return status
+        time.sleep(0.02)
+    return status
+
+
+def _install_pipeline(monkeypatch, kokoro):
+    """Install ``kokoro`` as both the router's pipeline and its engine's.
+
+    The export path synthesises through a TTSEngine so it shares the
+    speed-capability probe and the AudioCache with playback. Installing the stub
+    therefore means installing the engine too: reaching past it by setting only
+    `_kokoro` would leave the engine unset and the export would produce nothing.
+    """
+    monkeypatch.setattr(mp3_router, "_kokoro", kokoro)
+    monkeypatch.setattr(mp3_router, "_engine", TTSEngine(kokoro))
+    return kokoro
+
+
 def _install_kokoro(monkeypatch, *, delay=0.0, calls=None, threads=None, samples=2400):
     def kokoro(text, voice=None, speed=None):
         if calls is not None:
@@ -113,13 +193,37 @@ def _install_kokoro(monkeypatch, *, delay=0.0, calls=None, threads=None, samples
             time.sleep(delay)
         return [(None, None, np.ones(samples, dtype=np.float32))]
 
-    monkeypatch.setattr(mp3_router, "_kokoro", kokoro)
-    # The export path now synthesises through a TTSEngine so it shares the
-    # speed-capability probe and the AudioCache with playback. Installing the stub
-    # therefore means installing the engine too: reaching past it by setting only
-    # `_kokoro` would leave the engine unset and the export would produce nothing.
-    monkeypatch.setattr(mp3_router, "_engine", TTSEngine(kokoro))
-    return kokoro
+    return _install_pipeline(monkeypatch, kokoro)
+
+
+class _GatedSynthesis:
+    """A fake Kokoro that parks every sentence until the test opens the gate.
+
+    A sleep would only make "synthesis is still running" *likely*, and how likely
+    would depend on the machine. A gate makes it a fact, which is what lets
+    `test_post_export_returns_before_the_export_finishes` assert an ordering
+    instead of measuring a duration.
+    """
+
+    def __init__(self, sentences: int = SENTENCE_COUNT, samples: int = 2400):
+        self.sentences = sentences
+        self.samples = samples
+        self.texts: list[str] = []
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.finished = threading.Event()
+
+    def __call__(self, text, voice=None, speed=None):
+        self.texts.append(text)
+        self.entered.set()
+        if not self.release.wait(HANG_GUARD):
+            raise AssertionError(
+                f"synthesis was still parked after {HANG_GUARD}s: the export "
+                "never got a chance to run"
+            )
+        if len(self.texts) >= self.sentences:
+            self.finished.set()
+        return [(None, None, np.ones(self.samples, dtype=np.float32))]
 
 
 # ---------------------------------------------------------------------------
@@ -132,22 +236,43 @@ def test_blocking_body_is_synchronous_and_the_entry_point_is_async():
 
 
 def test_synthesis_runs_off_the_event_loop_thread(seeded, monkeypatch):
-    """Deterministic proof of the fix: no timing thresholds involved."""
-    threads: list[int] = []
-    _install_kokoro(monkeypatch, threads=threads)
+    """Deterministic proof of the fix: no timing thresholds involved.
+
+    The thread that runs the *export body* is what the fix moved, and that is
+    what gets recorded here. Watching only kokoro's own thread is not enough:
+    ``_synthesize`` hands the call to ``services.tts_engine``'s module-level
+    synthesis pool, so kokoro runs off the loop thread even when the export body
+    does not — which is why this test passed with the pre-fix code reinstated.
+    """
+    synthesis_threads: list[int] = []
+    body_threads: list[int] = []
     loop_thread_holder: dict[str, int] = {}
+
+    real_body = mp3_router._run_export_blocking
+
+    def recording_body(*args, **kwargs):
+        body_threads.append(threading.get_ident())
+        return real_body(*args, **kwargs)
+
+    monkeypatch.setattr(mp3_router, "_run_export_blocking", recording_body)
+    _install_kokoro(monkeypatch, threads=synthesis_threads)
 
     async def scenario():
         loop_thread_holder["id"] = threading.get_ident()
-        await mp3_router._run_export(seeded, "bk", "af_heart", 1.0, DEFAULT_OPTIONS)
+        await mp3_router._run_export(seeded, "bk", "af_heart", 1.0, WAV_OPTIONS)
 
     asyncio.run(scenario())
 
-    assert threads, "kokoro was never called"
+    assert body_threads, "the export body never ran"
+    assert synthesis_threads, "kokoro was never called"
     loop_thread = loop_thread_holder["id"]
     assert loop_thread == threading.main_thread().ident
-    assert all(tid != loop_thread for tid in threads), (
-        "synthesis ran on the event loop thread — the export still blocks the loop"
+    assert all(tid != loop_thread for tid in body_threads), (
+        "the export body ran on the event loop thread — the export still blocks "
+        "the loop for as long as it takes"
+    )
+    assert all(tid != loop_thread for tid in synthesis_threads), (
+        "synthesis ran on the event loop thread"
     )
 
 
@@ -163,41 +288,72 @@ def test_export_is_no_longer_a_coroutine_without_await_points():
 # ---------------------------------------------------------------------------
 
 def test_event_loop_stays_responsive_during_an_export(seeded, monkeypatch):
-    _install_kokoro(monkeypatch, delay=0.05)  # 6 x 50 ms = ~0.3 s of blocking work
+    """The loop must keep turning *while* a sentence is being synthesised.
+
+    Causal, not a speed ratio. The old version asserted
+    ``ticks >= elapsed / 0.005 * 0.4``, which is a statement about how much CPU
+    the machine had to spare. The property worth proving is an ordering: if the
+    export owns the loop, the heartbeat cannot run at all between two synthesis
+    calls. So the tick counter is sampled from inside every synthesis call and the
+    first sample is compared with the last — a comparison of two counters, exact
+    at any machine speed.
+    """
+    ticks = {"n": 0}
+    ticks_at_call: list[int] = []
+
+    def kokoro(text, voice=None, speed=None):
+        ticks_at_call.append(ticks["n"])
+        time.sleep(0.05)  # stands in for inference, on whatever thread runs it
+        return [(None, None, np.ones(2400, dtype=np.float32))]
+
+    _install_pipeline(monkeypatch, kokoro)
 
     async def scenario():
-        ticks = 0
-
         async def heartbeat():
-            nonlocal ticks
             while True:
-                ticks += 1
+                ticks["n"] += 1
                 await asyncio.sleep(0.005)
 
         hb = asyncio.create_task(heartbeat())
-        await asyncio.sleep(0.05)  # let the heartbeat settle
-        before = ticks
-        started = time.perf_counter()
-        await mp3_router._run_export(seeded, "bk", "af_heart", 1.0, DEFAULT_OPTIONS)
-        elapsed = time.perf_counter() - started
-        hb.cancel()
-        return ticks - before, elapsed
+        try:
+            await asyncio.wait_for(
+                mp3_router._run_export(seeded, "bk", "af_heart", 1.0, WAV_OPTIONS),
+                timeout=HANG_GUARD,
+            )
+        finally:
+            hb.cancel()
 
-    ticks, elapsed = asyncio.run(scenario())
-    expected = elapsed / 0.005
+    asyncio.run(scenario())
 
-    # Pre-fix this was exactly 0. The threshold is deliberately loose (40%) so the
-    # test measures "is the loop blocked", not machine speed.
-    assert ticks >= expected * 0.4, (
-        f"loop starved: {ticks} ticks during a {elapsed:.3f}s export "
-        f"(expected about {expected:.0f})"
+    assert len(ticks_at_call) == SENTENCE_COUNT, (
+        f"expected one synthesis per sentence, saw {len(ticks_at_call)}"
+    )
+    assert ticks_at_call[-1] > ticks_at_call[0], (
+        "the heartbeat never got a turn between the first and the last synthesis "
+        f"call: the tick counter stayed at {ticks_at_call[0]} across all "
+        f"{len(ticks_at_call)} calls, so the export owned the event loop"
     )
 
 
 def test_a_concurrent_request_is_served_while_synthesis_is_running(seeded, monkeypatch):
-    """The user-visible symptom: everything else stalled for the whole export."""
-    _install_kokoro(monkeypatch, delay=0.05)
+    """The user-visible symptom: everything else stalled for the whole export.
+
+    The old version only asserted that the concurrent coroutine finished
+    *eventually* (``len(served) == 10`` after ``await companion``), which it did
+    even when it had been blocked for the entire export and only ran afterwards —
+    so that assertion passed with the bug present. What is asserted now is that
+    the coroutine got *further* between the first and the last synthesis call,
+    which cannot happen while the export owns the loop.
+    """
     served: list[int] = []
+    served_at_call: list[int] = []
+
+    def kokoro(text, voice=None, speed=None):
+        served_at_call.append(len(served))
+        time.sleep(0.05)
+        return [(None, None, np.ones(2400, dtype=np.float32))]
+
+    _install_pipeline(monkeypatch, kokoro)
 
     async def scenario():
         async def other_request():
@@ -206,11 +362,24 @@ def test_a_concurrent_request_is_served_while_synthesis_is_running(seeded, monke
                 served.append(1)
 
         companion = asyncio.create_task(other_request())
-        await mp3_router._run_export(seeded, "bk", "af_heart", 1.0, DEFAULT_OPTIONS)
+        await asyncio.wait_for(
+            mp3_router._run_export(seeded, "bk", "af_heart", 1.0, WAV_OPTIONS),
+            timeout=HANG_GUARD,
+        )
         await companion
 
     asyncio.run(scenario())
+
     assert len(served) == 10, "a concurrent coroutine could not make progress"
+    assert served_at_call[0] < 10, (
+        "the concurrent coroutine finished before the first synthesis call, so "
+        "this run cannot observe the overlap it is meant to test"
+    )
+    assert served_at_call[-1] > served_at_call[0], (
+        "the concurrent coroutine made no progress between the first and the last "
+        f"synthesis call (stuck at {served_at_call[0]} of 10), so the export "
+        "owned the event loop"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -218,18 +387,38 @@ def test_a_concurrent_request_is_served_while_synthesis_is_running(seeded, monke
 # ---------------------------------------------------------------------------
 
 def test_export_still_completes_with_identical_output(seeded, monkeypatch, engine):
+    """The refactor moved the thread, not the arithmetic.
+
+    WAV is what makes this claim checkable without an external encoder: the file
+    can be decoded and compared with what the fake pipeline produced, so the
+    assertion is about the audio rather than about "some bytes were written".
+    Every sentence contributes its 2400 samples of 1.0, concatenated in order.
+    """
+    import soundfile as sf
+
     calls: list[str] = []
     _install_kokoro(monkeypatch, calls=calls)
 
-    asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.0, DEFAULT_OPTIONS))
+    asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.0, WAV_OPTIONS))
 
     with Session(engine) as s:
         export = s.get(MP3Export, seeded)
         assert export.status == "done"
         assert export.progress == 100
         assert export.file_size and export.file_size > 0
+        assert export.format == "wav", "the export must record the container it wrote"
         written = Path(export.file_path)
         assert written.exists() and written.stat().st_size == export.file_size
+        assert written.suffix == ".wav"
+
+    decoded, rate = sf.read(str(written), dtype="float32")
+    assert rate == 24000
+    assert decoded.size == SENTENCE_COUNT * 2400, (
+        "the written file does not hold one buffer per sentence"
+    )
+    assert np.allclose(decoded, 1.0, atol=1e-3), (
+        "the audio in the file is not the audio the pipeline produced"
+    )
 
     # Every unfiltered sentence was synthesized, once, in order.
     assert len(calls) == SENTENCE_COUNT
@@ -249,7 +438,7 @@ def test_filtered_sentences_are_still_skipped(seeded, monkeypatch, engine):
 
     calls: list[str] = []
     _install_kokoro(monkeypatch, calls=calls)
-    asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.0, DEFAULT_OPTIONS))
+    asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.0, WAV_OPTIONS))
 
     assert len(calls) == SENTENCE_COUNT - 1
     assert "Sentence number 2." not in calls
@@ -269,7 +458,7 @@ def test_progress_is_written_during_the_export(seeded, monkeypatch, engine):
 
     mp3_router._synthesize = spy
     try:
-        asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.0, DEFAULT_OPTIONS))
+        asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.0, WAV_OPTIONS))
     finally:
         mp3_router._synthesize = original
 
@@ -283,7 +472,7 @@ def test_no_audio_marks_the_export_as_error(seeded, engine, monkeypatch):
     monkeypatch.setattr(mp3_router, "_kokoro", None)
     monkeypatch.setattr(mp3_router, "_engine", None)
 
-    asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.0, DEFAULT_OPTIONS))
+    asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.0, WAV_OPTIONS))
 
     with Session(engine) as s:
         export = s.get(MP3Export, seeded)
@@ -299,7 +488,7 @@ def test_synthesis_exception_marks_the_export_as_error(seeded, engine, monkeypat
     # into every later test in the file.
     monkeypatch.setattr(mp3_router, "_kokoro", exploding)
     monkeypatch.setattr(mp3_router, "_engine", TTSEngine(exploding))
-    asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.0, DEFAULT_OPTIONS))
+    asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.0, WAV_OPTIONS))
 
     with Session(engine) as s:
         assert s.get(MP3Export, seeded).status == "error"
@@ -307,7 +496,7 @@ def test_synthesis_exception_marks_the_export_as_error(seeded, engine, monkeypat
 
 def test_missing_book_marks_the_export_as_error(seeded, monkeypatch, engine):
     _install_kokoro(monkeypatch)
-    asyncio.run(mp3_router._run_export(seeded, "does-not-exist", "af_heart", 1.0, DEFAULT_OPTIONS))
+    asyncio.run(mp3_router._run_export(seeded, "does-not-exist", "af_heart", 1.0, WAV_OPTIONS))
     with Session(engine) as s:
         export = s.get(MP3Export, seeded)
         assert export.status == "error"
@@ -324,7 +513,7 @@ def test_task_registry_is_cleaned_up_on_every_path(seeded, monkeypatch, strategy
         mp3_router._kokoro = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
 
     async def scenario():
-        task = asyncio.create_task(mp3_router._run_export(seeded, "bk", "af_heart", 1.0, DEFAULT_OPTIONS))
+        task = asyncio.create_task(mp3_router._run_export(seeded, "bk", "af_heart", 1.0, WAV_OPTIONS))
         mp3_router._export_tasks[seeded] = task
         await task
 
@@ -336,31 +525,75 @@ def test_task_registry_is_cleaned_up_on_every_path(seeded, monkeypatch, strategy
 # HTTP surface: the POST returns while the export is still running
 # ---------------------------------------------------------------------------
 
-def test_post_export_returns_before_the_export_finishes(seeded, monkeypatch, engine):
+def test_post_export_returns_before_the_export_finishes(seeded, monkeypatch):
+    """POST /mp3/export must hand back a *pending* export, not wait for it.
+
+    No stopwatch. Synthesis is parked on a gate that only this test can open, so
+    "the export had not finished when the POST returned" is a fact about ordering
+    rather than about how fast the machine is.
+
+    The status request is what makes the assertion bite. Under the pre-fix code
+    the export body ran on the event loop thread, so the loop could not answer
+    ``GET /mp3/exports/{id}/status`` until the export was over: the status read
+    came back ``done`` (or ``error``), which is exactly the failure reported
+    below. With the body on a worker thread the read is answered while synthesis
+    is still parked.
+    """
+    gated = _GatedSynthesis()
+    _install_pipeline(monkeypatch, gated)
+
     app = FastAPI()
     app.include_router(mp3_router.router)
-    _install_kokoro(monkeypatch, delay=0.15)  # 6 x 150 ms = 0.9 s of work
+    returned = threading.Event()
+    posted: dict[str, Any] = {}
 
     with TestClient(app) as client:
-        started = time.perf_counter()
-        response = client.post("/mp3/export", json={"book_id": "bk", "voice": "af_heart", "speed": 1.0})
-        elapsed = time.perf_counter() - started
-        assert response.status_code == 200
-        export_id = response.json()["export_id"]
 
-        assert elapsed < 0.5, (
-            f"POST /mp3/export blocked for {elapsed:.2f}s — the export is running on the event loop"
+        def post():
+            try:
+                posted["response"] = client.post(
+                    "/mp3/export",
+                    json={
+                        "book_id": "bk",
+                        "voice": "af_heart",
+                        "speed": 1.0,
+                        "format": "wav",
+                    },
+                )
+            finally:
+                returned.set()
+
+        poster = threading.Thread(target=post, daemon=True)
+        poster.start()
+
+        assert gated.entered.wait(HANG_GUARD), "the export never started synthesising"
+        assert returned.wait(HANG_GUARD), (
+            "POST /mp3/export had not returned while synthesis was still parked, "
+            "so the request is being served by the thread the export runs on"
         )
 
+        response = posted["response"]
+        assert response.status_code == 200, response.text
+        export_id = response.json()["export_id"]
+
+        # Nothing has left the gate yet (it is opened below), so if the status
+        # endpoint reports a terminal state, the POST itself waited for the
+        # export rather than starting it in the background.
+        status = client.get(f"/mp3/exports/{export_id}/status").json()["status"]
+        assert status not in TERMINAL_STATUSES, (
+            f"the export was already {status!r} when the POST returned — the POST "
+            "waited for the export instead of starting it in the background"
+        )
+
+        gated.release.set()
+        poster.join(HANG_GUARD)
+        assert not poster.is_alive(), "the POST never returned after the gate opened"
+
         # And the background task still finishes.
-        deadline = time.perf_counter() + 20
-        status = None
-        while time.perf_counter() < deadline:
-            status = client.get(f"/mp3/exports/{export_id}/status").json()["status"]
-            if status in ("done", "error"):
-                break
-            time.sleep(0.05)
-        assert status == "done", f"export never completed, last status={status!r}"
+        final = _await_status(client, export_id)
+        assert final == "done", f"export never completed, last status={final!r}"
+
+    assert gated.texts == [f"Sentence number {i}." for i in range(SENTENCE_COUNT)]
 
 
 # ---------------------------------------------------------------------------
@@ -410,7 +643,7 @@ class TestExportRecordsTheRenderedRate:
             row.speed = 1.5
             s.commit()
 
-        asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.5, DEFAULT_OPTIONS))
+        asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.5, WAV_OPTIONS))
 
         with Session(engine) as s:
             export = s.get(MP3Export, seeded)
@@ -427,7 +660,7 @@ class TestExportRecordsTheRenderedRate:
         monkeypatch.setattr(mp3_router, "_kokoro", kokoro)
         monkeypatch.setattr(mp3_router, "_engine", TTSEngine(kokoro))
 
-        asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.5, DEFAULT_OPTIONS))
+        asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.5, WAV_OPTIONS))
 
         with Session(engine) as s:
             export = s.get(MP3Export, seeded)
@@ -441,7 +674,7 @@ class TestExportRecordsTheRenderedRate:
         monkeypatch.setattr(mp3_router, "_kokoro", kokoro)
         monkeypatch.setattr(mp3_router, "_engine", TTSEngine(kokoro))
 
-        asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.0, DEFAULT_OPTIONS))
+        asyncio.run(mp3_router._run_export(seeded, "bk", "af_heart", 1.0, WAV_OPTIONS))
         after_first = len(calls)
         assert after_first == SENTENCE_COUNT, (
             f"expected one synthesis per sentence, got {after_first}"
@@ -456,7 +689,7 @@ class TestExportRecordsTheRenderedRate:
             s.refresh(second)
             second_id = second.id
 
-        asyncio.run(mp3_router._run_export(second_id, "bk", "af_heart", 1.0, DEFAULT_OPTIONS))
+        asyncio.run(mp3_router._run_export(second_id, "bk", "af_heart", 1.0, WAV_OPTIONS))
 
         assert len(calls) == after_first, (
             "the second export re-synthesised audio the reader already had cached"
@@ -476,13 +709,13 @@ class TestExportSpeedValidation:
     @pytest.mark.parametrize("bad", [0, -1.0, -0.5])
     def test_unusable_speeds_are_rejected_with_400(self, seeded, engine, monkeypatch, bad):
         with self._client(monkeypatch) as client:
-            response = client.post("/mp3/export", json={"book_id": "bk", "speed": bad})
+            response = client.post("/mp3/export", json={"book_id": "bk", "speed": bad, "format": "wav"})
         assert response.status_code == 400
         assert response.json()["detail"]
 
     def test_out_of_band_speeds_are_clamped_not_rejected(self, seeded, engine, monkeypatch):
         with self._client(monkeypatch) as client:
-            response = client.post("/mp3/export", json={"book_id": "bk", "speed": 99})
+            response = client.post("/mp3/export", json={"book_id": "bk", "speed": 99, "format": "wav"})
             assert response.status_code == 200
             # Let the export this POST started finish before the fixtures swap
             # the database out from under its worker thread.

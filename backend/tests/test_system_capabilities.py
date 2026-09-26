@@ -3,7 +3,21 @@
 These cover the parts of ``main._init_kokoro`` that used to be invisible: which
 backend was chosen, what the device was, and why nothing was available when
 Kokoro could not be built.
+
+Two kinds of test live here, and the difference matters:
+
+* ``TestLocalProbe`` has tests that read the *real* machine (is torch installed,
+  is a GPU visible). They are the reason ``probe_local_torch`` is honest, and
+  they are skipped, explicitly, on a machine that has no torch -- the suite must
+  not go red merely because a GPU or a wheel is absent.
+* Everything else pins those inputs. The probe's mapping (CUDA present, absent,
+  raising; torch missing) is asserted against an injected ``torch`` module, so
+  the coverage does not evaporate on the machine where the live test is skipped.
 """
+import importlib.util
+import sys
+import types
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -12,11 +26,16 @@ from main import app
 from services import engine_manager, kokoro_runtime
 from services.modal_remote import RemoteConfig, RemoteSynthesisError, reset_probe_cache
 
+TORCH_INSTALLED = importlib.util.find_spec("torch") is not None
+needs_torch = pytest.mark.skipif(
+    not TORCH_INSTALLED, reason="torch is not installed in this environment"
+)
+
 # ``conftest.isolate_from_real_resources`` replaces ``main._init_kokoro`` with a
 # fake before every test (so no test loads the real model). Keep a reference to
-# the genuine selector for the tests that are *about* the selection logic; it
-# still resolves ``_init_local_kokoro`` / ``_init_remote_kokoro`` through the
-# module globals, so those stay monkeypatchable.
+# the genuine selector for the tests that are *about* the selection logic; it is
+# a thin call into ``engine_manager.manager.startup``, which those tests
+# monkeypatch on the manager rather than through this module.
 _REAL_INIT_KOKORO = main_module._init_kokoro
 
 
@@ -51,7 +70,43 @@ class TestNormalizeBackend:
         assert kokoro_runtime.normalize_backend("gpu-cluster") == "local"
 
 
+def _fake_torch(*, cuda: bool, version: str = "2.14.0", cuda_version: str = "13.0",
+                raise_on_probe: str | None = None):
+    """A ``torch`` module with exactly the surface ``probe_local_torch`` reads."""
+    module = types.ModuleType("torch")
+    module.__version__ = version
+    module.version = types.SimpleNamespace(cuda=cuda_version if cuda else None)
+
+    def is_available():
+        if raise_on_probe:
+            raise RuntimeError(raise_on_probe)
+        return cuda
+
+    module.cuda = types.SimpleNamespace(
+        is_available=is_available,
+        device_count=lambda: 1 if cuda else 0,
+        get_device_name=lambda index: "Fake GPU",
+    )
+    return module
+
+
+@pytest.fixture
+def fake_torch(monkeypatch):
+    """Install an injected ``torch`` so the probe's mapping can be pinned.
+
+    ``probe_local_torch`` imports torch inside the function, so a ``sys.modules``
+    entry is all it takes. This is what makes the probe's branches testable on a
+    machine with no torch, no CUDA driver and no GPU.
+    """
+
+    def install(*, cuda: bool, **kwargs):
+        monkeypatch.setitem(sys.modules, "torch", _fake_torch(cuda=cuda, **kwargs))
+
+    return install
+
+
 class TestLocalProbe:
+    @needs_torch
     def test_reports_real_torch_facts(self):
         info = kokoro_runtime.probe_local_torch()
         assert info["torch_version"]
@@ -59,10 +114,52 @@ class TestLocalProbe:
         assert isinstance(info["cuda_device_count"], int)
         assert "non-multiple" not in str(info["error"])
 
+    @needs_torch
     def test_gpu_name_only_when_cuda_is_available(self):
         info = kokoro_runtime.probe_local_torch()
         if not info["cuda_available"]:
             assert info["gpu_name"] is None
+        else:
+            assert info["gpu_name"], "CUDA is available but no device name was reported"
+
+
+class TestLocalProbeMapping:
+    """The probe's contract, pinned: no GPU, no driver, no torch required."""
+
+    def test_a_visible_gpu_is_reported_with_its_name_and_count(self, fake_torch):
+        fake_torch(cuda=True)
+        info = kokoro_runtime.probe_local_torch()
+        assert info["torch_version"] == "2.14.0"
+        assert info["torch_cuda_version"] == "13.0"
+        assert info["cuda_available"] is True
+        assert info["cuda_device_count"] == 1
+        assert info["gpu_name"] == "Fake GPU"
+        assert info["error"] is None
+
+    def test_no_gpu_reports_zero_devices_and_no_name(self, fake_torch):
+        fake_torch(cuda=False)
+        info = kokoro_runtime.probe_local_torch()
+        assert info["cuda_available"] is False
+        assert info["cuda_device_count"] == 0
+        assert info["gpu_name"] is None
+        assert info["error"] is None
+
+    def test_a_broken_cuda_probe_is_reported_not_raised(self, fake_torch):
+        """An NVML failure must become an `error` string, never an exception."""
+        fake_torch(cuda=True, raise_on_probe="Can't initialize NVML")
+        info = kokoro_runtime.probe_local_torch()
+        assert info["cuda_available"] is False
+        assert info["error"] == "RuntimeError: Can't initialize NVML"
+
+    def test_a_missing_torch_is_reported_not_raised(self, monkeypatch):
+        # `None` in sys.modules makes `import torch` raise, which is the branch a
+        # machine without the wheel takes. ModuleNotFoundError is what CPython
+        # actually raises here, and it is an ImportError subclass.
+        monkeypatch.setitem(sys.modules, "torch", None)
+        info = kokoro_runtime.probe_local_torch()
+        assert info["torch_version"] is None
+        assert info["cuda_available"] is False
+        assert info["error"] == "ModuleNotFoundError: import of torch halted; None in sys.modules"
 
 
 class TestRuntimeState:
@@ -145,7 +242,11 @@ class TestCapabilitiesEndpoint:
     lifespan (and therefore a real Kokoro load) does not run."""
 
     @pytest.fixture
-    def client(self, offline_remote, monkeypatch):
+    def client(self, offline_remote, monkeypatch, fake_torch):
+        # Both live machine inputs are pinned: no Modal (offline_remote) and a
+        # torch that reports no GPU, so this class asserts the endpoint's wiring
+        # rather than the host's hardware.
+        fake_torch(cuda=False)
         monkeypatch.setattr(
             kokoro_runtime,
             "probe_remote",
@@ -164,7 +265,9 @@ class TestCapabilitiesEndpoint:
 
     def test_capabilities_reports_probed_facts(self, client):
         body = client.get("/api/system/capabilities").json()
-        assert body["local"]["torch_version"]
+        assert body["local"]["torch_version"] == "2.14.0"
+        assert body["local"]["cuda_available"] is False
+        assert body["local"]["gpu_name"] is None
         assert body["sample_rate"] == 24000
         assert body["active_backend"] in ("local", "remote", "none")
         assert body["remote"]["reachable"] is False

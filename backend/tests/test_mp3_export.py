@@ -5,6 +5,16 @@ in-memory database with a fake Kokoro pipeline, so an export can run to
 completion without a GPU or a real 800 MB database. ``EXPORTS_DIR`` is redirected
 under ``tmp_path`` by the isolation guard, so nothing is written into the repo.
 
+Every export here asks for **WAV**, the one container `services.export_encoding`
+writes through soundfile with no external process. The subject of this file is
+the router's lifecycle -- creation, progress, listing, download, deletion -- not
+the container, and asking for MP3 would make the suite's verdict depend on
+whether the host has ffmpeg on PATH (conftest pins the probe off, so such a
+request now answers 503 rather than silently succeeding here and failing on a
+fresh container). Real MP3/M4B/Opus encoding, including tag verification, is
+covered by `test_export_planning.py::TestEncodingWithRealFfmpeg`, which is
+explicitly gated on the binary being installed.
+
 The old version of this file asserted ``status in ("pending", "processing",
 "done", "error")``, which passes for a permanently broken export, and never
 checked that an export finished or produced a file. It does now.
@@ -19,6 +29,7 @@ from routers import mp3 as mp3_router
 
 TERMINAL_STATES = ("done", "error")
 EXPORT_TIMEOUT = 30.0
+REQUESTED_FORMAT = "wav"
 
 
 @pytest.fixture(autouse=True)
@@ -48,7 +59,8 @@ def _upload(client, content=b"fakepdf"):
 
 
 def _export_id(client, book_id, **overrides):
-    body = {"book_id": book_id, "voice": "af_heart", "speed": 1.0}
+    body = {"book_id": book_id, "voice": "af_heart", "speed": 1.0,
+            "format": REQUESTED_FORMAT}
     body.update(overrides)
     response = client.post("/mp3/export", json=body)
     assert response.status_code == 200, response.text
@@ -70,7 +82,8 @@ def _await_terminal_status(client, export_id, timeout=EXPORT_TIMEOUT):
 class TestCreateExport:
     def test_create_export_returns_export_id(self, client):
         bid = _upload(client)
-        r = client.post("/mp3/export", json={"book_id": bid, "voice": "af_heart", "speed": 1.0})
+        r = client.post("/mp3/export", json={"book_id": bid, "voice": "af_heart",
+                                            "speed": 1.0, "format": REQUESTED_FORMAT})
         assert r.status_code == 200
         assert "export_id" in r.json()
         # Let the background task finish here rather than after the test, which is
@@ -78,11 +91,15 @@ class TestCreateExport:
         _await_terminal_status(client, r.json()["export_id"])
 
     def test_create_export_nonexistent_book_returns_404(self, client):
-        r = client.post("/mp3/export", json={"book_id": "nonexistent", "voice": "af_heart", "speed": 1.0})
+        # `format` matters even here: the router checks ffmpeg availability before
+        # it looks the book up, so asking for MP3 on a host without ffmpeg would
+        # answer 503 and this test would be measuring PATH rather than the 404.
+        r = client.post("/mp3/export", json={"book_id": "nonexistent", "voice": "af_heart",
+                                            "speed": 1.0, "format": REQUESTED_FORMAT})
         assert r.status_code == 404
 
     def test_export_completes_and_writes_a_downloadable_file(self, client, db_engine):
-        """End to end: the export reaches ``done`` with a non-empty MP3 on disk."""
+        """End to end: the export reaches ``done`` with a non-empty file on disk."""
         bid = _upload(client)
         export_id = _export_id(client, bid)
 
@@ -95,6 +112,7 @@ class TestCreateExport:
             row = session.get(MP3Export, export_id)
             assert row.status == "done"
             assert row.error_message is None
+            assert row.format == REQUESTED_FORMAT
             file_path = row.file_path
         assert file_path, "a completed export must record where it wrote the file"
 

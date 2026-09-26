@@ -206,7 +206,11 @@ class TestFfmpegArgs:
         assert args[args.index("-b:a") + 1] == "128k"
 
     def test_mp3_tags_use_id3v23(self):
-        assert "3" in export_encoding.ffmpeg_args("mp3", 64, has_metadata=True)
+        args = export_encoding.ffmpeg_args("mp3", 64, has_metadata=True)
+        # Read the flag's value, not the presence of the character "3" somewhere
+        # in the argument list: `assert "3" in args` also passes for a bitrate of
+        # "3k" or any unrelated argument that happens to be "3".
+        assert args[args.index("-id3v2_version") + 1] == "3"
 
     def test_m4b_is_faststart_mp4_with_chapters(self):
         args = export_encoding.ffmpeg_args("m4b", 64, has_chapters=True)
@@ -247,9 +251,22 @@ class TestCoverBlock:
 class TestEncodingWithRealFfmpeg:
     """One real encode per format, verified by ffprobe.
 
+    The only place in the suite that runs ffmpeg, and it says so twice: the
+    ``skipif`` on this class is the single opt-out from the suite's rule that
+    ffmpeg availability must not change a verdict, and the autouse ``real_ffmpeg``
+    fixture below undoes ``conftest._hermetic_ffmpeg``'s pin so the encoder probe
+    reports the truth here.
+
     Skipped when ffmpeg is absent, which is the documented packaging state for
-    the .deb/Flatpak before their dependency lists are updated.
+    the .deb/Flatpak before their dependency lists are updated. Everything a
+    reader needs to know *about* the formats without an encoder -- codec
+    arguments, bitrate allow-lists, chapter marks, the cover block -- is asserted
+    by the classes above, which never skip.
     """
+
+    @pytest.fixture(autouse=True)
+    def _needs_the_real_binary(self, real_ffmpeg):
+        """Use the genuine ffmpeg probe, not the suite-wide pinned-off one."""
 
     @pytest.fixture
     def tone(self):
@@ -258,7 +275,7 @@ class TestEncodingWithRealFfmpeg:
         return (0.2 * np.sin(2 * np.pi * 220 * t)).astype(np.float32)
 
     def _probe(self, path):
-        """Everything ffprobe will say about tags, chapters and duration.
+        """Everything ffprobe will say about the container, tags and duration.
 
         Tags are asserted against the whole document, not against
         ``format_tags``: MP4 and MP3 put them on the format, while Ogg/Opus
@@ -269,7 +286,7 @@ class TestEncodingWithRealFfmpeg:
             [
                 "ffprobe", "-v", "error",
                 "-show_entries",
-                "format=duration:format_tags:stream=codec_name:stream_tags",
+                "format=duration,format_name:format_tags:stream=codec_name:stream_tags",
                 "-show_chapters", "-of", "default=noprint_wrappers=1", str(path),
             ],
             capture_output=True, text=True,
@@ -277,8 +294,25 @@ class TestEncodingWithRealFfmpeg:
         assert out.returncode == 0, out.stderr
         return out.stdout
 
-    @pytest.mark.parametrize("fmt,bitrate", [("mp3", 64), ("m4b", 64), ("opus", 24)])
-    def test_each_format_encodes_and_reports_its_tags(self, tmp_path, tone, fmt, bitrate):
+    @pytest.mark.parametrize(
+        "fmt,bitrate,codec,container",
+        [
+            ("mp3", 64, "mp3", "mp3"),
+            ("m4b", 64, "aac", "mp4"),
+            ("opus", 24, "opus", "ogg"),
+        ],
+    )
+    def test_each_format_encodes_in_its_own_codec_and_reports_its_tags(
+        self, tmp_path, tone, fmt, bitrate, codec, container
+    ):
+        """The file must really *be* the format that was asked for.
+
+        Asserting only the tags, as this test used to, left the codec unchecked:
+        an ``.opus`` file containing MP3 bytes (``ffmpeg_args("opus")`` returning
+        ``-c:a libmp3lame ... -f mp3``) passed the whole ffmpeg-gated suite. The
+        codec and the container are what the ``fmt`` argument is *for*, so they
+        are asserted positively, per format.
+        """
         target = tmp_path / f"out.{export_encoding.FORMATS[fmt].extension}"
         metadata = export_encoding.build_ffmetadata(
             "Test Title", "Test Author", [{"start_ms": 0, "end_ms": 1000, "title": "One"}]
@@ -286,18 +320,15 @@ class TestEncodingWithRealFfmpeg:
         export_encoding.encode(tone, target, fmt=fmt, bitrate_kbps=bitrate, metadata=metadata)
         assert target.exists() and target.stat().st_size > 0
         probed = self._probe(target)
+        assert f"codec_name={codec}" in probed, (
+            f"{fmt} was written with the wrong codec:\n{probed}"
+        )
+        assert container in next(
+            line for line in probed.splitlines() if line.startswith("format_name=")
+        ), f"{fmt} was written in the wrong container:\n{probed}"
         assert "Test Title" in probed
         assert "Test Author" in probed
         assert "duration=" in probed
-
-    def test_wav_is_written_without_ffmpeg(self, tmp_path, tone):
-        target = tmp_path / "out.wav"
-        export_encoding.encode(tone, target, fmt="wav")
-        import soundfile as sf
-
-        data, rate = sf.read(str(target), dtype="float32")
-        assert rate == export_encoding.SAMPLE_RATE
-        assert data.size == tone.size
 
     def test_mp3_with_a_cover_keeps_the_picture(self, tmp_path, tone):
         import pymupdf
@@ -327,3 +358,45 @@ class TestEncodingWithRealFfmpeg:
         monkeypatch.setattr(export_encoding, "ffmpeg_available", lambda: False)
         with pytest.raises(export_encoding.EncodingError, match="ffmpeg not found"):
             export_encoding.encode(tone, tmp_path / "x.m4b", fmt="m4b", bitrate_kbps=64)
+
+
+class TestEncodingWithoutFfmpeg:
+    """The half of ``encode`` that must work on a machine without an encoder.
+
+    This used to live inside ``TestEncodingWithRealFfmpeg``, so on a machine
+    without ffmpeg the assertion that a WAV is really written -- and that the
+    missing-encoder error is clear rather than a traceback -- was skipped along
+    with the tests that genuinely need the binary. It never needs ffmpeg, so it
+    no longer shares their ``skipif``.
+    """
+
+    @pytest.fixture
+    def tone(self):
+        sample_rate = export_encoding.SAMPLE_RATE
+        t = np.arange(sample_rate * 2, dtype=np.float32) / sample_rate
+        return (0.2 * np.sin(2 * np.pi * 220 * t)).astype(np.float32)
+
+    def test_wav_is_written_without_ffmpeg(self, tmp_path, tone):
+        import soundfile as sf
+
+        target = tmp_path / "out.wav"
+        export_encoding.encode(tone, target, fmt="wav")
+
+        assert target.exists() and target.stat().st_size > 0
+        data, rate = sf.read(str(target), dtype="float32")
+        assert rate == export_encoding.SAMPLE_RATE
+        assert data.size == tone.size
+
+    @pytest.mark.parametrize("fmt,bitrate", [("mp3", 64), ("m4b", 64), ("opus", 24)])
+    def test_a_format_that_needs_ffmpeg_says_so(self, tmp_path, tone, fmt, bitrate):
+        """``ffmpeg_available`` is pinned off for the whole suite by conftest."""
+        with pytest.raises(export_encoding.EncodingError, match="ffmpeg not found"):
+            export_encoding.encode(
+                tone,
+                tmp_path / f"out.{export_encoding.FORMATS[fmt].extension}",
+                fmt=fmt,
+                bitrate_kbps=bitrate,
+            )
+        assert not (tmp_path / f"out.{export_encoding.FORMATS[fmt].extension}").exists(), (
+            "a failed encode must not leave a half-written file behind"
+        )

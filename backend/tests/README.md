@@ -26,8 +26,11 @@ already broken, and why some of it is slow.
 
 ## 1 · Inventory
 
-29 files, 560 tests. "Cost" is the wall time of that file alone under the
-current `conftest.py`, including ~4 s of interpreter start-up.
+34 files, 703 tests, `694 passed, 1 xfailed` when the suite is whole. "Cost" is
+the wall time of that file alone under the current `conftest.py`, including ~4 s
+of interpreter start-up. The per-file counts were measured before the
+hermeticity pass and before the engine-manager work landed, so treat them as
+order-of-magnitude: the totals in §4 are the ones that were measured last.
 
 | File | Tests | What it actually needs | Cost | Hazards |
 |---|---:|---|---:|---|
@@ -48,7 +51,8 @@ current `conftest.py`, including ~4 s of interpreter start-up.
 | `test_speed_adversarial.py` | 14 | async, fake Kokoro | ~7 s | none |
 | `test_speed_engine.py` | 60 | async, fake Kokoro, in-memory DB | ~5 s | none |
 | `test_speed_unavailable_notice.py` | 3 | WebSocket + fake Kokoro | ~5 s | none |
-| `test_system_capabilities.py` | 27 | `main` module globals + device probe | ~5 s | monkeypatches `main` internals; fragile while `main.py` is edited |
+| `test_suite_hermeticity.py` | 9 | nothing — it tests `conftest.py` itself | ~0.3 s | fails if a conftest guard is deleted |
+| `test_system_capabilities.py` | 31 | `main` module globals + device probe | ~5 s | monkeypatches `main` internals; fragile while `main.py` is edited |
 | `test_text_endpoint.py` | 17 | ASGI app + in-memory DB | ~12 s | none |
 | `test_text_engine.py` | 8 | **real spaCy model**, loaded once *per test* | ~11 s | slow-ish; see §3.4 |
 | `test_text_filter.py` | 42 | **pure unit** — no I/O at all | ~5 s | none |
@@ -109,27 +113,31 @@ Two things have since changed, both owned by the test-repair change:
 Current cost of the pair: **114 s** (`./scripts/test.sh slow`). They are still
 the only reason `full` is not fast, so they stay in `SLOW_TESTS`.
 
-### 2.1 A second, latent hang
+### 2.1 The second hang — now closed off
 
-`services/base_engine.py` constructs spaCy like this:
+`services/base_engine.py` constructs spaCy with a download fallback:
 
 ```python
 try:
     self.nlp = spacy.load("en_core_web_sm")
 except OSError:
-    import subprocess
-    subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"],
-                   capture_output=True)          # no timeout
+    subprocess.run([sys.executable, "-m", "spacy", "download", "en_core_web_sm"],
+                   capture_output=True, timeout=180)
     self.nlp = spacy.load("en_core_web_sm")
 ```
 
-If the model is ever missing, this shells out to a bare `python` (which may not
-be the venv interpreter) and downloads with **no timeout and `capture_output`**,
-so it can block forever with the output invisible. `en_core_web_sm` 3.8.0 *is*
-installed here, so this path is not currently taken — but on a fresh clone
-without the model, the first `BaseEngine()` in the suite is an unbounded network
-call. That is the one place the suite could still genuinely hang; the runner's
-`timeout` is what makes it survivable.
+If the model is missing this is a **network call on the request path** — the
+first `BaseEngine()` a test constructs would reach PyPI. The bound and the
+`sys.executable` fix arrived with the earlier work (a bare `python` may not be
+the interpreter running the process).
+
+In the suite it can no longer happen at all: `conftest._no_spacy_download`
+replaces `services.base_engine.subprocess` for every test, so the fallback raises
+at once with the install command in the message.
+`tests/test_suite_hermeticity.py` asserts that. What remains is that a machine
+without `en_core_web_sm` fails `test_base_engine.py` and `test_text_engine.py`
+rather than hanging — which is the honest outcome, and the message says what to
+install.
 
 ---
 
@@ -163,13 +171,20 @@ deleted).
 `from main import app` + `with TestClient(app)` still hits the real database and
 loads the real model. If you write one, point `DB_PATH` at a temp file first.
 
-### 3.2 The corpus in `~/Documents/EBooks` is a hard dependency
+### 3.2 The corpus in `~/Documents/EBooks` — a dependency, but an explicit one
 
 `test_pdf_engine.py` and `test_epub_ocr_engines.py` read
 `~/Documents/EBooks/cleancodebook.pdf` (3.7 MB) and `cleancodebook.epub` (2.8 MB).
-They are read-only, but they **fail on a machine without those books** — the
-files are not in the repo and `conftest.py`'s `EBOOKS_DIR` fixtures just build
-paths. There is no skip guard, so a fresh clone sees two red files.
+They are read-only, the files are not in the repo, and `conftest.py`'s
+`EBOOKS_DIR` fixtures only build paths.
+
+Both files `pytest.skip` from their corpus fixture with the missing path in the
+reason, so **a machine without those books is green with skips** rather than red —
+the `N skipped` count is the tell, and the skip message names the file. Nothing
+else in the suite reads outside the repository. Making these hermetic would mean
+either committing ~6 MB of third-party books or synthesising a PDF/EPUB, and
+neither preserves what they actually prove (real-world layout, OCR and 10 000
+sentences of NLP), so the guard is left as the deliberate answer.
 
 ### 3.3 Tests write to the working directory
 
@@ -188,49 +203,121 @@ reliable, but they are the reason `fast` is ~45 s rather than ~20 s.
 
 ### 3.5 `test_system_capabilities.py` pokes `main` internals
 
-It monkeypatches module globals such as `main._init_remote_kokoro`. While
-`main.py` is being edited this is the first file to go red with
-`AttributeError: module 'main' has no attribute ...`. That is a real regression
-signal, not suite noise — but it does mean this file is unusually coupled to the
-current shape of `main.py`.
+It keeps a reference to the genuine `main._init_kokoro` and drives it with a
+monkeypatched `engine_manager.manager.startup`. While `main.py` is being edited
+this is the first file to go red with `AttributeError: module 'main' has no
+attribute ...`. That is a real regression signal, not suite noise — but it does
+mean this file is unusually coupled to the current shape of `main.py`.
+
+(Older copies of this note named `main._init_local_kokoro` and
+`main._init_remote_kokoro`. The first no longer exists and the second never did —
+the selector has delegated to `services.engine_manager` since the engine manager
+landed.)
 
 ---
 
 ## 4 · Known-failing baseline
 
-Before blaming your change, check whether the failure is in a file this list
-already covers, and whether the file is currently being edited.
+**There is none.** As measured on **2026-09-26** (whole suite, plain `pytest`
+from `backend/`), the tree is:
 
-As measured on **2026-09-26 ~12:34** (whole suite, `./scripts/test.sh backend`,
-`6 failed, 553 passed, 1 xfailed in 100.4 s`):
+```
+694 passed, 1 xfailed in ~118 s
+```
 
-| Test | Failure | Whose problem |
-|---|---|---|
-| `test_system_capabilities.py::TestBackendSelection::test_local_is_the_default_and_never_touches_the_remote` | `AttributeError: module 'main' has no attribute '_init_remote_kokoro'` | in-flight edit of `backend/main.py` — the test monkeypatches a global that has been renamed |
-| `…::test_remote_failure_falls_back_to_local_and_records_the_reason` | same | same |
-| `…::test_remote_success_uses_the_remote_backend` | same | same |
-| `…::test_total_failure_is_recorded_not_silent` | same | same |
-| `test_mp3_export.py::TestListExports::test_list_includes_book_title_and_status` | `IndexError: tuple index out of range` | in-flight `routers/mp3.py` refactor |
-| `test_mp3_export_nonblocking.py::test_export_is_no_longer_a_coroutine_without_await_points` | `assert 'run_in_threadpool' in ...` failed | same refactor, mid-edit |
+The table that used to live here (`6 failed, 553 passed, 1 xfailed`) recorded the
+in-flight edits of five different agents on `main.py` and `routers/mp3.py`, all
+of which have since landed. If you see red here now, it is either your change or
+somebody's half-written file — check `git status` before assuming it is the
+baseline.
 
-Those same four `test_system_capabilities` failures are what `./scripts/test.sh fast`
-reports today (`4 failed, 530 passed, 1 xfailed in 35.1 s`). If you see exactly
-this set, nothing you did caused it.
-
-**The baseline moves within minutes.** During this investigation the same
-command reported, at different times: 0 failures; 4 failures; 27 failures; 49
-failures. Every swing tracked a file some other agent was writing at that
-moment (`conftest.py`, `routers/tts.py`, `services/tts_engine.py`,
-`frontend/src/tests/stores/settings.test.ts`). Re-run `./scripts/test.sh fast`
-and compare against the runner's failure list rather than against this table.
+**The baseline moves within minutes while several agents share the tree.** During
+the original investigation the same command reported, at different times: 0
+failures; 4; 27; 49. Every swing tracked a file another agent was writing at that
+moment (`conftest.py`, `routers/tts.py`, `services/tts_engine.py`). Re-run the
+suite and compare against the actual failure list rather than against any table.
 
 Two historical facts worth keeping, because they explain old reports:
 
 * `test_tts_engine.py` had **13 pre-existing failures** and `test_speed_engine.py`
-  was intentionally red (TDD). Both are green now (38 and 60 tests).
+  was intentionally red (TDD). Both are green now.
 * Under the old `conftest.py`, `test_base_engine.py` passed 9/9 alone but errored
   in a full run, because tests assigned `db.database.engine` directly and only
   some restored it. The autouse guard fixes the leak.
+
+### 4.1 The suite is now deterministic, and `test_suite_hermeticity.py` says how
+
+Every guard below is asserted by a test in `tests/test_suite_hermeticity.py`, so
+deleting one turns the suite red instead of quietly changing what a green run
+means. Measured before these guards existed:
+
+| Input the suite used to read from the host | Symptom | Guard |
+|---|---|---|
+| `backend/.env`, loaded by `main.py` at **import** time | `KOKORO_BACKEND=local`, a live `MODAL_KOKORO_HEALTH_URL` and the real `MODAL_TOKEN_ID`/`SECRET` appeared in `os.environ` for the whole session | `conftest._block_dotenv_file()` |
+| the network | `GET /api/system/capabilities` opened a real TLS connection to Modal (`44.217.9.182:443`, 5.5 s) and reported `reachable: True` because the deployment is live | `conftest._no_network` |
+| `ffmpeg` on PATH | 15 tests passed on a developer box and failed on a container; `POST /mp3/export` answered 200 vs 503 for the same commit | `conftest._hermetic_ffmpeg` + `wav_options()` |
+| the spaCy model package | a missing `en_core_web_sm` made `BaseEngine()` shell out to `spacy download` — a 180 s network call on the request path | `conftest._no_spacy_download` |
+| `torch` / a GPU | a verdict changed with the hardware | injected `torch` module + `needs_torch` skips |
+| machine speed and CPU load | `elapsed < 0.5` in the MP3 export test passed alone and failed under load | counter comparisons, not stopwatches (see §4.2) |
+
+Two dependencies remain, both **explicit and self-announcing** rather than
+hidden:
+
+* `test_pdf_engine.py` / `test_epub_ocr_engines.py` need
+  `~/Documents/EBooks/cleancodebook.{pdf,epub}`. Both `pytest.skip` with the
+  missing path in the reason, so a fresh clone is green-with-skips and the `N
+  skipped` count is the tell.
+* `TestEncodingWithRealFfmpeg` needs the `ffmpeg` binary and is `skipif`-gated on
+  it. It is the only place in the suite that is allowed to care about PATH, and
+  it and `TestEncodingWithoutFfmpeg` between them cover both sides.
+
+### 4.2 No test in this suite measures speed
+
+`HANG_GUARD`-style timeouts remain, but only as *hang guards*: nothing is
+compared against them. The two tests that used wall clock as a proxy for a causal
+claim now assert the claim:
+
+* `test_mp3_export_nonblocking.py::test_post_export_returns_before_the_export_finishes`
+  parked synthesis on a `threading.Event` and reads the export's status while it
+  is still parked. `elapsed < 0.5` was not just load-sensitive — it never failed
+  with the bug reintroduced, because the POST returns before the export task's
+  first step either way. The status read is what fails: with the export body on
+  the loop thread, the server cannot answer it until the export is over.
+* `test_event_loop_stays_responsive_during_an_export`,
+  `test_a_concurrent_request_is_served_while_synthesis_is_running` and
+  `test_speed_engine.py::test_the_loop_ticks_while_a_slow_sentence_is_synthesised`
+  compare two *observed counters* (a heartbeat's ticks, or how far a concurrent
+  coroutine had got) sampled at the first and last synthesis call, instead of a
+  tick rate against `elapsed / 0.005`.
+
+Five tests fail if the pre-fix `_run_export` is reinstated. The plugin used to
+prove that was deleted after use; §4.3 keeps the technique.
+
+### 4.3 Checking that a regression test still bites
+
+A test that guards a fix is only worth its runtime if it goes red with the fix
+removed. Two throwaway plugins were written for exactly that and then deleted;
+the technique is worth keeping, because it needs no edit to production code — a
+pytest plugin can reinstate the old execution model:
+
+```python
+# -p my_probe, with the pre-fix body (an async def containing no await)
+async def pre_fix_run_export(export_id, book_id, voice, speed, options):
+    try:
+        mp3_router._run_export_blocking(export_id, book_id, voice, speed, options)
+    finally:
+        mp3_router._export_tasks.pop(export_id, None)
+
+
+@pytest.fixture(autouse=True)
+def _pre_fix(monkeypatch):
+    monkeypatch.setattr(mp3_router, "_run_export", pre_fix_run_export)
+```
+
+Run `PYTHONPATH=tests pytest tests/test_mp3_export_nonblocking.py -p my_probe` and
+five tests must fail. The same trick covers the synthesis pool
+(`monkeypatch.setattr(tts_engine, "_synthesis_pool", inline_executor)`) and the
+format matrix (`monkeypatch.setattr(export_encoding, "ffmpeg_args", ...)`).
 
 ---
 
@@ -274,6 +361,10 @@ list in `scripts/test.sh` instead of `-m`.
 ---
 
 ## 6 · Measured results
+
+> **Stale.** These numbers predate the engine-manager work and the hermeticity
+> pass, and the suite has grown since. For the current figures see §4; they are
+> kept only because they document the *before* state of the `fast`/`slow` split.
 
 All on 2026-09-26, `backend/.venv/bin/python` (Python 3.12.3, the uv-managed env
 — the runner auto-detects it), under heavy CPU contention from other agents.
