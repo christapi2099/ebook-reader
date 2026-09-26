@@ -21,7 +21,15 @@
     onSpeedChange: (s: number) => void
   } = $props()
 
-  const speeds = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0]
+  // 3.0 is deliberately absent: Kokoro's duration predictor floors every phoneme
+  // at one 25 ms frame (`clamp(min=1)` in kokoro/model.py:108), so the delivered
+  // rate saturates well below the request. Measured twice on this codebase, 3.0
+  // renders at roughly 2.15-2.2x — about 27% short of its own label — and on some
+  // sentences is identical to 2.75x. Offering it would be a control that lies
+  // about what it does. 2.0 is imperfect too (it delivers ~1.8-1.9x) but the
+  // shortfall is an order of magnitude less misleading and it is the top of the
+  // range Kokoro's own author exposes.
+  const speeds = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
 
   // Rewind/forward move whole sentences, so the visible text says sentences too —
   // WCAG 2.5.3 requires the accessible name to contain the visible label.
