@@ -4,6 +4,7 @@
   import { page } from '$app/stores'
   import { goto } from '$app/navigation'
   import Sidebar from '$lib/components/Sidebar.svelte'
+  import Toaster from '$lib/components/Toaster.svelte'
 
   let { children } = $props()
   let sidebarOpen = $state(false)
@@ -50,3 +51,5 @@
     {@render children()}
   </main>
 </div>
+
+<Toaster />

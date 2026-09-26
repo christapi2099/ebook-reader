@@ -2,13 +2,16 @@
   import LibraryCard from '$lib/components/LibraryCard.svelte'
   import type { Book } from '$lib/api'
 
-  let { books, loading, error, onRetry, onClick, onDelete }: {
+  let { books, loading, error, onRetry, onClick, onDelete, onMove, onDragStart, onDragEnd }: {
     books: Book[]
     loading: boolean
     error: string | null
     onRetry: () => void
     onClick: (id: string) => void
     onDelete?: (id: string) => void
+    onMove?: (book: Book) => void
+    onDragStart?: (book: Book) => void
+    onDragEnd?: () => void
   } = $props()
 </script>
 
@@ -39,7 +42,7 @@
 {:else}
   <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3 md:gap-4">
     {#each books as book (book.id)}
-      <LibraryCard {book} {onClick} {onDelete} />
+      <LibraryCard {book} {onClick} {onDelete} {onMove} {onDragStart} {onDragEnd} />
     {/each}
   </div>
 {/if}

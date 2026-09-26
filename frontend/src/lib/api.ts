@@ -1,3 +1,5 @@
+import { ApiError } from '$lib/utils/errors'
+
 export interface WordBbox {
   x0: number
   y0: number
@@ -25,16 +27,46 @@ export interface Book {
   author: string | null
   file_type: string
   page_count: number
+  /** `null` when the book is not filed in any folder. */
+  folder_id: number | null
+}
+
+/** Longest folder name the backend accepts (`FOLDER_NAME_MAX_LENGTH`). */
+export const FOLDER_NAME_MAX_LENGTH = 60
+
+export interface Folder {
+  id: number
+  name: string
+  created_at: string
+  /** Counted by the server, so the tile never has to guess. */
+  book_count: number
 }
 
 export const API_BASE = 'http://localhost:8000'
+
+/**
+ * Turn a failed response into an `ApiError` carrying the server's own
+ * explanation. FastAPI puts the human-readable reason in `detail` for 400/409,
+ * so the UI can show "A folder with that name already exists" instead of a
+ * status code. A missing or non-JSON body leaves the generic message in place.
+ */
+async function toApiError(response: Response): Promise<ApiError> {
+  let detail: string | undefined
+  try {
+    const body = await response.json()
+    if (body && typeof body.detail === 'string' && body.detail.trim()) detail = body.detail
+  } catch {
+    // No JSON body — fall back to the status line.
+  }
+  return new ApiError(response.status, response.statusText, detail)
+}
 
 async function fetchApi<T>(endpoint: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${endpoint}`, {
     ...options,
     headers: { 'Content-Type': 'application/json', ...options?.headers },
   })
-  if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+  if (!response.ok) throw await toApiError(response)
   return response.json() as Promise<T>
 }
 
@@ -63,6 +95,43 @@ export function getPdfUrl(bookId: string): string {
 
 export async function getLibrary(): Promise<Book[]> {
   return fetchApi<Book[]>('/library')
+}
+
+// Folders — user-created groupings of library books.
+
+export async function getFolders(): Promise<Folder[]> {
+  return fetchApi<Folder[]>('/folders')
+}
+
+/** Rejects with the server's `detail` for a blank, duplicate or too-long name. */
+export async function createFolder(name: string): Promise<Folder> {
+  return fetchApi<Folder>('/folders', {
+    method: 'POST',
+    body: JSON.stringify({ name }),
+  })
+}
+
+export async function renameFolder(folderId: number, name: string): Promise<Folder> {
+  return fetchApi<Folder>(`/folders/${folderId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ name }),
+  })
+}
+
+/** Deletes the folder and unfiles its books — the books themselves are kept. */
+export async function deleteFolder(folderId: number): Promise<{ ok: boolean; unfiled_books: number }> {
+  return fetchApi<{ ok: boolean; unfiled_books: number }>(`/folders/${folderId}`, { method: 'DELETE' })
+}
+
+/** Files a book, or clears its folder with `folderId = null`. */
+export async function setBookFolder(
+  bookId: string,
+  folderId: number | null,
+): Promise<{ ok: boolean; folder_id: number | null }> {
+  return fetchApi<{ ok: boolean; folder_id: number | null }>(`/library/${bookId}/folder`, {
+    method: 'POST',
+    body: JSON.stringify({ folder_id: folderId }),
+  })
 }
 
 export interface Voice {

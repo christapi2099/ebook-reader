@@ -22,6 +22,21 @@ export function isBackendDown(error: unknown): boolean {
   return error instanceof TypeError
 }
 
+/**
+ * Message to show for a failed request, preferring the server's own words.
+ *
+ * FastAPI sends a human-readable `detail` for 400/409 (a duplicate folder name,
+ * say), which is always more specific than a generic mapping. `ApiError` only
+ * carries a status line when the server sent no detail, so that case falls
+ * through to `toUserMessage`.
+ */
+export function toDetailMessage(error: unknown): string {
+  if (error instanceof ApiError && error.message !== `HTTP ${error.status}: ${error.statusText}`) {
+    return error.message
+  }
+  return toUserMessage(error)
+}
+
 export function toUserMessage(error: unknown): string {
   if (error instanceof TypeError) {
     return 'Could not connect to the backend'
