@@ -34,7 +34,7 @@
     primary: 'bg-accent text-accent-fg hover:bg-accent-hover',
     secondary: 'border border-border text-fg hover:bg-surface-sunken',
     ghost: 'text-fg-muted hover:bg-surface-sunken hover:text-fg',
-    danger: 'bg-danger text-white hover:opacity-90',
+    danger: 'bg-danger text-danger-fg hover:opacity-90',
     icon: 'justify-center text-fg-muted hover:bg-surface-sunken hover:text-fg',
   }
 

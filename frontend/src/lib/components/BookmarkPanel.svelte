@@ -64,7 +64,7 @@
   fetchBookmarks()
 </script>
 
-<Dialog titleId="bookmarks-panel-title" {onClose} layout="sheet" closeOnBackdrop>
+<Dialog titleId="bookmarks-panel-title" {onClose} layout="stretch" closeOnBackdrop>
   <div class="ml-auto flex h-full w-80 max-w-[85vw] flex-col bg-surface shadow-3">
     <div class="flex items-center justify-between border-b border-border p-4">
       <h2 id="bookmarks-panel-title" class="font-bold text-fg">Bookmarks</h2>

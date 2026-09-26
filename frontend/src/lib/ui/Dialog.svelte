@@ -21,13 +21,21 @@
    * `role="dialog"` and the action stay on this element, not on the panel:
    * backdrop-close works by comparing `event.target` to the node the action is
    * applied to, and the tests click that node directly.
+   *
+   * This always renders `role="dialog"`. Anything that is not one — the inline
+   * search bar is `role="search"` with no scrim — must keep using the
+   * `overlayLayer` action directly rather than coming through here, or it would
+   * be announced as a dialog.
    */
-  type Layout = 'centered' | 'sheet'
+  // The prop names the flex alignment it applies, not a component kind:
+  // DESIGN.md's `Sheet` is a responsive draggable panel with snap points, which
+  // this is not, and building it for one consumer would be speculative.
+  type Layout = 'centered' | 'stretch'
 
   const LAYOUT_CLASSES: Record<Layout, string> = {
     centered: 'items-center justify-center',
-    // A sheet fills the height and lets its panel align itself with `ml-auto`.
-    sheet: 'items-stretch',
+    // Fills the height and lets the panel align itself, e.g. with `ml-auto`.
+    stretch: 'items-stretch',
   }
 
   let {

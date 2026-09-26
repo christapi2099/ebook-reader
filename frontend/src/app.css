@@ -28,6 +28,7 @@
   --warning-soft: #fbf1de;
   --danger: #d1453b;
   --danger-soft: #fbe8e6;
+  --danger-fg: #ffffff;
   --focus-ring: #7c74f0;
   --overlay: rgb(20 18 15 / 0.45);
   --highlight-alpha: 0.45;
@@ -59,6 +60,7 @@
   --warning-soft: #f3e2c2;
   --danger: #b53a2f;
   --danger-soft: #f3d9d0;
+  --danger-fg: #ffffff;
   --focus-ring: #7c63d9;
   --overlay: rgb(59 47 34 / 0.4);
   --highlight-alpha: 0.5;
@@ -90,6 +92,7 @@
   --warning-soft: #2e2310;
   --danger: #ff6b61;
   --danger-soft: #331614;
+  --danger-fg: #0f0e1a;
   --focus-ring: #a09bff;
   --overlay: rgb(0 0 0 / 0.6);
   --highlight-alpha: 0.3;
@@ -130,6 +133,7 @@
   --color-warning-soft: var(--warning-soft);
   --color-danger: var(--danger);
   --color-danger-soft: var(--danger-soft);
+  --color-danger-fg: var(--danger-fg);
   --color-focus-ring: var(--focus-ring);
   --color-overlay: var(--overlay);
   --shadow-1: var(--elev-1);

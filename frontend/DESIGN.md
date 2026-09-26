@@ -36,6 +36,7 @@ applied by a no-flash inline script in `app.html` before first paint.
 | `success` / `success-soft` | `#1F8A5B` / `#E3F4EC` | `#2F7A4F` / `#E1ECD6` | `#3DD68C` / `#10291E` | saved, export done |
 | `warning` / `warning-soft` | `#B7791F` / `#FBF1DE` | `#A0661A` / `#F3E2C2` | `#F5B94A` / `#2E2310` | processing, already-existed |
 | `danger` / `danger-soft` | `#D1453B` / `#FBE8E6` | `#B53A2F` / `#F3D9D0` | `#FF6B61` / `#331614` | errors, delete |
+| `danger-fg` | `#FFFFFF` | `#FFFFFF` | `#0F0E1A` | text/icons on danger |
 | `focus-ring` | `#7C74F0` | `#7C63D9` | `#A09BFF` | focus-visible outline |
 | `overlay` | `rgb(20 18 15 / .45)` | `rgb(59 47 34 / .40)` | `rgb(0 0 0 / .60)` | scrim behind sheets/dialogs |
 | `highlight-alpha` | `.45` | `.50` | `.30` | sentence highlight opacity multiplier |
@@ -110,7 +111,8 @@ Must stay distinguishable from the playback highlight in every theme.
 ## 2. Contrast verification (WCAG, computed)
 
 Required: `fg` and `fg-muted` ≥ 4.5:1 on `bg`, `surface`, `reader-page` in
-every theme; `accent-fg` ≥ 4.5:1 on `accent`. All pass:
+every theme; `accent-fg` ≥ 4.5:1 on `accent`; `danger-fg` ≥ 4.5:1 on `danger`.
+All pass:
 
 | Pair | Light | Sepia | Dark |
 |---|---|---|---|
@@ -123,6 +125,16 @@ every theme; `accent-fg` ≥ 4.5:1 on `accent`. All pass:
 | `accent-fg` on `accent` | 6.51 | 6.58 | 6.28 |
 | `accent` (as text) on `bg` | 6.02 | 5.37 | 6.19 |
 | `accent` (as text) on `surface` | 6.51 | 5.81 | 5.76 |
+| `danger-fg` on `danger` | 4.54 | 5.82 | 6.86 |
+
+`danger-fg` exists because `danger` is a *light* red in the dark theme
+(`#FF6B61`), the mirror of `accent` being light there. Hardcoding `text-white`
+on it measured **2.79:1** in dark — a real AA failure, not a nit — while the
+solved pair is 6.86:1. In light and sepia the light red is dark enough that
+white still wins (4.54 and 5.82), so the token resolves to `#FFFFFF` in both
+and inverts to `#0F0E1A` in dark, exactly as `accent-fg` does. The light-theme
+figure is the tightest in this table at 4.54:1; anything that darkens `danger`
+in light must re-check it.
 
 `fg-subtle` measures 3.18–3.97:1 by design — it is restricted to captions,
 placeholders and disabled text, never body copy (per §8.1 "not for body
