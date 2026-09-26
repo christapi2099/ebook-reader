@@ -146,6 +146,24 @@ export async function setBookFolder(
   })
 }
 
+/**
+ * Set a book's title and/or author. Keys left out are not changed; `author:
+ * null` clears the byline, and so does an empty string, which the server
+ * normalises rather than storing.
+ *
+ * Rejects with the server's `detail` for a blank or too-long title, or for a
+ * body that asks for nothing.
+ */
+export async function updateBook(
+  bookId: string,
+  changes: { title?: string; author?: string | null },
+): Promise<Book> {
+  return fetchApi<Book>(`/library/${bookId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(changes),
+  })
+}
+
 export interface Voice {
   id: string
   name: string
@@ -256,6 +274,31 @@ export async function saveProgress(bookId: string, sentenceIndex: number): Promi
     method: 'POST',
     body: JSON.stringify({ sentence_index: sentenceIndex }),
   })
+}
+
+/**
+ * Persist the position without waiting for a reply, for the one moment a normal
+ * request cannot be used: the page is being unloaded and an ordinary fetch is
+ * cancelled along with it.
+ *
+ * `navigator.sendBeacon` is the request a browser guarantees to deliver during
+ * unload. A `keepalive` fetch is the fallback where `sendBeacon` is missing, and
+ * it is deliberately not awaited. Returns whether the send was handed to the
+ * browser — `false` leaves the caller to fall back to the normal path.
+ */
+export function saveProgressBeacon(bookId: string, sentenceIndex: number): boolean {
+  const url = `${API_BASE}/library/${encodeURIComponent(bookId)}/progress`
+  const body = JSON.stringify({ sentence_index: sentenceIndex })
+  if (typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
+    return navigator.sendBeacon(url, new Blob([body], { type: 'application/json' }))
+  }
+  void fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body,
+    keepalive: true,
+  }).catch(() => {})
+  return true
 }
 
 export async function getProgress(bookId: string): Promise<number> {

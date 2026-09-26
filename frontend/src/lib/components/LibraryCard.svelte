@@ -17,6 +17,7 @@
     onClick,
     onDelete,
     onMove,
+    onEditMetadata,
     onDragStart,
     onDragEnd,
   }: {
@@ -29,6 +30,8 @@
     onDelete?: (id: string) => void
     /** Opens the move dialog — the keyboard-reachable way to file a book. */
     onMove?: (book: Book) => void
+    /** Opens the title/author dialog. */
+    onEditMetadata?: (book: Book) => void
     /** Enables dragging the card as a drop payload for folder tiles. */
     onDragStart?: (book: Book) => void
     onDragEnd?: () => void
@@ -38,6 +41,27 @@
   let dragging = $state(false)
 
   const progress = $derived(deriveReadingProgress(sentenceIndex, totalSentences))
+
+  /**
+   * What the number under the title counts.
+   *
+   * `page_count` is only pages for a PDF: for a text book it is a sentence
+   * count and for an EPUB it is a derived `len(raw) // 10`, so labelling either
+   * of those "pages" states something untrue. The sentence total is the one
+   * number that means the same thing for every non-PDF format, and `GET
+   * /library` already sends it. `file_type` is the extension the upload stored,
+   * always lowercase — `routers/documents.py` lowercases it — and this is the
+   * same strict comparison the reader route makes to decide what a "page" is.
+   *
+   * A count of 0 or a missing one says nothing at all — the reader has no
+   * sentences to report, and "0 sentences" would read as a fact about the book
+   * rather than an absence of one.
+   */
+  const unitLabel = $derived.by(() => {
+    if (book.file_type === 'pdf') return `${book.page_count} pages`
+    const sentences = book.sentence_count ?? 0
+    return sentences > 0 ? `${sentences} sentences` : null
+  })
 
   function handleDragStart(event: DragEvent) {
     if (!onDragStart) return
@@ -86,7 +110,7 @@
   ondragstart={handleDragStart}
   ondragend={handleDragEnd}
 >
-  {#if onDelete || onMove}
+  {#if onDelete || onMove || onEditMetadata}
     <!--
       The three raw z-values in here are local stacking inside one card — the
       options button above the cover, a click-catcher under the menu, the menu
@@ -113,6 +137,17 @@
         <div class="relative">
           <div class="fixed inset-0 z-10" role="button" tabindex="-1" onclick={() => (showMenu = false)}></div>
           <div class="absolute right-0 top-12 bg-surface-raised border border-border rounded-lg shadow-2 z-20 py-1 min-w-[10rem]">
+            {#if onEditMetadata}
+              <button
+                class="w-full min-h-11 px-3 text-left text-sm text-fg hover:bg-surface-sunken flex items-center gap-2"
+                onclick={() => { onEditMetadata(book); showMenu = false }}
+              >
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L6.832 19.82a4.5 4.5 0 01-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 011.13-1.897L16.863 4.487zm0 0L19.5 7.125" />
+                </svg>
+                Edit book details
+              </button>
+            {/if}
             {#if onMove}
               <button
                 class="w-full min-h-11 px-3 text-left text-sm text-fg hover:bg-surface-sunken flex items-center gap-2"
@@ -154,9 +189,15 @@
     </span>
   </div>
   <h3 class="font-semibold text-fg mt-2 line-clamp-2 text-sm">{book.title}</h3>
-  <!-- `Book.author` is never set by any endpoint, so this is the usual state. -->
+  <!--
+    No import can read an author out of the file, so every book starts without
+    one until "Edit book details" is used — this is the usual state, not a
+    failure.
+  -->
   <p class="text-sm text-fg-muted mt-1">{book.author ?? 'Author not detected'}</p>
-  <p class="text-xs text-fg-subtle mt-1">{book.page_count} pages</p>
+  {#if unitLabel}
+    <p class="text-xs text-fg-subtle mt-1">{unitLabel}</p>
+  {/if}
 
   {#if progress}
     <div class="mt-2">

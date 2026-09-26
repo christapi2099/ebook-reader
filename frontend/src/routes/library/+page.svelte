@@ -9,6 +9,7 @@
     getLibrary,
     renameFolder,
     setBookFolder,
+    updateBook,
     type Book,
     type Folder,
   } from '$lib/api'
@@ -16,6 +17,7 @@
   import type { StoredProgress } from '$lib/utils/reading-progress'
   import BookGrid from '$lib/components/BookGrid.svelte'
   import Button from '$lib/ui/Button.svelte'
+  import BookMetadataDialog from '$lib/components/BookMetadataDialog.svelte'
   import FolderTile from '$lib/components/FolderTile.svelte'
   import FolderNameDialog from '$lib/components/FolderNameDialog.svelte'
   import MoveToFolderDialog from '$lib/components/MoveToFolderDialog.svelte'
@@ -40,6 +42,8 @@
   /** Non-null while the create/rename dialog is open. */
   let nameDialog = $state<{ folder: Folder | null } | null>(null)
   let movingBook = $state<Book | null>(null)
+  /** Non-null while a book's title/author dialog is open. */
+  let editingBook = $state<Book | null>(null)
 
   const currentFolder = $derived(folders.find(f => f.id === openFolderId) ?? null)
   const visibleBooks = $derived(
@@ -190,6 +194,21 @@
     })
   }
 
+  /**
+   * Save a book's title and author. Thrown errors (400 from the server) are
+   * rendered inside the dialog, so it stays open on the offending value; on
+   * success the card is re-rendered from the refetched library, so it shows what
+   * the server stored rather than what was typed.
+   */
+  async function handleSaveBookMetadata(changes: { title: string; author: string | null }) {
+    const book = editingBook
+    if (!book) return
+    await updateBook(book.id, changes)
+    closeMetadataDialog()
+    await refresh()
+    toastStore.push({ tone: 'success', title: 'Book details saved' })
+  }
+
   async function handleDeleteFolder(folder: Folder) {
     const filedBookIds = books.filter(b => b.folder_id === folder.id).map(b => b.id)
     const confirmed = confirm(
@@ -263,6 +282,12 @@
   function closeMoveDialog() {
     const book = movingBook
     movingBook = null
+    if (book) closeDialogRestoringFocus(`[data-book-options="${book.id}"]`)
+  }
+
+  function closeMetadataDialog() {
+    const book = editingBook
+    editingBook = null
     if (book) closeDialogRestoringFocus(`[data-book-options="${book.id}"]`)
   }
 
@@ -386,6 +411,7 @@
       onClick={(id) => goto(`/reader/${id}`)}
       onDelete={handleDelete}
       onMove={(book) => (movingBook = book)}
+      onEditMetadata={(book) => (editingBook = book)}
       onDragStart={(book) => (draggingBookId = book.id)}
       onDragEnd={() => (draggingBookId = null)}
     />
@@ -410,6 +436,17 @@
       {folders}
       onClose={closeMoveDialog}
       onMove={(folderId) => handleSetBookFolder(book.id, folderId)}
+    />
+  {/key}
+{/if}
+
+{#if editingBook}
+  {@const book = editingBook}
+  {#key book.id}
+    <BookMetadataDialog
+      book={book}
+      onClose={closeMetadataDialog}
+      onSave={handleSaveBookMetadata}
     />
   {/key}
 {/if}

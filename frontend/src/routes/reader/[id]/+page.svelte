@@ -2,7 +2,15 @@
 import { onMount, onDestroy } from 'svelte'
 import { page } from '$app/stores'
 import { get } from 'svelte/store'
-import readerStore, { loadBook, seek, setPlaying, setSpeed, type ReaderState } from '$lib/stores/reader'
+import readerStore, {
+  flushProgress,
+  loadBook,
+  mirrorPlaybackIndex,
+  seek,
+  setPlaying,
+  setSpeed,
+  type ReaderState,
+} from '$lib/stores/reader'
 import { audioStore, type AudioState } from '$lib/stores/audio'
 import { settingsStore, type SettingsState } from '$lib/stores/settings'
 import { createBookmark, getBook } from '$lib/api'
@@ -82,15 +90,37 @@ onMount(async () => {
     // open layer only, so it must not be handled here as a blanket "close all".
   }
   registerHotkeys(hotkeyMap)
+
+  // The position has to survive the page going away, which a throttled write
+  // cannot promise by itself. `pagehide` covers a real unload and a bfcache
+  // freeze; `visibilitychange` covers a mobile app being backgrounded, which can
+  // happen with no `pagehide` at all.
+  window.addEventListener('pagehide', handlePageHide)
+  document.addEventListener('visibilitychange', handleVisibilityChange)
 })
 
 onDestroy(() => {
+  // Before anything is torn down: leaving the reader is the other moment the
+  // throttled write could lose the position.
+  flushProgress()
+  window.removeEventListener('pagehide', handlePageHide)
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
   unsubReader?.()
   unsubAudio?.()
   unsubSettings?.()
   audioStore.destroy()
   unregisterHotkeys()
 })
+
+/** A real unload or a bfcache freeze — a normal request would die with the page. */
+function handlePageHide() {
+  flushProgress(true)
+}
+
+/** Backgrounding, which on mobile can arrive without any `pagehide`. */
+function handleVisibilityChange() {
+  if (document.visibilityState === 'hidden') flushProgress(true)
+}
 
 /**
  * Jump to a 0-based page. Both the page indicator and the skim overlay come
@@ -117,7 +147,20 @@ $effect(() => {
 })
 
 $effect(() => {
-  if (!audio.isPlaying && reader.isPlaying) setPlaying(false)
+  if (!audio.isPlaying && reader.isPlaying) {
+    setPlaying(false)
+    // Playback ended — the reader paused, or the book finished. Either way the
+    // position should be durable now rather than up to five seconds from now.
+    flushProgress()
+  }
+})
+
+// The audio store knows where playback is; this store knows where the user asked
+// to be. While playing, the first is the truth — mirroring it is what keeps the
+// page indicator and the saved position on the sentence being heard, instead of
+// on the last one that was clicked.
+$effect(() => {
+  mirrorPlaybackIndex(audio.currentIndex, audio.isPlaying)
 })
 
 $effect(() => {
@@ -137,6 +180,9 @@ function handlePlay() {
 function handlePause() {
   setPlaying(false)
   audioStore.pause()
+  // Explicitly, because clearing `isPlaying` above stops the playback-ended
+  // effect from firing — and a pause is exactly when the position must be safe.
+  flushProgress()
 }
 
 async function handleSeek(index: number) {

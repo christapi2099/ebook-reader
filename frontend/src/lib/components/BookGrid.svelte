@@ -4,7 +4,7 @@
   import type { Book } from '$lib/api'
   import type { StoredProgress } from '$lib/utils/reading-progress'
 
-  let { books, loading, error, progress = {}, onRetry, onClick, onDelete, onMove, onDragStart, onDragEnd }: {
+  let { books, loading, error, progress = {}, onRetry, onClick, onDelete, onMove, onEditMetadata, onDragStart, onDragEnd }: {
     books: Book[]
     loading: boolean
     error: string | null
@@ -17,6 +17,8 @@
     onClick: (id: string) => void
     onDelete?: (id: string) => void
     onMove?: (book: Book) => void
+    /** Opens the title/author dialog for the book. */
+    onEditMetadata?: (book: Book) => void
     onDragStart?: (book: Book) => void
     onDragEnd?: () => void
   } = $props()
@@ -54,6 +56,7 @@
         {onClick}
         {onDelete}
         {onMove}
+        {onEditMetadata}
         {onDragStart}
         {onDragEnd}
       />
