@@ -1,105 +1,85 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte'
-
   let {
     sentences,
     currentIndex,
-    isPlaying,
-    speed,
+    elapsedSeconds = 0,
+    sentenceDurations = {},
+    isPlaying = false,
     buffering = false,
   }: {
     sentences: { index: number; text: string; filtered: boolean }[]
     currentIndex: number
-    isPlaying: boolean
-    speed: number
+    /**
+     * Real seconds of audio played at this position, measured against the
+     * AudioContext clock by `stores/audio.ts`. Never estimated.
+     */
+    elapsedSeconds?: number
+    /**
+     * Real per-sentence durations in seconds as reported by the backend
+     * (`sentence_end.duration_ms`). Absent entries are simply not known yet.
+     */
+    sentenceDurations?: Record<number, number>
+    isPlaying?: boolean
     buffering?: boolean
   } = $props()
 
-  // Average English TTS: ~150 wpm at 1x speed
-  const WPM = 150
+  const playable = $derived(sentences.filter(s => !s.filtered))
+  const playedCount = $derived(playable.filter(s => s.index <= currentIndex).length)
 
-  function sentenceDuration(text: string, spd: number): number {
-    const words = text.trim().split(/\s+/).length
-    return Math.max(0.5, (words / WPM) * 60 / spd)
-  }
-
-  let totalSeconds = $derived(
-    sentences
-      .filter(s => !s.filtered)
-      .reduce((acc, s) => acc + sentenceDuration(s.text, speed), 0)
+  // Position in the book, derived at render time from the sentence index — the
+  // same unit `reader.ts` persists. Never a stored percentage.
+  const positionPercent = $derived(
+    playable.length > 0 ? (playedCount / playable.length) * 100 : 0
   )
 
-  let elapsedSeconds = $derived(
-    sentences
-      .filter(s => !s.filtered && s.index <= currentIndex)
-      .reduce((acc, s) => acc + sentenceDuration(s.text, speed), 0)
-  )
-
-  // Fine-grained real-time offset ticked forward while playing
-  let fineOffset = $state(0)
-  let intervalId: ReturnType<typeof setInterval> | null = null
-
-  $effect(() => {
-    currentIndex
-    isPlaying
-    fineOffset = 0
-  })
-
-  $effect(() => {
-    if (intervalId) { clearInterval(intervalId); intervalId = null }
-    if (isPlaying) {
-      intervalId = setInterval(() => {
-        fineOffset += 0.5 / speed
-      }, 500)
+  // A running total is only shown once the backend has reported a real duration
+  // for every sentence. Until then the sum would be a partial figure, so it is
+  // withheld rather than padded out with an estimate.
+  const totalSeconds = $derived.by(() => {
+    if (playable.length === 0) return null
+    let total = 0
+    for (const sentence of playable) {
+      const duration = sentenceDurations[sentence.index]
+      if (!(duration > 0)) return null
+      total += duration
     }
-    return () => {
-      if (intervalId) { clearInterval(intervalId); intervalId = null }
-    }
-  })
-
-  onDestroy(() => {
-    if (intervalId) clearInterval(intervalId)
+    return total
   })
 
   function formatTime(secs: number): string {
-    const s = Math.floor(secs)
+    const s = Math.max(0, Math.floor(secs))
     const h = Math.floor(s / 3600)
     const m = Math.floor((s % 3600) / 60)
     const sec = s % 60
     if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
     return `${m}:${String(sec).padStart(2, '0')}`
   }
-
-  let displayElapsed = $derived(Math.min(elapsedSeconds + fineOffset, totalSeconds))
-  let progress = $derived(totalSeconds > 0 ? (displayElapsed / totalSeconds) * 100 : 0)
 </script>
 
 <div class="px-3 py-1.5 flex flex-col gap-1">
   <!-- Progress track -->
-  <div class="relative w-full h-1 bg-slate-200 rounded-full overflow-hidden">
+  <div
+    class="relative w-full h-1 bg-surface-sunken rounded-full overflow-hidden"
+    role="progressbar"
+    aria-label="Reading position"
+    aria-valuemin="0"
+    aria-valuemax="100"
+    aria-valuenow={Math.round(positionPercent)}
+    aria-valuetext={`Sentence ${playedCount} of ${playable.length}`}
+  >
     <div
-      class="absolute inset-y-0 left-0 bg-blue-500 rounded-full transition-[width] duration-500"
-      style="width: {progress}%"
+      class="absolute inset-y-0 left-0 bg-accent rounded-full transition-[width] duration-500"
+      style="width: {positionPercent}%"
     ></div>
     {#if buffering && isPlaying}
       <!-- Shimmer overlay while buffering -->
-      <div class="absolute inset-y-0 left-0 right-0 w-full h-full bg-gradient-to-r from-transparent via-white/40 to-transparent shimmer-shine"></div>
+      <div class="absolute inset-y-0 left-0 right-0 w-full h-full bg-gradient-to-r from-transparent via-accent-fg/40 to-transparent shimmer-shine"></div>
     {/if}
   </div>
-  <!-- Time display -->
+  <!-- Time display: real elapsed always, real total only once it is fully known -->
   <div class="flex justify-end">
-    <span class="text-xs text-slate-500 tabular-nums">
-      {formatTime(displayElapsed)} / {formatTime(totalSeconds)}
+    <span class="text-xs text-fg-muted tabular-nums">
+      {formatTime(elapsedSeconds)}{#if totalSeconds !== null} / {formatTime(totalSeconds)}{/if}
     </span>
   </div>
 </div>
-
-<style>
-  @keyframes apb-shimmer {
-    0% { transform: translateX(-100%); }
-    100% { transform: translateX(100%); }
-  }
-  .shimmer-shine {
-    animation: apb-shimmer 1.5s ease-in-out infinite;
-  }
-</style>

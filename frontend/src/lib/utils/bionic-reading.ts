@@ -22,6 +22,28 @@ export const DEFAULT_BIONIC_OPTIONS: BionicOptions = {
   skipCommonWords: true,
 }
 
+/** The four bionic options the Settings panel owns, under the store's names. */
+export interface BionicSettings {
+  bionicFixation: number
+  bionicBoldRatio: number
+  bionicMinWordLength: number
+  bionicSkipCommonWords: boolean
+}
+
+/**
+ * Map stored settings onto the algorithm's own option names. One function so
+ * every surface that renders bionic text reads the same four values — a panel
+ * whose sliders only reached some of the readers would be a control that lies.
+ */
+export function toBionicOptions(settings: BionicSettings): BionicOptions {
+  return {
+    fixationPoint: settings.bionicFixation,
+    boldRatio: settings.bionicBoldRatio,
+    minWordLength: settings.bionicMinWordLength,
+    skipCommonWords: settings.bionicSkipCommonWords,
+  }
+}
+
 export const COMMON_WORDS = new Set([
   'a', 'an', 'the',
   'and', 'or', 'but', 'nor', 'yet', 'so',

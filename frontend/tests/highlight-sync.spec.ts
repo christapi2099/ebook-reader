@@ -38,7 +38,7 @@ test.describe('Highlight–Audio Sync', () => {
         await route.fulfill({ json: { sentence_index: 0 } })
       } else if (url.includes('/library/') && !url.includes('/progress')) {
         await route.fulfill({
-          json: { id: 'test-book', title: 'Test Book', author: 'Test Author', file_type: 'PDF', page_count: 5 }
+          json: { id: 'test-book', title: 'Test Book', author: 'Test Author', file_type: 'pdf', page_count: 5 }
         })
       } else if (url.includes('/uploads/')) {
         await route.fulfill({
@@ -65,12 +65,12 @@ test.describe('Highlight–Audio Sync', () => {
     expect(errors.filter(e => !e.includes('favicon'))).toHaveLength(0)
   })
 
-  test('initial highlight on sentence 0', async ({ page }) => {
+  test('@critical initial highlight on sentence 0', async ({ page }) => {
     await expect(sentenceOverlay(page, 0, 'true')).toBeVisible()
     await expect(page.locator('[data-highlighted="true"]')).toHaveCount(1)
   })
 
-  test('highlight advances and previous clears', async ({ page }) => {
+  test('@critical highlight advances and previous clears', async ({ page }) => {
     await playBtn(page).click()
     await driver.sendSentenceStart(IDX.second, SID.first)
     await driver.sendAudioChunk(MOCK_AUDIO_CHUNK)
@@ -92,7 +92,7 @@ test.describe('Highlight–Audio Sync', () => {
     await expect(pauseBtn(page)).toBeVisible()
   })
 
-  test('pause freezes highlight', async ({ page }) => {
+  test('@critical pause freezes highlight', async ({ page }) => {
     await playBtn(page).click()
     await driver.sendSentenceStart(IDX.second, SID.first)
     await driver.sendAudioChunk(MOCK_AUDIO_CHUNK)
@@ -105,7 +105,7 @@ test.describe('Highlight–Audio Sync', () => {
     await expect(sentenceOverlay(page, 1, 'true')).toBeVisible()
   })
 
-  test('resume continues from paused index', async ({ page }) => {
+  test('@critical resume continues from paused index', async ({ page }) => {
     await playBtn(page).click()
     await driver.sendSentenceStart(IDX.second, SID.first)
     await driver.sendAudioChunk(MOCK_AUDIO_CHUNK)
@@ -116,14 +116,14 @@ test.describe('Highlight–Audio Sync', () => {
     expect(resumeAction?.['from_index']).toBe(IDX.second)
   })
 
-  test('sentence click triggers seek and highlight jumps', async ({ page }) => {
+  test('@critical sentence click triggers seek and highlight jumps', async ({ page }) => {
     await playBtn(page).click()
     await page.locator('[data-index="3"]').click()
     expect(driver.actionsOf('seek')[0]?.['to_index']).toBe(IDX.clicked)
     await expect(sentenceOverlay(page, 3, 'true')).toBeVisible()
   })
 
-  test('complete stops playback, last sentence stays highlighted', async ({ page }) => {
+  test('@critical complete stops playback, last sentence stays highlighted', async ({ page }) => {
     await playBtn(page).click()
     await driver.sendSentenceStart(IDX.last, SID.first)
     await driver.sendAudioChunk(MOCK_AUDIO_CHUNK)
@@ -257,7 +257,7 @@ test.describe('Word-level highlighting', () => {
         await route.fulfill({ json: { sentence_index: 0 } })
       } else if (url.includes('/library/') && !url.includes('/progress')) {
         await route.fulfill({
-          json: { id: 'test-book', title: 'Test Book', author: 'Test Author', file_type: 'PDF', page_count: 5 }
+          json: { id: 'test-book', title: 'Test Book', author: 'Test Author', file_type: 'pdf', page_count: 5 }
         })
       } else if (url.includes('/uploads/')) {
         await route.fulfill({
@@ -284,7 +284,7 @@ test.describe('Word-level highlighting', () => {
     expect(errors.filter(e => !e.includes('favicon'))).toHaveLength(0)
   })
 
-  test('word_divs_rendered_for_sentences_with_words', async ({ page }) => {
+  test('@critical word_divs_rendered_for_sentences_with_words', async ({ page }) => {
     await expect(page.locator('[data-word-index="0"][data-sentence-index="0"]')).toHaveCount(1)
     await expect(page.locator('[data-word-index="1"][data-sentence-index="0"]')).toHaveCount(1)
     await expect(page.locator('[data-word-index="0"][data-sentence-index="1"]')).toHaveCount(1)
@@ -292,7 +292,7 @@ test.describe('Word-level highlighting', () => {
     expect(totalWordDivs).toBe(3)
   })
 
-  test('current_word_div_gets_background_color', async ({ page }) => {
+  test('@critical current_word_div_gets_background_color', async ({ page }) => {
     await page.waitForSelector('[data-overlay]', { timeout: 10000 })
     await playBtn(page).click()
     await driver.sendSentenceStart(IDX.first, SID.first)
@@ -316,7 +316,7 @@ test.describe('Word-level highlighting', () => {
     expect(debug).not.toBe('')
   })
 
-  test('word_highlight_advances_to_next_word', async ({ page }) => {
+  test('@critical word_highlight_advances_to_next_word', async ({ page }) => {
     await page.waitForSelector('[data-overlay]', { timeout: 10000 })
     await playBtn(page).click()
     await driver.sendSentenceStart(IDX.first, SID.first)
@@ -344,7 +344,7 @@ test.describe('Word-level highlighting', () => {
     expect(word1Bg).not.toBe('')
   })
 
-  test('word_highlight_clears_on_pause', async ({ page }) => {
+  test('@critical word_highlight_clears_on_pause', async ({ page }) => {
     await page.waitForSelector('[data-overlay]', { timeout: 10000 })
     await playBtn(page).click()
     await driver.sendSentenceStart(IDX.first, SID.first)
@@ -434,7 +434,7 @@ test.describe('Search diff (O(1) optimization)', () => {
         await route.fulfill({ json: { sentence_index: 0 } })
       } else if (url.includes('/library/') && !url.includes('/progress')) {
         await route.fulfill({
-          json: { id: 'test-book', title: 'Test Book', author: 'Test Author', file_type: 'PDF', page_count: 5 }
+          json: { id: 'test-book', title: 'Test Book', author: 'Test Author', file_type: 'pdf', page_count: 5 }
         })
       } else if (url.includes('/uploads/')) {
         await route.fulfill({
@@ -556,7 +556,7 @@ test.describe('Search highlight styling', () => {
         await route.fulfill({ json: { sentence_index: 0 } })
       } else if (url.includes('/library/') && !url.includes('/progress')) {
         await route.fulfill({
-          json: { id: 'test-book', title: 'Test Book', author: 'Test Author', file_type: 'PDF', page_count: 5 }
+          json: { id: 'test-book', title: 'Test Book', author: 'Test Author', file_type: 'pdf', page_count: 5 }
         })
       } else if (url.includes('/uploads/')) {
         await route.fulfill({
@@ -586,22 +586,30 @@ test.describe('Search highlight styling', () => {
   test('search_matches_use_fill_not_outline', async ({ page }) => {
     await page.waitForSelector('[data-overlay]', { timeout: 10000 })
     await searchBtn(page).click()
-    await searchInput(page).fill('Sentence 0')
-    const bg = await page.evaluate(() => {
-      const el = document.querySelector('[data-index="0"]') as HTMLElement
-      return el?.style.backgroundColor || ''
+    // Sentence 1, not 0: sentence 0 carries the playback highlight on load, and
+    // the search fill deliberately stays off a playing sentence, so asserting on
+    // it would read the playback colour and prove nothing about search.
+    await searchInput(page).fill('Sentence 1')
+    const style = await page.evaluate(() => {
+      const el = document.querySelector('[data-index="1"]') as HTMLElement
+      return {
+        highlighted: el.getAttribute('data-highlighted'),
+        bg: el.style.backgroundColor,
+        outline: el.style.outline,
+        computedBg: getComputedStyle(el).backgroundColor,
+      }
     })
-    const outline = await page.evaluate(() => {
-      const el = document.querySelector('[data-index="0"]') as HTMLElement
-      return el?.style.outline || ''
-    })
-    expect(bg).not.toBe('')
-    expect(outline === '' || outline === 'none').toBe(true)
+    expect(style.highlighted).not.toBe('true')
+    expect(style.bg).toContain('--search-current-bg')
+    expect(style.outline === '' || style.outline === 'none').toBe(true)
+    // The inline style names a token; an undefined token would compute to
+    // transparent and the match would silently vanish.
+    expect(style.computedBg).not.toBe('rgba(0, 0, 0, 0)')
   })
 
-  test('search_current_match_is_blue_others_are_green', async ({ page }) => {
+  test('search_current_match_uses_current_token_others_match_token', async ({ page }) => {
     await page.waitForSelector('[data-overlay]', { timeout: 10000 })
-    // Advance playback to sentence 2 then pause — leaves sentences 0 & 1 free for search colors
+    // Advance playback to sentence 2 then pause — leaves sentences 0 & 1 free for search fills
     await playBtn(page).click()
     await driver.sendSentenceStart(IDX.first, SID.first)
     await driver.sendAudioChunk(MOCK_AUDIO_CHUNK)
@@ -616,18 +624,18 @@ test.describe('Search highlight styling', () => {
     // sentence 2 is now data-highlighted; sentences 0 & 1 are free
     await searchBtn(page).click()
     await searchInput(page).fill('Sentence')
-    // sentence 0 = first result = current search match → blue
+    // sentence 0 = first result = current search match → --search-current-bg
     const currentBg = await page.evaluate(() => {
       const el = document.querySelector('[data-index="0"]') as HTMLElement
       return el?.style.backgroundColor || ''
     })
-    expect(currentBg).toContain('59, 130, 246')
-    // sentence 1 = second result = non-current → green
+    expect(currentBg).toContain('--search-current-bg')
+    // sentence 1 = second result = non-current → --search-match-bg
     const nonCurrentBg = await page.evaluate(() => {
       const el = document.querySelector('[data-index="1"]') as HTMLElement
       return el?.style.backgroundColor || ''
     })
-    expect(nonCurrentBg).toContain('134, 239, 172')
+    expect(nonCurrentBg).toContain('--search-match-bg')
     // advance current match from sentence 0 → sentence 1
     await nextMatchBtn(page).click()
     const currentAfterNext = await page.evaluate(() => {
@@ -638,8 +646,8 @@ test.describe('Search highlight styling', () => {
       const el = document.querySelector('[data-index="1"]') as HTMLElement
       return el?.style.backgroundColor || ''
     })
-    expect(currentAfterNext).toContain('134, 239, 172')
-    expect(nextAsCurrent).toContain('59, 130, 246')
+    expect(currentAfterNext).toContain('--search-match-bg')
+    expect(nextAsCurrent).toContain('--search-current-bg')
   })
 
   test('search_fill_clears_when_search_closed', async ({ page }) => {
@@ -671,8 +679,8 @@ test.describe('Search highlight styling', () => {
       const el = document.querySelector('[data-index="0"]') as HTMLElement
       return el?.style.backgroundColor || ''
     })
-    expect(playbackBg).not.toContain('59, 130, 246')
-    expect(playbackBg).not.toContain('134, 239, 172')
+    expect(playbackBg).not.toContain('--search-current-bg')
+    expect(playbackBg).not.toContain('--search-match-bg')
     await driver.sendSentenceStart(IDX.second, SID.first)
     await driver.sendAudioChunk(MOCK_AUDIO_CHUNK)
     await page.clock.runFor(TICK.sentence)
@@ -685,7 +693,50 @@ test.describe('Search highlight styling', () => {
       const el = document.querySelector('[data-index="1"]') as HTMLElement
       return el?.style.backgroundColor || ''
     })
-    expect(playbackOnOneBg).not.toContain('59, 130, 246')
-    expect(playbackOnOneBg).not.toContain('134, 239, 172')
+    expect(playbackOnOneBg).not.toContain('--search-current-bg')
+    expect(playbackOnOneBg).not.toContain('--search-match-bg')
+  })
+})
+
+test.describe('Transport readiness', () => {
+  // Play used to be live before onMount had opened the audio socket. A click in
+  // that window set the reader playing, audioStore.play() dropped it (no socket
+  // yet), and the reader snapped back to Paused — the click did nothing. That was
+  // the intermittent @critical failure: under load the first Play landed early.
+  test('@critical play waits for the audio connection instead of dropping the click', async ({ page }) => {
+    const driver = new WsDriver()
+    let releaseBook!: () => void
+    const bookHeld = new Promise<void>(resolve => { releaseBook = resolve })
+
+    await page.clock.install()
+    await page.addInitScript(AUDIO_CONTEXT_MOCK)
+    await page.route('**/*', async route => {
+      const url = route.request().url()
+      if (url.includes('/documents/') && url.includes('/sentences')) {
+        await route.fulfill({ json: MOCK_SENTENCES })
+      } else if (url.includes('/library/') && url.includes('/progress')) {
+        await route.fulfill({ json: { sentence_index: 0 } })
+      } else if (url.includes('/library/') && !url.includes('/progress')) {
+        // Held open: onMount awaits this before it initialises the audio store.
+        await bookHeld
+        await route.fulfill({
+          json: { id: 'test-book', title: 'Test Book', author: 'Test Author', file_type: 'pdf', page_count: 5 }
+        })
+      } else if (url.includes('/uploads/')) {
+        await route.fulfill({ status: 200, headers: { 'content-type': 'application/pdf' }, body: makeMinimalPdf() })
+      } else {
+        await route.continue()
+      }
+    })
+    await driver.install(page, 'test-book')
+    await page.goto('/reader/test-book')
+
+    await expect(playBtn(page)).toBeDisabled()
+
+    releaseBook()
+    await expect(playBtn(page)).toBeEnabled()
+    await playBtn(page).click()
+    await expect.poll(() => driver.actionsOf('play').length).toBeGreaterThan(0)
+    await expect(pauseBtn(page)).toBeVisible()
   })
 })

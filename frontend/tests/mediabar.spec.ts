@@ -23,7 +23,7 @@ test.describe('MediaBar Controls', () => {
         await route.fulfill({ json: { sentence_index: 0 } })
       } else if (url.includes('/library/') && !url.includes('/progress')) {
         await route.fulfill({
-          json: { id: 'book-1', title: 'Test Book', author: 'Test Author', file_type: 'PDF', page_count: 5 }
+          json: { id: 'book-1', title: 'Test Book', author: 'Test Author', file_type: 'pdf', page_count: 5 }
         })
       } else if (url.includes('/uploads/')) {
         await route.fulfill({
@@ -40,20 +40,20 @@ test.describe('MediaBar Controls', () => {
     await page.goto('/reader/book-1')
   })
 
-  test('play button toggles to pause', async ({ page }) => {
+  test('@critical play button toggles to pause', async ({ page }) => {
     await expect(page.getByRole('button', { name: 'Play' })).toBeVisible()
     await page.getByRole('button', { name: 'Play' }).click()
     await expect(page.getByRole('button', { name: 'Pause' })).toBeVisible()
   })
 
-  test('pause button toggles back to play', async ({ page }) => {
+  test('@critical pause button toggles back to play', async ({ page }) => {
     await page.getByRole('button', { name: 'Play' }).click()
     await expect(page.getByRole('button', { name: 'Pause' })).toBeVisible()
     await page.getByRole('button', { name: 'Pause' }).click()
     await expect(page.getByRole('button', { name: 'Play' })).toBeVisible()
   })
 
-  test('speed change highlights selected pill', async ({ page }) => {
+  test('@critical speed change highlights selected pill', async ({ page }) => {
     const group = speedGroup(page)
     await group.getByRole('button', { name: '1x' }).click()
     await expect(group.getByRole('button', { name: '1x' })).toHaveAttribute('aria-pressed', 'true')
@@ -62,7 +62,7 @@ test.describe('MediaBar Controls', () => {
     await expect(group.getByRole('button', { name: '1x' })).toHaveAttribute('aria-pressed', 'false')
   })
 
-  test('rewind sends seek with correct index', async ({ page }) => {
+  test('@critical rewind sends seek with correct index', async ({ page }) => {
     await page.getByRole('button', { name: 'Play' }).click()
     await driver.sendSentenceStart(5, 1)
     await driver.sendAudioChunk(MOCK_AUDIO_CHUNK)

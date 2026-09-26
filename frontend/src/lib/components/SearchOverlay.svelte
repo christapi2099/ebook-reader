@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Sentence } from '$lib/api'
+  import { overlayLayer } from '$lib/actions/overlay-layer'
 
   let {
     sentences,
@@ -55,30 +56,35 @@
       if (e.shiftKey) goPrev()
       else goNext()
     }
-    if (e.key === 'Escape') onClose()
+    // Escape is handled by the overlay stack, which routes it to the topmost layer.
   }
 </script>
 
-<div class="bg-white border-b border-slate-200 shadow-sm">
+<div
+  class="bg-surface border-b border-border shadow-1"
+  role="search"
+  use:overlayLayer={{ onClose, modal: false, initialFocus: 'input' }}
+>
   <div class="flex items-center gap-2 px-3 py-2">
-    <svg class="w-4 h-4 text-slate-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <svg class="w-4 h-4 text-fg-subtle flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
       <circle cx="11" cy="11" r="8" stroke-width="2" />
       <path stroke-linecap="round" stroke-width="2" d="m21 21-4.3-4.3" />
     </svg>
     <input
       type="text"
       placeholder="Search in book…"
+      aria-label="Search in book"
       bind:value={query}
       oninput={handleInput}
       onkeydown={handleKeydown}
-      class="flex-1 px-2 py-1.5 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-500"
+      class="flex-1 px-2 py-1.5 text-sm border border-border rounded-lg focus:outline-none focus:ring-1 focus:ring-focus-ring"
     />
     {#if matches.length > 0}
-      <span class="text-xs text-slate-500 tabular-nums whitespace-nowrap">
+      <span class="text-xs text-fg-muted tabular-nums whitespace-nowrap">
         {currentMatch + 1} / {matches.length}
       </span>
       <button
-        class="p-1 rounded hover:bg-slate-100 text-slate-500 disabled:opacity-30 transition-colors"
+        class="p-1 rounded hover:bg-surface-sunken text-fg-muted disabled:opacity-30 transition-colors"
         disabled={matches.length <= 1}
         onclick={goPrev}
         aria-label="Previous match"
@@ -88,7 +94,7 @@
         </svg>
       </button>
       <button
-        class="p-1 rounded hover:bg-slate-100 text-slate-500 disabled:opacity-30 transition-colors"
+        class="p-1 rounded hover:bg-surface-sunken text-fg-muted disabled:opacity-30 transition-colors"
         disabled={matches.length <= 1}
         onclick={goNext}
         aria-label="Next match"
@@ -98,7 +104,11 @@
         </svg>
       </button>
     {/if}
-    <button class="p-1 rounded hover:bg-slate-100 text-slate-400 transition-colors" onclick={onClose}>
+    <button
+      class="p-1 rounded hover:bg-surface-sunken text-fg-subtle transition-colors"
+      onclick={onClose}
+      aria-label="Close search"
+    >
       <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
       </svg>

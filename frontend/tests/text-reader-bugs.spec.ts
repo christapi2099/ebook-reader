@@ -143,8 +143,11 @@ test.describe('Text Reader Bug Fixes', () => {
     await expect(page.getByRole('button', { name: 'Play' })).toBeVisible({ timeout: 2000 })
   })
 
-  // Speed regression: WS play payload carries user-selected speed
-  for (const speed of [1.5, 2.0, 3.0]) {
+  // Speed regression: WS play payload carries user-selected speed.
+  // 3.0 was removed from the UI because Kokoro cannot deliver it (it saturates
+  // near 2.2x), so it is no longer selectable here; the payload contract this
+  // test guards is unchanged.
+  for (const speed of [1.5, 2.0]) {
     test(`BUG-speed: clicking sentence at ${speed}x sends correct speed to backend`, async ({ page }) => {
       await setupReadingMode(page)
       await page.getByRole('button', { name: `${speed}x` }).click()

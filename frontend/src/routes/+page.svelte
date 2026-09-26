@@ -10,6 +10,7 @@
   import UploadDialog from '$lib/components/UploadDialog.svelte'
   import SettingsOverlay from '$lib/components/SettingsOverlay.svelte'
   import { get } from 'svelte/store'
+  import Button from '$lib/ui/Button.svelte'
 
   let textarea = $state('')
   let isSubmitting = $state(false)
@@ -118,17 +119,13 @@
       <div class="w-full max-w-3xl space-y-6">
         <!-- Header with upload button -->
         <div class="flex items-center justify-between mb-4">
-          <h1 class="text-2xl font-bold text-slate-800">Text Reader</h1>
-          <button
-            onclick={() => uploadOpen = true}
-            class="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 flex items-center gap-2"
-            aria-label="Upload PDF/EPUB"
-          >
+          <h1 class="text-2xl font-bold text-fg">Text Reader</h1>
+          <Button onclick={() => uploadOpen = true} aria-label="Upload PDF/EPUB">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/>
             </svg>
             Upload
-          </button>
+          </Button>
         </div>
 
         <!-- Text area -->
@@ -136,13 +133,13 @@
           <textarea
             bind:value={textarea}
             placeholder="Paste or type your text here..."
-            class="w-full min-h-[200px] max-h-[50vh] p-4 border border-slate-300 rounded-lg resize-y focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-base leading-relaxed"
+            class="w-full min-h-[200px] max-h-[50vh] p-4 border border-border-strong rounded-lg resize-y focus:outline-none focus:ring-2 focus:ring-focus-ring focus:border-transparent text-base leading-relaxed"
             disabled={isSubmitting}
           ></textarea>
         </div>
 
         {#if error}
-          <div class="text-red-500 text-sm">{error}</div>
+          <div class="text-danger text-sm">{error}</div>
         {/if}
 
         <!-- Play button -->
@@ -150,7 +147,7 @@
           <button
             onclick={handleSubmit}
             disabled={!textarea.trim() || isSubmitting}
-            class="px-8 py-3 bg-blue-500 text-white rounded-full text-lg font-medium hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+            class="px-8 py-3 bg-accent text-accent-fg rounded-full text-lg font-medium hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
           >
             {#if isSubmitting}
               <svg class="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
@@ -173,12 +170,12 @@
 {:else}
   <div class="flex flex-col h-full">
     <!-- Header -->
-    <div class="border-b border-slate-200 bg-white">
+    <div class="border-b border-border bg-surface">
       <div class="flex items-center justify-between px-3 py-2">
         <div class="flex items-center gap-2">
           <button
             onclick={handleNewText}
-            class="p-2 rounded-md hover:bg-slate-100 text-slate-600"
+            class="p-2 rounded-md hover:bg-surface-sunken text-fg-muted"
             aria-label="New text"
           >
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -187,7 +184,7 @@
           </button>
           <button
             onclick={() => uploadOpen = true}
-            class="p-2 rounded-md hover:bg-slate-100 text-slate-600"
+            class="p-2 rounded-md hover:bg-surface-sunken text-fg-muted"
             aria-label="Upload file"
           >
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -199,13 +196,17 @@
           {#if !isSaved}
             <button
               onclick={handleSave}
-              class="px-3 py-1.5 text-sm text-blue-600 hover:bg-blue-50 rounded-md"
+              class="px-3 py-1.5 text-sm text-accent hover:bg-accent-soft rounded-md"
               aria-label="Save to library"
             >
               Save
             </button>
           {:else}
-            <span class="px-3 py-1.5 text-sm text-green-600 flex items-center gap-1">
+            <span
+              class="px-3 py-1.5 text-sm text-success flex items-center gap-1"
+              role="status"
+              aria-live="polite"
+            >
               <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
                 <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>
               </svg>
@@ -214,7 +215,7 @@
           {/if}
           <button
             onclick={() => settingsOpen = true}
-            class="p-2 rounded-md hover:bg-slate-100 text-slate-600"
+            class="p-2 rounded-md hover:bg-surface-sunken text-fg-muted"
             aria-label="Settings"
           >
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -230,13 +231,14 @@
       <AudioProgressBar
         sentences={sentences}
         currentIndex={audio.currentIndex}
+        elapsedSeconds={audio.elapsedSeconds}
+        sentenceDurations={audio.sentenceDurations}
         isPlaying={audio.isPlaying}
-        speed={audio.speed}
       />
     </div>
 
     <!-- Media controls -->
-    <div class="border-b border-slate-200 bg-white">
+    <div class="border-b border-border bg-surface">
       <div class="flex items-center justify-center gap-2 py-2 px-2">
         <MediaBar
           isPlaying={audio.isPlaying}
@@ -266,7 +268,7 @@
         onSentenceClick={handleSeek}
       />
     {:else}
-      <div class="flex-1 flex items-center justify-center text-slate-400">
+      <div class="flex-1 flex items-center justify-center text-fg-subtle">
         Loading sentences...
       </div>
     {/if}

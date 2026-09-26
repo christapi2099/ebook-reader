@@ -1,56 +1,19 @@
-"""Tests for the bookmarks router."""
-import pytest
-from fastapi.testclient import TestClient
-from sqlmodel import Session, SQLModel, create_engine
-from sqlalchemy.pool import StaticPool
-from unittest.mock import patch
+"""Tests for the bookmarks router.
 
-from main import app
-from db.database import get_session
-from services.base_engine import SentenceRecord as PdfSentence
-
-
-def _fake_sentences(n=5):
-    return [
-        PdfSentence(index=i, text=f"This is sentence number {i}.", page=i,
-                    x0=10.0, y0=float(i * 20), x1=400.0, y1=float(i * 20 + 15))
-        for i in range(n)
-    ]
-
-
-@pytest.fixture
-def db_engine():
-    from db.models import Book, Sentence, Progress
-    eng = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-    SQLModel.metadata.create_all(eng)
-    return eng
-
-
-@pytest.fixture
-def client(db_engine):
-    def override_session():
-        with Session(db_engine) as session:
-            yield session
-
-    app.dependency_overrides[get_session] = override_session
-
-    with patch("routers.documents.PDFEngine") as mock_pdf, \
-         patch("routers.documents.EPUBEngine") as mock_epub:
-        mock_pdf.return_value.extract_sentences.return_value = _fake_sentences()
-        mock_pdf.return_value.page_count.return_value = 3
-        mock_epub.return_value.extract_sentences.return_value = []
-
-        with TestClient(app, raise_server_exceptions=True) as c:
-            yield c
-
-    app.dependency_overrides.clear()
+The ``db_engine``/``client`` fixtures come from conftest.py; the copy that used to
+live here leaked ``app.dependency_overrides`` and its own engine into later files.
+"""
+from db.models import Bookmark
+from sqlmodel import Session, select
 
 
 def _upload(client):
-    return client.post(
+    response = client.post(
         "/documents/upload",
         files={"file": ("test.pdf", b"fakepdf", "application/pdf")},
-    ).json()["book_id"]
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["book_id"]
 
 
 class TestCreateBookmark:
@@ -87,12 +50,22 @@ class TestListBookmarks:
         r = client.get(f"/bookmarks/{bid}")
         assert r.json() == []
 
-    def test_list_returns_bookmarks_in_order(self, client):
+    def test_list_returns_bookmarks_in_order(self, client, db_engine):
+        """The list endpoint orders by (page, sentence_index), not insertion order."""
         bid = _upload(client)
         client.post("/bookmarks", json={"book_id": bid, "sentence_index": 3, "label": "Third"})
         client.post("/bookmarks", json={"book_id": bid, "sentence_index": 1, "label": "First"})
-        r = client.get(f"/bookmarks/{bid}")
-        assert len(r.json()) == 2
+
+        rows = client.get(f"/bookmarks/{bid}").json()
+        assert [row["sentence_index"] for row in rows] == [1, 3]
+        assert [row["label"] for row in rows] == ["First", "Third"]
+
+        # ...and that matches what the database holds, in the same order.
+        with Session(db_engine) as session:
+            stored = session.exec(
+                select(Bookmark).where(Bookmark.book_id == bid).order_by(Bookmark.sentence_index)
+            ).all()
+        assert [row.sentence_index for row in stored] == [1, 3]
 
 
 class TestDeleteBookmark:

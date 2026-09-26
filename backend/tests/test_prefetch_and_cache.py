@@ -205,10 +205,31 @@ class TestStreamJobCache:
             assert cached is not None
             assert cached.voice == "af_heart"
 
-    def test_duration_math_chunk_count_5_speed_15_333ms(self):
-        """Duration math unit test: chunk_count=5 speed=1.5 → duration_ms=333."""
-        chunk_count = 5
-        speed = 1.5
-        # Based on tts.py line 101: duration_ms = int(chunk_count * 100 / job.speed)
-        expected = int(chunk_count * 100 / speed)
-        assert expected == 333
+    @pytest.mark.asyncio
+    async def test_duration_ms_is_the_audio_length_not_scaled_by_speed(self, test_engine):
+        """5 chunks of 100 ms is 500 ms of audio, whatever speed produced it.
+
+        This replaces `assert int(5 * 100 / 1.5) == 333`, which exercised no
+        production code at all -- it asserted Python's own integer arithmetic --
+        and encoded the duration formula the router stopped using in 9eb454a.
+        The router now reports ``_sentence_meta["duration_ms"]``, which
+        ``stream_job`` derives from the audio Kokoro actually returned.
+        """
+        def five_chunk_kokoro(text, voice="af_heart", speed=1.0):
+            for _ in range(5):
+                yield (None, None, np.ones(2400, dtype=np.float32))
+
+        engine = TTSEngine(five_chunk_kokoro)
+        # A distinct text: `test_engine` is session-scoped, so reusing another
+        # test's text would serve this from the AudioCache instead of synthesizing.
+        job = SynthJob(
+            sentence_index=0, text="Five chunks at speed 1.5.", voice="af_heart", speed=1.5,
+        )
+
+        chunks = []
+        with patch('services.tts_engine._db.engine', test_engine):
+            async for chunk in engine.stream_job(job):
+                chunks.append(chunk)
+
+        assert len(chunks) == 5
+        assert engine._sentence_meta[0]["duration_ms"] == 500

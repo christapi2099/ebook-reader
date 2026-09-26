@@ -1,18 +1,40 @@
-"""TDD tests for services/pdf_engine.py."""
-import pytest
+"""TDD tests for services/pdf_engine.py.
+
+Requires ``~/Documents/EBooks/cleancodebook.pdf`` (see tests/README.md).
+
+The extraction runs **once per module**. Parsing the 462-page book with PyMuPDF
+and spaCy takes about a minute on this machine, and the old version asked for a
+fresh extraction in each of ten tests -- roughly eleven minutes of wall clock for
+these assertions alone. That is what made the full suite look like it had hung.
+No assertion was relaxed: every test still inspects the real extraction result,
+it just shares one.
+"""
 from pathlib import Path
-from services.pdf_engine import PDFEngine, sentence_bbox
+
+import pytest
+
 from services.base_engine import SentenceRecord
+from services.pdf_engine import PDFEngine, sentence_bbox
+
+CLEAN_CODE_PDF = Path.home() / "Documents/EBooks" / "cleancodebook.pdf"
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
+def clean_code_pdf():
+    if not CLEAN_CODE_PDF.exists():
+        pytest.skip(f"{CLEAN_CODE_PDF} not found (see tests/README.md)")
+    return CLEAN_CODE_PDF
+
+
+@pytest.fixture(scope="module")
 def engine():
     return PDFEngine()
 
 
-@pytest.fixture
-def clean_code_pdf():
-    return Path.home() / "Documents/EBooks/cleancodebook.pdf"
+@pytest.fixture(scope="module")
+def sentences(engine, clean_code_pdf):
+    """The parsed book, shared by every test in this module."""
+    return engine.extract_sentences(str(clean_code_pdf))
 
 
 class TestSentenceRecord:
@@ -32,53 +54,40 @@ class TestSentenceRecord:
 
 
 class TestExtractSentences:
-    def test_returns_list(self, engine, clean_code_pdf):
-        result = engine.extract_sentences(str(clean_code_pdf))
-        assert isinstance(result, list)
+    def test_returns_list(self, sentences):
+        assert isinstance(sentences, list)
 
-    def test_returns_sentence_records(self, engine, clean_code_pdf):
-        result = engine.extract_sentences(str(clean_code_pdf))
-        assert len(result) > 0
-        assert all(isinstance(s, SentenceRecord) for s in result)
+    def test_returns_sentence_records(self, sentences):
+        assert len(sentences) > 0
+        assert all(isinstance(s, SentenceRecord) for s in sentences)
 
-    def test_sentences_have_text(self, engine, clean_code_pdf):
-        result = engine.extract_sentences(str(clean_code_pdf))
-        assert all(len(s.text.strip()) > 0 for s in result)
+    def test_sentences_have_text(self, sentences):
+        assert all(len(s.text.strip()) > 0 for s in sentences)
 
-    def test_indices_are_sequential(self, engine, clean_code_pdf):
-        result = engine.extract_sentences(str(clean_code_pdf))
-        for i, s in enumerate(result):
+    def test_indices_are_sequential(self, sentences):
+        for i, s in enumerate(sentences):
             assert s.index == i
 
-    def test_page_numbers_valid(self, engine, clean_code_pdf):
-        result = engine.extract_sentences(str(clean_code_pdf))
-        assert all(s.page >= 0 for s in result)
+    def test_page_numbers_valid(self, sentences):
+        assert all(s.page >= 0 for s in sentences)
 
-    def test_bboxes_are_positive(self, engine, clean_code_pdf):
-        result = engine.extract_sentences(str(clean_code_pdf))
-        assert all(s.x0 >= 0 and s.y0 >= 0 for s in result)
-        assert all(s.x1 > s.x0 and s.y1 > s.y0 for s in result)
+    def test_bboxes_are_positive(self, sentences):
+        assert all(s.x0 >= 0 and s.y0 >= 0 for s in sentences)
+        assert all(s.x1 > s.x0 and s.y1 > s.y0 for s in sentences)
 
-    def test_finds_expected_prose(self, engine, clean_code_pdf):
-        result = engine.extract_sentences(str(clean_code_pdf))
-        texts = " ".join(s.text for s in result)
+    def test_finds_expected_prose(self, sentences):
+        texts = " ".join(s.text for s in sentences)
         assert "clean code" in texts.lower()
 
     def test_raises_on_missing_file(self, engine):
         with pytest.raises(FileNotFoundError):
             engine.extract_sentences("/nonexistent/path.pdf")
 
-    def test_sentences_include_words_field(self, engine, clean_code_pdf):
-        if not clean_code_pdf.exists():
-            pytest.skip("clean_code.pdf not found")
-        result = engine.extract_sentences(str(clean_code_pdf))
-        assert all(hasattr(s, 'words') and isinstance(s.words, list) for s in result)
+    def test_sentences_include_words_field(self, sentences):
+        assert all(hasattr(s, 'words') and isinstance(s.words, list) for s in sentences)
 
-    def test_single_word_sentence_bbox_is_tight(self, engine, clean_code_pdf):
-        if not clean_code_pdf.exists():
-            pytest.skip("clean_code.pdf not found")
-        result = engine.extract_sentences(str(clean_code_pdf))
-        single_word_sentences = [s for s in result if len(s.words) == 1]
+    def test_single_word_sentence_bbox_is_tight(self, sentences):
+        single_word_sentences = [s for s in sentences if len(s.words) == 1]
         if not single_word_sentences:
             pytest.skip("No single word sentences found for testing")
         s = single_word_sentences[0]

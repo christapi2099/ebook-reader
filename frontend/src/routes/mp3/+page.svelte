@@ -3,6 +3,8 @@
   import { getExports, exportMP3, deleteExport, getVoices, API_BASE } from '$lib/api'
   import type { Book, Voice, ExportItem } from '$lib/api'
   import { getLibrary } from '$lib/api'
+  import Button from '$lib/ui/Button.svelte'
+  import Dialog from '$lib/ui/Dialog.svelte'
 
   let exports = $state<ExportItem[]>([])
   let books = $state<Book[]>([])
@@ -88,21 +90,16 @@
 
 <div class="p-4 md:p-6">
   <div class="flex items-center justify-between mb-6">
-    <h1 class="text-xl md:text-2xl font-bold text-slate-800">MP3 Exports</h1>
-    <button
-      class="px-3 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 font-medium transition-colors text-sm"
-      onclick={() => (showDialog = true)}
-    >
-      + New Export
-    </button>
+    <h1 class="text-xl md:text-2xl font-bold text-fg">MP3 Exports</h1>
+    <Button size="sm" onclick={() => (showDialog = true)}>+ New Export</Button>
   </div>
 
   {#if error}
-    <div class="mb-4 p-3 bg-red-50 text-red-600 rounded-lg text-sm">{error}</div>
+    <div class="mb-4 p-3 bg-danger-soft text-danger rounded-lg text-sm">{error}</div>
   {/if}
 
   {#if loading}
-    <div class="flex items-center gap-2 text-slate-500">
+    <div class="flex items-center gap-2 text-fg-muted">
       <svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
         <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
         <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"></path>
@@ -110,51 +107,47 @@
       Loading exports…
     </div>
   {:else if exports.length === 0}
-    <div class="flex flex-col items-center justify-center py-20 text-slate-400">
+    <div class="flex flex-col items-center justify-center py-20 text-fg-subtle">
       <svg class="w-16 h-16 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 19V6l12-3v13M9 9l12-2M9 13l12-2" />
       </svg>
       <p class="text-lg font-medium">No exports yet</p>
       <p class="text-sm mt-1">Export a book as MP3 to listen offline</p>
-      <button
-        class="mt-4 px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 font-medium transition-colors"
-        onclick={() => (showDialog = true)}
-      >
-        Export a Book
-      </button>
+      <Button class="mt-4" onclick={() => (showDialog = true)}>Export a Book</Button>
     </div>
   {:else}
     <div class="space-y-2">
       {#each exports as exp (exp.id)}
-        <div class="flex items-center justify-between p-3 bg-white border border-slate-200 rounded-lg">
+        <div class="flex items-center justify-between p-3 bg-surface border border-border rounded-lg">
           <div class="flex-1 min-w-0">
-            <p class="font-medium text-slate-800 text-sm truncate">{exp.book_title}</p>
-            <p class="text-xs text-slate-500">{exp.voice} · {exp.speed}x · {formatDate(exp.created_at)}</p>
+            <p class="font-medium text-fg text-sm truncate">{exp.book_title}</p>
+            <p class="text-xs text-fg-muted">{exp.voice} · {exp.speed}x · {formatDate(exp.created_at)}</p>
           </div>
           <div class="flex items-center gap-3 ml-3">
             {#if exp.status === 'done'}
-              <span class="text-xs text-green-600 font-medium">{formatSize(exp.file_size)}</span>
+              <span class="text-xs text-success font-medium">{formatSize(exp.file_size)}</span>
               <a
                 href={`${API_BASE}/mp3/downloads/${exp.id}`}
-                class="px-3 py-1 text-xs font-medium bg-blue-50 text-blue-600 rounded-lg hover:bg-blue-100 transition-colors"
+                class="px-3 py-1 text-xs font-medium bg-accent-soft text-accent rounded-lg hover:bg-accent/20 transition-colors"
                 download
               >
                 Download
               </a>
             {:else if exp.status === 'processing' || exp.status === 'pending'}
               <div class="flex items-center gap-2">
-                <svg class="w-3.5 h-3.5 animate-spin text-blue-500" fill="none" viewBox="0 0 24 24">
+                <svg class="w-3.5 h-3.5 animate-spin text-accent" fill="none" viewBox="0 0 24 24">
                   <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
                   <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"></path>
                 </svg>
-                <span class="text-xs text-blue-600">{exp.progress}%</span>
+                <span class="text-xs text-accent">{exp.progress}%</span>
               </div>
             {:else if exp.status === 'error'}
-              <span class="text-xs text-red-500" title={exp.error_message ?? ''}>Error</span>
+              <span class="text-xs text-danger" title={exp.error_message ?? ''}>Error</span>
             {/if}
             <button
-              class="p-1 rounded hover:bg-slate-100 text-slate-400 hover:text-red-500 transition-colors"
+              class="p-1 rounded hover:bg-surface-sunken text-fg-subtle hover:text-danger transition-colors"
               onclick={() => handleDeleteExport(exp.id)}
+              aria-label={`Delete export of ${exp.book_title}`}
             >
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
@@ -168,55 +161,62 @@
 </div>
 
 {#if showDialog}
-  <div class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center" onclick={() => (showDialog = false)}>
-    <div class="bg-white rounded-xl p-6 max-w-md w-full shadow-xl mx-4" onclick={(e) => e.stopPropagation()}>
-      <h2 class="text-lg font-bold text-slate-800 mb-4">Export as MP3</h2>
+  <Dialog
+    titleId="mp3-export-title"
+    onClose={() => (showDialog = false)}
+    closeOnBackdrop
+    initialFocus="#book-select"
+  >
+    <div class="bg-surface rounded-xl p-6 max-w-md w-full shadow-3 mx-4">
+      <h2 id="mp3-export-title" class="text-lg font-bold text-fg mb-4">Export as MP3</h2>
 
-      <label for="book-select" class="block text-sm font-medium text-slate-700 mb-1">Book</label>
-      <select id="book-select" bind:value={selectedBookId} class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm mb-3">
+      <label for="book-select" class="block text-sm font-medium text-fg mb-1">Book</label>
+      <select id="book-select" bind:value={selectedBookId} class="w-full px-3 py-2 border border-border-strong bg-surface text-fg rounded-lg text-sm mb-3">
         <option value="">Select a book…</option>
         {#each books as book}
           <option value={book.id}>{book.title}</option>
         {/each}
       </select>
 
-      <label for="voice-select" class="block text-sm font-medium text-slate-700 mb-1">Voice</label>
-      <select id="voice-select" bind:value={selectedVoice} class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm mb-3">
+      <label for="voice-select" class="block text-sm font-medium text-fg mb-1">Voice</label>
+      <select id="voice-select" bind:value={selectedVoice} class="w-full px-3 py-2 border border-border-strong bg-surface text-fg rounded-lg text-sm mb-3">
         {#each voices as voice}
           <option value={voice.id}>{voice.name} ({voice.id})</option>
         {/each}
       </select>
 
-      <label id="speed-label" for="speed-group" class="block text-sm font-medium text-slate-700 mb-1">Speed</label>
+      <label id="speed-label" for="speed-group" class="block text-sm font-medium text-fg mb-1">Speed</label>
       <div id="speed-group" class="flex gap-1 mb-4" role="radiogroup" aria-labelledby="speed-label">
         {#each speeds as s}
-          <button
-            class="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors {selectedSpeed === s ? 'bg-blue-500 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}"
+          <Button
+            size="sm"
+            variant={selectedSpeed === s ? 'primary' : 'ghost'}
             onclick={() => (selectedSpeed = s)}
             role="radio"
             aria-checked={selectedSpeed === s}
             aria-label={`${s}x speed`}
           >
             {s}x
-          </button>
+          </Button>
         {/each}
       </div>
 
       <div class="flex gap-2">
-        <button
-          class="flex-1 px-4 py-2 bg-slate-100 text-slate-700 rounded-lg hover:bg-slate-200 font-medium transition-colors text-sm"
+        <Button
+          variant="secondary"
+          class="flex-1"
           onclick={() => (showDialog = false)}
         >
           Cancel
-        </button>
-        <button
-          class="flex-1 px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 font-medium transition-colors text-sm disabled:opacity-50"
+        </Button>
+        <Button
+          class="flex-1"
           disabled={!selectedBookId || exporting}
           onclick={handleExport}
         >
           {exporting ? 'Exporting…' : 'Export'}
-        </button>
+        </Button>
       </div>
     </div>
-  </div>
+  </Dialog>
 {/if}

@@ -1,284 +1,187 @@
+"""WebSocket protocol tests against a minimal app that mounts only the TTS router.
+
+Unlike tests/test_websocket_integration.py -- which drives ``main.app`` including
+its lifespan -- these tests prove the handler is self-contained: no database
+bootstrap, no Kokoro initialisation, no dependency overrides. That is also how
+uvicorn serves it, so the handler must not depend on the application's startup
+wiring.
+
+The engine and the fake pipeline come from conftest (``ws_engine``,
+``seed_book``, ``fake_kokoro``); ``ws_engine`` swaps ``db.database.engine``
+through ``monkeypatch``, so nothing is left pointing at a dead temp database
+when the test finishes.
+"""
 import json
-from datetime import datetime, UTC
 
 import numpy as np
 import pytest
 from fastapi import FastAPI
-from sqlalchemy.pool import StaticPool
-from sqlmodel import SQLModel, Session, create_engine
-from starlette.testclient import TestClient
+from fastapi.testclient import TestClient
 
-import db.database as _db
-from db.models import Book, Sentence
 from routers import tts as tts_router
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _make_engine():
-    """In-memory SQLite engine that shares a single connection across all
-    sessions (StaticPool).  Without this, each Session opens a fresh connection
-    to ``sqlite:///:memory:`` and gets a *different* empty database."""
-    return create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
+SENTENCE_SAMPLES = 2400  # 100 ms at 24 kHz
+DEFAULT_BOOK = "test-book"
 
 
-def _make_app():
-    """Build a minimal FastAPI app wired to the TTS router."""
-    app = FastAPI()
-    app.include_router(tts_router.router)
-    return app
+def _play(index=0, *, speed=1.0, session_id=1, action="play"):
+    key = "from_index" if action == "play" else "to_index"
+    return {"action": action, key: index, "voice": "af_heart", "speed": speed, "session_id": session_id}
 
 
-def _make_kokoro(samples_per_result: int = 2400):
-    """Return a fake Kokoro callable that yields 3-tuples like the real one.
+def _texts(messages):
+    return [m["data"] for m in messages if m["channel"] == "text"]
 
-    Each invocation returns a single (graphemes, phonemes, ndarray) where the
-    ndarray has *samples_per_result* samples.  With sample_rate=24000 and
-    chunk = sample_rate // 10 = 2400, this produces
-    ``ceil(samples_per_result / 2400)`` binary WAV chunks.
-    """
+
+def _chunks(messages):
+    return [m["data"] for m in messages if m["channel"] == "bytes"]
+
+
+def _kokoro_with(samples_per_result, *, speed_aware=False):
+    """Fake pipeline yielding one result per call."""
+
     def kokoro(text, voice="af_heart", speed=1.0):
-        return [(None, None, np.ones(samples_per_result, dtype=np.float32))]
+        count = samples_per_result
+        if speed_aware:
+            count = int(round(samples_per_result / (float(speed) or 1.0)))
+        yield (None, None, np.ones(max(1, count), dtype=np.float32))
+
     return kokoro
 
 
-def _seed(engine, book_id="book-1", sentences=None):
-    """Insert a Book + Sentence rows."""
-    if sentences is None:
-        sentences = [
-            {"index": 0, "text": "Hello world.", "page": 1,
-             "x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0, "filtered": False},
-            {"index": 1, "text": "Second sentence.", "page": 1,
-             "x0": 0.0, "y0": 2.0, "x1": 1.0, "y1": 3.0, "filtered": False},
-            {"index": 2, "text": "Third sentence.", "page": 1,
-             "x0": 0.0, "y0": 4.0, "x1": 1.0, "y1": 5.0, "filtered": False},
-        ]
-    with Session(engine) as session:
-        session.add(Book(
-            id=book_id,
-            title="Test Book",
-            file_path="/tmp/test.pdf",
-            file_type="pdf",
-            page_count=1,
-            created_at=datetime.now(UTC),
-        ))
-        for s in sentences:
-            session.add(Sentence(book_id=book_id, **s))
-        session.commit()
+@pytest.fixture
+def mimo_client(ws_engine, seed_book, fake_kokoro, monkeypatch):
+    """A TestClient for a router-only app with a seeded three-sentence book."""
+    seed_book(ws_engine)
+    monkeypatch.setattr(tts_router, "_kokoro", fake_kokoro)
+
+    app = FastAPI()
+    app.include_router(tts_router.router)
+    with TestClient(app, raise_server_exceptions=True) as client:
+        yield client
 
 
-@pytest.fixture()
-def ws_app():
-    """Create an in-memory engine, seed data, inject mock, return TestClient."""
-    engine = _make_engine()
-    SQLModel.metadata.create_all(engine)
+def test_play_returns_sentence_start_then_chunks_then_end(mimo_client, ws_read):
+    """Ordering: sentence_start -> binary chunks -> sentence_end, per sentence."""
+    with mimo_client.websocket_connect(f"/ws/tts/{DEFAULT_BOOK}") as ws:
+        ws.send_json(_play(0, session_id=1))
+        messages = ws_read(ws, until=("complete",))
 
-    # Patch engine in both modules that use it at call-time
-    tts_router._db.engine = engine
-    import services.tts_engine as _tts_mod
-    _tts_mod._db.engine = engine
-
-    tts_router.set_kokoro(_make_kokoro())
-    _seed(engine)
-
-    app = _make_app()
-    client = TestClient(app)
-    yield client
-    client.close()
-
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-
-def test_play_returns_sentence_start_then_chunks_then_end(ws_app):
-    """Ordering: sentence_start → binary chunks → sentence_end for each sentence."""
-    with ws_app.websocket_connect("/ws/tts/book-1") as ws:
-        ws.send_json({"action": "play", "from_index": 0,
-                       "voice": "af_heart", "speed": 1.0, "session_id": 1})
-
-        for expected_index in range(3):
-            msg = ws.receive_text()
-            data = json.loads(msg)
-            assert data["type"] == "sentence_start"
-            assert data["index"] == expected_index
-
-            # One binary chunk (2400 samples = 1 chunk)
-            chunk = ws.receive_bytes()
-            assert isinstance(chunk, bytes) and len(chunk) > 0
-
-            msg = ws.receive_text()
-            data = json.loads(msg)
-            assert data["type"] == "sentence_end"
-            assert data["index"] == expected_index
-
-        # trailing complete
-        msg = ws.receive_text()
-        assert json.loads(msg)["type"] == "complete"
+    text = _texts(messages)
+    assert [m["type"] for m in text] == [
+        "sentence_start",
+        "sentence_end",
+        "sentence_start",
+        "sentence_end",
+        "sentence_start",
+        "sentence_end",
+        "complete",
+    ]
+    assert [m["index"] for m in text if m["type"] == "sentence_start"] == [0, 1, 2]
+    assert len(_chunks(messages)) == 3
+    # Every sentence_start is followed by its audio before its sentence_end.
+    assert messages[0]["channel"] == "text"
+    assert messages[1]["channel"] == "bytes"
 
 
-def test_duration_ms_formula_speed_15(ws_app):
-    """speed=1.5, check duration_ms == int(chunk_count * 100 / 1.5)."""
-    # 7200 samples → 3 chunks (ceil(7200/2400))
-    tts_router.set_kokoro(_make_kokoro(samples_per_result=7200))
+def test_duration_ms_is_the_real_audio_length(mimo_client, monkeypatch, ws_read):
+    """7200 samples is 300 ms at 24 kHz, whatever speed was requested.
 
-    with ws_app.websocket_connect("/ws/tts/book-1") as ws:
-        ws.send_json({"action": "play", "from_index": 0,
-                       "voice": "af_heart", "speed": 1.5, "session_id": 2})
+    This replaced an assertion of ``int(chunks * 100 / speed)`` == 200, which
+    encoded the pre-9eb454a formula. Since 9eb454a the router reports the length
+    of the audio ``stream_job`` actually produced (``_sentence_meta``), so the
+    correct expectation is derived from the sample count the fake returned.
+    """
+    monkeypatch.setattr(tts_router, "_kokoro", _kokoro_with(7200))
 
-        # Consume sentence_start + chunk for first sentence
-        msg = json.loads(ws.receive_text())
-        assert msg["type"] == "sentence_start"
-        ws.receive_bytes()  # chunk 1
-        ws.receive_bytes()  # chunk 2
-        ws.receive_bytes()  # chunk 3
+    with mimo_client.websocket_connect(f"/ws/tts/{DEFAULT_BOOK}") as ws:
+        ws.send_json(_play(0, speed=1.5, session_id=2))
+        messages = ws_read(ws, until=("sentence_end",))
 
-        msg = json.loads(ws.receive_text())
-        assert msg["type"] == "sentence_end"
-        chunk_count = 3
-        expected = int(chunk_count * 100 / 1.5)
-        assert msg["duration_ms"] == expected
+    assert len(_chunks(messages)) == 3, "7200 samples is three 2400-sample chunks"
+    ends = [m for m in _texts(messages) if m["type"] == "sentence_end"]
+    assert len(ends) == 1
+    assert ends[0]["duration_ms"] == 7200 / 24000 * 1000
 
 
-def test_seek_starts_from_correct_sentence(ws_app):
-    """Seek to index 1 — first sentence_start.index must be 1."""
-    with ws_app.websocket_connect("/ws/tts/book-1") as ws:
-        ws.send_json({"action": "seek", "to_index": 1,
-                       "voice": "af_heart", "speed": 1.0, "session_id": 3})
+def test_duration_scales_with_speed_because_kokoro_returns_shorter_audio(mimo_client, monkeypatch, ws_read):
+    """Same requested sentence at two speeds: the reported duration differs by
+    exactly the ratio of the audio lengths Kokoro returned."""
+    durations = {}
+    with mimo_client.websocket_connect(f"/ws/tts/{DEFAULT_BOOK}") as ws:
+        for speed in (1.0, 2.0):
+            monkeypatch.setattr(tts_router, "_kokoro", _kokoro_with(SENTENCE_SAMPLES, speed_aware=True))
+            ws.send_json(_play(0, speed=speed, session_id=int(speed * 10)))
+            ends = [
+                m
+                for m in _texts(ws_read(ws, until=("complete",)))
+                if m["type"] == "sentence_end"
+            ]
+            durations[speed] = [m["duration_ms"] for m in ends]
 
-        msg = json.loads(ws.receive_text())
-        assert msg["type"] == "sentence_start"
-        assert msg["index"] == 1
-
-
-def test_session_id_matches_in_all_messages(ws_app):
-    """All text messages carry session_id == 99."""
-    with ws_app.websocket_connect("/ws/tts/book-1") as ws:
-        ws.send_json({"action": "play", "from_index": 0,
-                       "voice": "af_heart", "speed": 1.0, "session_id": 99})
-
-        # Drain all messages until complete
-        while True:
-            raw = ws.receive_text()
-            data = json.loads(raw)
-            assert data["session_id"] == 99
-            if data["type"] == "complete":
-                break
-            # binary chunk(s) between sentence_start and sentence_end
-            while True:
-                try:
-                    ws.receive_bytes()
-                except Exception:
-                    break
+    assert durations[1.0] == [100, 100, 100]
+    assert durations[2.0] == [50, 50, 50]
 
 
-def test_complete_message_received(ws_app):
-    """Playing to the end of the book yields a {type:'complete'} message."""
-    with ws_app.websocket_connect("/ws/tts/book-1") as ws:
-        ws.send_json({"action": "play", "from_index": 0,
-                       "voice": "af_heart", "speed": 1.0, "session_id": 4})
+def test_seek_starts_from_correct_sentence(mimo_client, ws_read):
+    with mimo_client.websocket_connect(f"/ws/tts/{DEFAULT_BOOK}") as ws:
+        ws.send_json(_play(1, session_id=3, action="seek"))
+        messages = ws_read(ws, until=("sentence_start",))
 
-        got_complete = False
-        for _ in range(100):  # safety bound
-            raw = ws.receive_text()
-            data = json.loads(raw)
-            if data["type"] == "complete":
-                got_complete = True
-                break
-            # skip binary chunk(s)
-            while True:
-                try:
-                    ws.receive_bytes()
-                except Exception:
-                    break
-        assert got_complete, "Never received complete message"
+    starts = [m["index"] for m in _texts(messages) if m["type"] == "sentence_start"]
+    assert starts == [1]
 
 
-def test_play_after_seek_uses_new_session(ws_app):
-    """Seek with session_id=5, then play with session_id=6.
-    Once session 6 messages start arriving, no session_id=5 may appear."""
-    with ws_app.websocket_connect("/ws/tts/book-1") as ws:
-        # First: seek with session 5
-        ws.send_json({"action": "seek", "to_index": 0,
-                       "voice": "af_heart", "speed": 1.0, "session_id": 5})
+def test_session_id_matches_in_all_messages(mimo_client, ws_read):
+    with mimo_client.websocket_connect(f"/ws/tts/{DEFAULT_BOOK}") as ws:
+        ws.send_json(_play(0, session_id=99))
+        messages = ws_read(ws, until=("complete",))
 
-        # Immediately send play with session 6 (this cancels session 5)
-        ws.send_json({"action": "play", "from_index": 0,
-                       "voice": "af_heart", "speed": 1.0, "session_id": 6})
-
-        # Drain messages until we see session 6, then verify no session 5 leaks
-        seen_session_6 = False
-        for _ in range(200):
-            msg = ws.receive()
-            # Binary messages from interrupted seek — skip
-            if "bytes" in msg:
-                continue
-            data = json.loads(msg["text"])
-
-            if data["session_id"] == 6:
-                seen_session_6 = True
-
-            if seen_session_6:
-                assert data["session_id"] != 5, (
-                    f"Got stale session_id=5 after session 6 started: {data}"
-                )
-
-            if data["type"] == "complete":
-                break
-
-        assert seen_session_6, "Never received any session_id=6 message"
+    text = _texts(messages)
+    assert text[-1]["type"] == "complete"
+    assert {m["session_id"] for m in text} == {99}
 
 
-def test_filtered_sentences_not_sent(ws_app):
-    """A filtered sentence (index 1) must not appear as sentence_start."""
-    # Insert an extra book with one filtered sentence
-    engine = tts_router._db.engine
-    with Session(engine) as session:
-        session.add(Book(
-            id="book-filtered",
-            title="Filtered Book",
-            file_path="/tmp/filtered.pdf",
-            file_type="pdf",
-            page_count=1,
-            created_at=datetime.now(UTC),
-        ))
-        session.add(Sentence(
-            book_id="book-filtered", index=0, text="Visible.", page=1,
-            x0=0.0, y0=0.0, x1=1.0, y1=1.0, filtered=False,
-        ))
-        session.add(Sentence(
-            book_id="book-filtered", index=1, text="Filtered out.", page=1,
-            x0=0.0, y0=2.0, x1=1.0, y1=3.0, filtered=True,
-        ))
-        session.add(Sentence(
-            book_id="book-filtered", index=2, text="Also visible.", page=1,
-            x0=0.0, y0=4.0, x1=1.0, y1=5.0, filtered=False,
-        ))
-        session.commit()
+def test_complete_message_received(mimo_client, ws_read):
+    with mimo_client.websocket_connect(f"/ws/tts/{DEFAULT_BOOK}") as ws:
+        ws.send_json(_play(0, session_id=4))
+        messages = ws_read(ws, until=("complete",))
 
-    with ws_app.websocket_connect("/ws/tts/book-filtered") as ws:
-        ws.send_json({"action": "play", "from_index": 0,
-                       "voice": "af_heart", "speed": 1.0, "session_id": 7})
+    kinds = [m["type"] for m in _texts(messages)]
+    assert kinds.count("complete") == 1, f"expected exactly one complete, got {kinds}"
 
-        seen_indices = []
-        for _ in range(100):
-            raw = ws.receive_text()
-            data = json.loads(raw)
-            if data["type"] == "sentence_start":
-                seen_indices.append(data["index"])
-            if data["type"] == "complete":
-                break
-            # drain binary
-            while True:
-                try:
-                    ws.receive_bytes()
-                except Exception:
-                    break
 
-        assert 1 not in seen_indices, f"Filtered index 1 appeared in {seen_indices}"
-        assert seen_indices == [0, 2]
+def test_play_after_seek_uses_new_session(mimo_client, ws_read):
+    """Session 6 supersedes session 5: once 6 starts, no 5 message may follow."""
+    with mimo_client.websocket_connect(f"/ws/tts/{DEFAULT_BOOK}") as ws:
+        ws.send_json(_play(0, session_id=5, action="seek"))
+        ws.send_json(_play(0, session_id=6))
+        messages = ws_read(ws, until=("complete",))
+
+    text = _texts(messages)
+    assert any(m["session_id"] == 6 for m in text), "session 6 produced nothing"
+    first_six = next(i for i, m in enumerate(text) if m["session_id"] == 6)
+    stale = [m for m in text[first_six:] if m["session_id"] == 5]
+    assert stale == [], f"stale session 5 messages after session 6 started: {stale}"
+    assert text[-1] == {"type": "complete", "session_id": 6}
+
+
+def test_filtered_sentences_not_sent(ws_engine, seed_book, fake_kokoro, monkeypatch, ws_read):
+    sentences = [
+        {"index": 0, "text": "Visible."},
+        {"index": 1, "text": "Filtered out.", "filtered": True},
+        {"index": 2, "text": "Also visible."},
+    ]
+    seed_book(ws_engine, book_id="book-filtered", sentences=sentences)
+    monkeypatch.setattr(tts_router, "_kokoro", fake_kokoro)
+
+    app = FastAPI()
+    app.include_router(tts_router.router)
+    with TestClient(app, raise_server_exceptions=True) as client:
+        with client.websocket_connect("/ws/tts/book-filtered") as ws:
+            ws.send_json(_play(0, session_id=7))
+            messages = ws_read(ws, until=("complete",))
+
+    starts = [m["index"] for m in _texts(messages) if m["type"] == "sentence_start"]
+    assert starts == [0, 2], f"filtered index 1 appeared in {starts}"
+    assert len(_chunks(messages)) == 2, "no audio may be synthesized for a filtered sentence"

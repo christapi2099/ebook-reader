@@ -8,7 +8,39 @@ export interface AudioState {
   currentWordIndex: number
   voice: string
   buffering: boolean
+  /**
+   * Real seconds of audio already played at the current position: the summed
+   * backend-reported duration of every earlier sentence plus the elapsed part of
+   * the sentence playing now. Derived from real clocks only — never estimated.
+   */
+  elapsedSeconds: number
+  /**
+   * Real per-sentence durations in seconds, keyed by sentence index, exactly as
+   * the backend reported them in `sentence_end.duration_ms`. Sentences the
+   * backend has not synthesised yet are absent rather than guessed at.
+   */
+  sentenceDurations: Record<number, number>
 }
+
+/**
+ * A rate the engine refused, and the one it used instead — both as the backend
+ * reported them in its `speed_unavailable` message.
+ */
+export interface SpeedDowngrade {
+  requested: number
+  effective: number
+}
+
+/**
+ * The engine's own answer when it cannot honour a requested playback rate.
+ *
+ * `null` means "the engine has not refused anything on this connection". It is
+ * a plain store beside the playback state because the MediaBar has to override
+ * its `speed` prop with it: the reader route passes the reader store's speed and
+ * cannot be asked to thread this through, but the highlighted rate must not be
+ * a rate the reader is not getting.
+ */
+export const speedDowngradeStore = writable<SpeedDowngrade | null>(null)
 
 function createAudioStore() {
   const { subscribe, set, update } = writable<AudioState>({
@@ -18,6 +50,8 @@ function createAudioStore() {
     currentWordIndex: -1,
     voice: 'af_heart',
     buffering: false,
+    elapsedSeconds: 0,
+    sentenceDurations: {},
   })
 
   let ctx: AudioContext | null = null
@@ -56,11 +90,19 @@ function createAudioStore() {
   let receivingSentenceIndex = -1
   let wordTimings: Map<number, WordTimestamp[]> = new Map()
 
+  // Real per-sentence durations reported by the backend. These describe the book
+  // at the current speed, not the playback session, so they survive pause and
+  // seek — but they are discarded when the speed changes, because Kokoro's
+  // native `speed` parameter changes the rendered duration of every sentence.
+  let sentenceDurations: Map<number, number> = new Map()
+  let elapsedSeconds = 0
+
   const SPEED_CHANGE_DEBOUNCE_MS = 200
   const SENTENCE_TIMING_OFFSET_S = 0.016
 
   let lastScheduledIndex = -1
   let speedChangeTimer: ReturnType<typeof setTimeout> | null = null
+  let prefetchSpeedTimer: ReturnType<typeof setTimeout> | null = null
   let pendingSpeed = 0
 
   let rafId: number | null = null
@@ -68,6 +110,44 @@ function createAudioStore() {
   function getCtx(): AudioContext {
     if (!ctx || ctx.state === 'closed') ctx = new AudioContext()
     return ctx
+  }
+
+  function snapshotDurations(): Record<number, number> {
+    const out: Record<number, number> = {}
+    for (const [index, seconds] of sentenceDurations) out[index] = seconds
+    return out
+  }
+
+  /**
+   * Real elapsed audio at `index`: the summed backend-reported duration of every
+   * sentence before it, plus the part of `index` that has actually been played
+   * according to the AudioContext clock. Sentences whose duration has not been
+   * reported yet contribute 0 — unknown, never estimated.
+   */
+  function computeElapsedSeconds(index: number): number {
+    let elapsed = 0
+    for (const [i, duration] of sentenceDurations) {
+      if (i < index) elapsed += duration
+    }
+    const ac = ctx
+    const startedAt = sentenceTimings.get(index)
+    const duration = sentenceDurations.get(index)
+    if (ac && startedAt !== undefined && duration !== undefined) {
+      elapsed += Math.min(Math.max(ac.currentTime - startedAt, 0), duration)
+    }
+    return elapsed
+  }
+
+  /**
+   * Publish elapsed audio for the sentence now playing. Called from the rAF tick,
+   * so a paused player stops advancing and a seek recomputes from the new
+   * position instead of interpolating from a stale value.
+   */
+  function publishElapsedSeconds(index: number): void {
+    const next = computeElapsedSeconds(index)
+    if (Math.abs(next - elapsedSeconds) < 0.1) return
+    elapsedSeconds = next
+    update(s => ({ ...s, elapsedSeconds }))
   }
 
   function startRaf() {
@@ -123,6 +203,8 @@ function createAudioStore() {
           return next
         })
       }
+
+      publishElapsedSeconds(latestReady >= 0 ? latestReady : s.currentIndex)
 
       rafId = requestAnimationFrame(tick)
     }
@@ -200,6 +282,7 @@ function createAudioStore() {
     generation++
     cancelled = true
     if (speedChangeTimer) { clearTimeout(speedChangeTimer); speedChangeTimer = null }
+    if (prefetchSpeedTimer) { clearTimeout(prefetchSpeedTimer); prefetchSpeedTimer = null }
     pendingSpeed = 0
     stopRaf()
     for (const { node } of activeNodes) {
@@ -229,6 +312,14 @@ function createAudioStore() {
     subscribe,
 
     init(bid: string) {
+      // Durations describe a book at a speed, so a new book starts from nothing.
+      sentenceDurations = new Map()
+      elapsedSeconds = 0
+      update(s => ({ ...s, elapsedSeconds: 0, sentenceDurations: {} }))
+      // A new connection means a new engine session: whatever rate the previous
+      // one refused says nothing about this one.
+      speedDowngradeStore.set(null)
+
       socket = new TTSSocket(bid)
 
       socket.onAudioChunk = (bytes: ArrayBuffer) => {
@@ -247,10 +338,16 @@ function createAudioStore() {
         receivingSentenceIndex = index
       }
 
-      socket.onSentenceEnd = (_index: number, _durationMs: number, sid: number, wordTimestamps?: WordTimestamp[]) => {
+      socket.onSentenceEnd = (index: number, durationMs: number, sid: number, wordTimestamps?: WordTimestamp[]) => {
         if (sid !== sessionId) return
+        // Real rendered length of this sentence at the current speed. This is the
+        // only source of duration in the app — nothing extrapolates from it.
+        if (Number.isFinite(durationMs) && durationMs > 0) {
+          sentenceDurations.set(index, durationMs / 1000)
+          update(s => ({ ...s, sentenceDurations: snapshotDurations() }))
+        }
         if (wordTimestamps) {
-          wordTimings.set(_index, wordTimestamps)
+          wordTimings.set(index, wordTimestamps)
         }
       }
 
@@ -258,6 +355,29 @@ function createAudioStore() {
         if (sid !== sessionId) return
         update(s => ({ ...s, isPlaying: false, buffering: false }))
         stopRaf()
+      }
+
+      // The engine cannot render at the requested rate and is producing
+      // `effectiveSpeed` instead. Playing 1.0x audio under a 1.5x highlight is
+      // the UI telling the reader something untrue, so the store takes the
+      // engine's word for it: the speed becomes the effective rate, and the
+      // refusal is published for the transport controls to explain.
+      socket.onSpeedUnavailable = (requested: number, effective: number, sid: number) => {
+        if (sid !== sessionId) return
+        // A queued speed change would re-request the rate the engine just
+        // refused, and would overwrite the effective speed below.
+        if (speedChangeTimer) { clearTimeout(speedChangeTimer); speedChangeTimer = null }
+        pendingSpeed = 0
+        const changed = effective !== get({ subscribe }).speed
+        update(s => ({ ...s, speed: effective }))
+        // Every duration measured so far describes the rate this engine was
+        // assumed to be rendering at; none of them describe `effective`.
+        if (changed) {
+          sentenceDurations = new Map()
+          elapsedSeconds = 0
+          update(s => ({ ...s, elapsedSeconds: 0, sentenceDurations: {} }))
+        }
+        speedDowngradeStore.set({ requested, effective })
       }
 
       socket.connect()
@@ -297,9 +417,36 @@ function createAudioStore() {
     },
 
     setSpeed(newSpeed: number) {
+      // Once the engine has said it cannot render anything but `effective`, any
+      // other request is accepted and then silently ignored — exactly the lie
+      // the notice exists to prevent. The transport's buttons are disabled, but
+      // the reader's ↑/↓ hotkeys reach this same method, so the refusal is
+      // enforced here too. A new connection (init) clears the refusal and asks
+      // the engine again.
+      if (get(speedDowngradeStore)) return
       const state = get({ subscribe })
       update(s => ({ ...s, speed: newSpeed }))
-      if (!state.isPlaying || !socket) return
+      // Kokoro renders speed natively, so every measured duration describes the
+      // previous speed only. Drop them rather than reuse numbers that no longer
+      // describe what will be played.
+      if (newSpeed !== state.speed) {
+        sentenceDurations = new Map()
+        elapsedSeconds = 0
+        update(s => ({ ...s, elapsedSeconds: 0, sentenceDurations: {} }))
+      }
+      if (!socket) return
+      // Debounced cache warm-up at new speed (100ms) — prevents rapid task
+      // cancellations when user drags a speed slider quickly.
+      if (prefetchSpeedTimer) clearTimeout(prefetchSpeedTimer)
+      prefetchSpeedTimer = setTimeout(() => {
+        prefetchSpeedTimer = null
+        if (!socket) return
+        const warmIdx = lastScheduledIndex >= 0
+          ? Math.max(lastScheduledIndex, get({ subscribe }).currentIndex)
+          : get({ subscribe }).currentIndex
+        socket.prefetchSpeed(warmIdx, get({ subscribe }).voice, newSpeed)
+      }, 100)
+      if (!state.isPlaying) return
       pendingSpeed = newSpeed
       update(s => ({ ...s, buffering: true }))
       if (speedChangeTimer) clearTimeout(speedChangeTimer)
@@ -320,7 +467,19 @@ function createAudioStore() {
       socket = null
       ctx?.close()
       ctx = null
-      set({ isPlaying: false, speed: 1.0, currentIndex: 0, currentWordIndex: -1, voice: 'af_heart', buffering: false })
+      sentenceDurations = new Map()
+      elapsedSeconds = 0
+      speedDowngradeStore.set(null)
+      set({
+        isPlaying: false,
+        speed: 1.0,
+        currentIndex: 0,
+        currentWordIndex: -1,
+        voice: 'af_heart',
+        buffering: false,
+        elapsedSeconds: 0,
+        sentenceDurations: {},
+      })
     },
   }
 }

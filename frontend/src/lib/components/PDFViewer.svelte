@@ -3,7 +3,9 @@
   import * as pdfjsLib from 'pdfjs-dist'
   import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
   import type { Sentence, WordBbox } from '$lib/api'
-  import { bionifyTextToSegments, bionifyWord } from '$lib/utils/bionic-reading'
+  import { getPdfUrl } from '$lib/api'
+  import { bionifyTextToSegments, bionifyWord, toBionicOptions } from '$lib/utils/bionic-reading'
+  import { settingsStore } from '$lib/stores/settings'
 
   pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl
 
@@ -24,6 +26,8 @@
     bionicMode = false,
     bionicFixation = 1,
     bionicBoldRatio = 0.5,
+    bionicMinWordLength,
+    bionicSkipCommonWords,
   }: {
     bookId: string
     sentences: Sentence[]
@@ -41,6 +45,8 @@
     bionicMode?: boolean
     bionicFixation?: number
     bionicBoldRatio?: number
+    bionicMinWordLength?: number
+    bionicSkipCommonWords?: boolean
   } = $props()
 
   function hexToRgba(hex: string, alpha: number): string {
@@ -72,14 +78,24 @@
   const BASE_SCALE = 1.5
   const SCALE_CHANGE_THRESHOLD = 0.05
   const WORD_HIGHLIGHT_ALPHA = 0.85
-  const SEARCH_CURRENT_COLOR = 'rgba(59,130,246,0.35)'
-  const SEARCH_MATCH_COLOR = 'rgba(134,239,172,0.4)'
   const BIONIC_CANVAS_OPACITY = 0.3
 
   let containerWidth = $state(0)
   let effectiveScale = $state(BASE_SCALE)
+  let zoomLevel = $state(1.0)
+  let finalScale = $derived(effectiveScale * zoomLevel)
 
-  const bionicOpts = $derived({ fixationPoint: bionicFixation, boldRatio: bionicBoldRatio })
+  // The reader route passes fixation and bold ratio but not the other two, so
+  // those come from the settings store — the same store the Settings panel
+  // writes. Without this, two of its four controls would change nothing in the
+  // PDF overlay. An explicitly passed prop still wins.
+  const storedBionic = $derived(toBionicOptions($settingsStore))
+  const bionicOpts = $derived({
+    fixationPoint: bionicFixation,
+    boldRatio: bionicBoldRatio,
+    minWordLength: bionicMinWordLength ?? storedBionic.minWordLength,
+    skipCommonWords: bionicSkipCommonWords ?? storedBionic.skipCommonWords,
+  })
 
   let sentencesByPage = $derived(
     sentences.reduce((acc, s) => {
@@ -127,8 +143,7 @@
     loading = true
     error = ''
     try {
-      const url = `http://localhost:8000/uploads/${bookId}.pdf`
-      pdfDoc = await pdfjsLib.getDocument(url).promise
+      pdfDoc = await pdfjsLib.getDocument(getPdfUrl(bookId)).promise
       pageCount = pdfDoc.numPages
       loading = false
       renderAllPages()
@@ -150,7 +165,7 @@
   async function renderPage(pageNum: number) {
     if (!pdfDoc || renderedPages.has(pageNum - 1)) return
     const page = await pdfDoc.getPage(pageNum)
-    const viewport = page.getViewport({ scale: effectiveScale })
+    const viewport = page.getViewport({ scale: finalScale })
 
     const canvas = document.createElement('canvas')
     canvas.width = viewport.width
@@ -215,8 +230,11 @@
     }
   }
 
+  // Colours come from the --search-* tokens in app.css, which derive from the
+  // theme's accent, so matches follow light/dark instead of a fixed blue/green.
+  // Fill only, no outline: outlines were replaced by fills on purpose (305610e).
   function applySearchHighlight(el: HTMLDivElement, isCurrent: boolean): void {
-    el.style.backgroundColor = isCurrent ? SEARCH_CURRENT_COLOR : SEARCH_MATCH_COLOR
+    el.style.backgroundColor = isCurrent ? 'var(--search-current-bg)' : 'var(--search-match-bg)'
   }
 
   function clearSearchHighlight(el: HTMLDivElement): void {
@@ -232,12 +250,12 @@
     for (const s of pageSentences) {
       if (s.filtered) continue
       const PAD = 2
-      const left   = s.x0 * effectiveScale - PAD
-      const top    = s.y0 * effectiveScale - PAD
-      const width  = (s.x1 - s.x0) * effectiveScale + PAD * 2
-      const height = (s.y1 - s.y0) * effectiveScale + PAD * 2
+      const left   = s.x0 * finalScale - PAD
+      const top    = s.y0 * finalScale - PAD
+      const width  = (s.x1 - s.x0) * finalScale + PAD * 2
+      const height = (s.y1 - s.y0) * finalScale + PAD * 2
       const div = document.createElement('div')
-      div.className = 'absolute cursor-pointer transition-colors hover:bg-blue-100/40'
+      div.className = 'absolute cursor-pointer transition-colors hover:bg-accent-soft'
       div.dataset.highlighted = s.index === currentIndex ? 'true' : 'false'
       div.style.left   = left + 'px'
       div.style.top    = top + 'px'
@@ -253,7 +271,7 @@
       }
       if (s.words) {
         for (let wi = 0; wi < s.words.length; wi++) {
-          const wd = createWordDiv(s.words[wi], effectiveScale, wi, s.index)
+          const wd = createWordDiv(s.words[wi], finalScale, wi, s.index)
           wordElements.set(wordKey(s.index, wi), wd)
           overlay.appendChild(wd)
         }
@@ -279,12 +297,12 @@
         for (let i = 0; i < count; i++) {
           const word = s.words[i]
           const wordText = textWords[i]
-          const fontSize = Math.max(6, (word.y1 - word.y0) * effectiveScale * 0.8)
+          const fontSize = Math.max(6, (word.y1 - word.y0) * finalScale * 0.8)
           const bw = bionifyWord(wordText, bionicOpts)
           const span = document.createElement('span')
           span.className = 'absolute'
-          span.style.left = (word.x0 * effectiveScale) + 'px'
-          span.style.top = (word.y0 * effectiveScale) + 'px'
+          span.style.left = (word.x0 * finalScale) + 'px'
+          span.style.top = (word.y0 * finalScale) + 'px'
           span.style.fontSize = fontSize + 'px'
           span.style.lineHeight = '1'
           span.style.whiteSpace = 'nowrap'
@@ -303,16 +321,16 @@
       } else {
         // Path B: sentence-level fallback (EPUBs, text books, old PDFs without word data)
         const segments = bionifyTextToSegments(s.text, bionicOpts)
-        const fontSize = Math.min(22, Math.max(8, (s.y1 - s.y0) * effectiveScale * 0.85))
+        const fontSize = Math.min(22, Math.max(8, (s.y1 - s.y0) * finalScale * 0.85))
         const span = document.createElement('span')
         span.className = 'absolute'
-        span.style.left = (s.x0 * effectiveScale) + 'px'
-        span.style.top = (s.y0 * effectiveScale) + 'px'
+        span.style.left = (s.x0 * finalScale) + 'px'
+        span.style.top = (s.y0 * finalScale) + 'px'
         span.style.fontSize = fontSize + 'px'
         span.style.lineHeight = '1'
         span.style.whiteSpace = 'pre'
         span.style.overflow = 'hidden'
-        span.style.maxWidth = ((s.x1 - s.x0) * effectiveScale) + 'px'
+        span.style.maxWidth = ((s.x1 - s.x0) * finalScale) + 'px'
         for (const seg of segments) {
           const node = document.createElement(seg.bold ? 'strong' : 'span')
           node.textContent = seg.text
@@ -399,7 +417,7 @@
       if (!s) return
       const wrapper = pagesEl?.querySelector(`[data-page="${s.page}"]`) as HTMLElement
       if (!wrapper) return
-      const y = s.y0 * effectiveScale
+      const y = s.y0 * finalScale
       scrollEl?.scrollTo({ top: wrapper.offsetTop + y - 200, behavior: 'smooth' })
     }, 150)
   })
@@ -486,10 +504,41 @@
     scrollEl && resizeObserver.observe(scrollEl)
   }
 
+  function applyZoom(level: number) {
+    zoomLevel = level
+    clearRenderedPages()
+    renderAllPages()
+  }
+
+  function zoomIn() {
+    applyZoom(Math.min(3.0, +(zoomLevel + 0.15).toFixed(2)))
+  }
+
+  function zoomOut() {
+    applyZoom(Math.max(0.5, +(zoomLevel - 0.15).toFixed(2)))
+  }
+
+  function zoomReset() {
+    applyZoom(1.0)
+  }
+
+  const INPUT_TAGS = new Set(['INPUT', 'TEXTAREA', 'SELECT'])
+
+  function onKeyDown(e: KeyboardEvent) {
+    if (!(e.target instanceof Element)) return
+    if (!e.ctrlKey) return
+    if (INPUT_TAGS.has(e.target.tagName)) return
+    if (e.key === '=' || e.key === '+') { e.preventDefault(); zoomIn() }
+    else if (e.key === '-' || e.key === '_') { e.preventDefault(); zoomOut() }
+    else if (e.key === '0') { e.preventDefault(); zoomReset() }
+  }
+
   onMount(() => {
     loadPDF()
+    window.addEventListener('keydown', onKeyDown)
   })
   onDestroy(() => {
+    window.removeEventListener('keydown', onKeyDown)
     if (bionicDebounce) clearTimeout(bionicDebounce)
     pdfDoc?.destroy()
     intersectionObserver?.disconnect()
@@ -497,9 +546,9 @@
   })
 </script>
 
-<div class="relative h-full w-full overflow-auto bg-slate-100" bind:this={scrollEl}>
+<div class="relative h-full w-full overflow-auto bg-surface-sunken" bind:this={scrollEl}>
   {#if loading}
-    <div class="flex h-full items-center justify-center gap-2 text-slate-500">
+    <div class="flex h-full items-center justify-center gap-2 text-fg-muted">
       <svg class="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
         <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
         <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"></path>
@@ -507,15 +556,49 @@
       Loading…
     </div>
   {:else if error}
-    <div class="flex h-full items-center justify-center text-red-500">{error}</div>
+    <div class="flex h-full items-center justify-center text-danger">{error}</div>
   {/if}
   {#if buffering}
-    <div class="absolute inset-0 bg-white/50 flex items-center justify-center z-20 pointer-events-none">
-      <svg class="w-6 h-6 animate-spin text-blue-500" fill="none" viewBox="0 0 24 24">
+    <!-- raw z-20: an opaque veil is not a scrim (nothing dismisses it) and not
+         a panel; the scale has no layer for it. -->
+    <div class="absolute inset-0 bg-surface/50 flex items-center justify-center z-20 pointer-events-none">
+      <svg class="w-6 h-6 animate-spin text-accent" fill="none" viewBox="0 0 24 24">
         <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
         <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"></path>
       </svg>
     </div>
   {/if}
   <div class="mx-auto flex flex-col items-center py-6" bind:this={pagesEl}></div>
+  <div class="fixed bottom-4 right-4 flex items-center gap-1 bg-surface-raised/90 backdrop-blur rounded-lg shadow-2 border border-border px-2 py-1.5 z-panel">
+    <button
+      onclick={zoomOut}
+      class="p-1 rounded hover:bg-surface-sunken text-fg-muted"
+      aria-label="Zoom out"
+      disabled={zoomLevel <= 0.5}
+    >
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 12H4" />
+      </svg>
+    </button>
+    <span class="text-xs font-medium text-fg-muted min-w-[3rem] text-center select-none">
+      {Math.round(zoomLevel * 100)}%
+    </span>
+    <button
+      onclick={zoomIn}
+      class="p-1 rounded hover:bg-surface-sunken text-fg-muted"
+      aria-label="Zoom in"
+      disabled={zoomLevel >= 3.0}
+    >
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+      </svg>
+    </button>
+    <button
+      onclick={zoomReset}
+      class="p-1 rounded hover:bg-surface-sunken text-fg-subtle ml-1 text-xs font-medium"
+      aria-label="Reset zoom"
+    >
+      Fit
+    </button>
+  </div>
 </div>

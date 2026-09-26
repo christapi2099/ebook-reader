@@ -40,8 +40,12 @@
 PyMuPDF (fitz) and PDF.js canvas share top-left origin, y increases downward.
 Mapping: `canvas_x = fitz_x * SCALE`, `canvas_y = fitz_y * SCALE` (no flip needed)
 
-## Backend venv
-`source /home/christapia/Repos/ebook-reader/backend/venv/bin/activate`
+## Backend environment (uv)
+Run backend Python from the repo root with:
+`cd backend && uv run <cmd>` (e.g. `uv run pytest tests/test_db_models.py -q`, `uv run uvicorn main:app --reload`)
+uv owns `backend/.venv` and locks versions in `backend/uv.lock`; run `uv sync` after pulling.
+Add dependencies with `uv add <pkg>` / `uv add --dev <pkg>` — do not hand-edit `backend/requirements.txt` (generated from the lock).
+Legacy fallback if uv is unavailable: `source backend/venv/bin/activate`.
 
 ## Memory Bank — Update After Significant Work
 After completing any significant feature, major bug fix, or architectural change, append a summary to:

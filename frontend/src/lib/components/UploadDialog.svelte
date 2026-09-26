@@ -1,5 +1,7 @@
 <script lang="ts">
   import { uploadDocument } from '$lib/api'
+  import Dialog from '$lib/ui/Dialog.svelte'
+  import Button from '$lib/ui/Button.svelte'
 
   let { open, onClose, onUploaded }: {
     open: boolean
@@ -35,26 +37,26 @@
 </script>
 
 {#if open}
-  <div class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center">
-    <div class="bg-white rounded-xl p-6 max-w-md max-h-[85vh] overflow-y-auto w-full shadow-xl relative mx-4">
+  <Dialog titleId="upload-dialog-title" {onClose}>
+    <div class="relative mx-4 max-h-[85vh] w-full max-w-md overflow-y-auto rounded-xl bg-surface p-6 shadow-3">
       <button
-        class="absolute top-3 right-3 text-slate-400 hover:text-slate-700 text-xl leading-none"
+        class="absolute right-3 top-3 text-xl leading-none text-fg-subtle transition-colors hover:text-fg"
         onclick={onClose}
-        aria-label="Close"
+        aria-label="Close upload dialog"
       >
         ×
       </button>
 
-      <h2 class="text-xl font-bold text-slate-800 mb-4">Upload Ebook</h2>
+      <h2 id="upload-dialog-title" class="mb-4 text-xl font-bold text-fg">Upload Ebook</h2>
 
       <label
-        class="flex flex-col items-center justify-center border-2 border-dashed border-slate-300 rounded-lg p-8 text-center cursor-pointer hover:border-blue-400 transition-colors"
+        class="flex cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed border-border-strong p-8 text-center transition-colors hover:border-accent"
       >
-        <svg class="w-10 h-10 text-slate-400 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <svg class="mb-2 h-10 w-10 text-fg-subtle" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
             d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
         </svg>
-        <span class="text-sm text-slate-500">
+        <span class="text-sm text-fg-muted">
           {file ? file.name : 'Click or drag PDF / EPUB here'}
         </span>
         <input
@@ -66,16 +68,12 @@
       </label>
 
       {#if errorMsg}
-        <p class="mt-3 text-sm text-red-500">{errorMsg}</p>
+        <p class="mt-3 text-sm text-danger">{errorMsg}</p>
       {/if}
 
-      <button
-        disabled={!file || loading}
-        class="mt-4 w-full px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium transition-colors"
-        onclick={handleUpload}
-      >
+      <Button class="mt-4 w-full" variant="primary" disabled={!file || loading} onclick={handleUpload}>
         {loading ? 'Uploading…' : 'Upload'}
-      </button>
+      </Button>
     </div>
-  </div>
+  </Dialog>
 {/if}

@@ -10,7 +10,9 @@ services:
       - PYTHONPATH=/app
     volumes:
       - ./backend:/app
-      - ./backend/venv:/app/venv
+      # uv-managed environment (see backend/UV_MIGRATION.md); the old hand-made
+      # ./backend/venv mount was unused by the image, which installs its own deps.
+      - ./backend/.venv:/app/.venv
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]

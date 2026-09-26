@@ -5,7 +5,36 @@ import numpy as np
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import Response
 
+from services.tts_engine import SAMPLE_RATE
+
 VOICES_DIR = Path("voices")
+VOICE_EXT = ".pt"
+
+
+def _resolve_custom_voice_path(name: str) -> Path:
+    """Map a custom-voice *name* to a file inside VOICES_DIR, or raise 400.
+
+    The name reaches this function straight from the URL path
+    (``/voices/{voice_id:path}``), so it is attacker-controlled. Only a bare
+    filename with no directory component is accepted, and the containment check
+    runs on the *resolved* path so that ``..`` and symlinks cannot escape
+    VOICES_DIR.
+    """
+    if not name or name in {".", ".."} or "\x00" in name:
+        raise HTTPException(status_code=400, detail="Invalid voice id")
+
+    candidate = Path(name)
+    if candidate.is_absolute() or len(candidate.parts) != 1 or "\\" in name:
+        raise HTTPException(status_code=400, detail="Invalid voice id")
+    if candidate.suffix not in ("", VOICE_EXT):
+        raise HTTPException(status_code=400, detail="Invalid voice id")
+
+    base = VOICES_DIR.resolve()
+    resolved = (base / f"{candidate.stem}{VOICE_EXT}").resolve()
+    if not resolved.is_relative_to(base):
+        raise HTTPException(status_code=400, detail="Invalid voice id")
+    return resolved
+
 
 ENGLISH_VOICE_CATALOG = [
     # American English
@@ -79,11 +108,11 @@ async def upload_voice(file: UploadFile = File(...)):
     if not file.filename or not file.filename.endswith(".pt"):
         raise HTTPException(status_code=400, detail="Only .pt voice pack files are accepted")
     VOICES_DIR.mkdir(exist_ok=True)
-    safe_name = Path(file.filename).name
-    dest = VOICES_DIR / safe_name
+    # Same validation as delete/preview: the id we return must round-trip.
+    dest = _resolve_custom_voice_path(file.filename)
     with dest.open("wb") as f:
         shutil.copyfileobj(file.file, f)
-    return {"id": f"custom:{safe_name.replace('.pt', '')}", "path": str(dest)}
+    return {"id": f"custom:{dest.stem}", "path": str(dest)}
 
 
 @router.delete("/{voice_id:path}")
@@ -91,8 +120,7 @@ def delete_voice(voice_id: str):
     # Only custom voices can be deleted
     if not voice_id.startswith("custom:"):
         raise HTTPException(status_code=403, detail="Cannot delete built-in voice")
-    name = voice_id.replace("custom:", "", 1)
-    dest = VOICES_DIR / f"{name}.pt"
+    dest = _resolve_custom_voice_path(voice_id.replace("custom:", "", 1))
     if not dest.exists():
         raise HTTPException(status_code=404, detail="Voice not found")
     dest.unlink()
@@ -116,8 +144,7 @@ async def preview_voice(voice_id: str):
     # Resolve custom voice
     voice = voice_id
     if voice_id.startswith("custom:"):
-        name = voice_id.replace("custom:", "", 1)
-        voice_path = VOICES_DIR / f"{name}.pt"
+        voice_path = _resolve_custom_voice_path(voice_id.replace("custom:", "", 1))
         if not voice_path.exists():
             raise HTTPException(status_code=404, detail="Voice not found")
         voice = str(voice_path)
@@ -137,5 +164,5 @@ async def preview_voice(voice_id: str):
 
     full = np.concatenate(parts)
     buf = io.BytesIO()
-    sf.write(buf, full, 24000, format="WAV", subtype="PCM_16")
+    sf.write(buf, full, SAMPLE_RATE, format="WAV", subtype="PCM_16")
     return Response(content=buf.getvalue(), media_type="audio/wav")

@@ -3,16 +3,22 @@ import { getUserSettings, updateUserSettings } from '$lib/api'
 
 const STORAGE_KEY = 'kokoro-settings'
 
-const VALID_COLORS = new Set([
-  '#fef08a',
-  '#86efac',
-  '#93c5fd',
-  '#fdba74',
-  '#f9a8d4',
-  '#c4b5fd',
-  '#fca5a5',
-  '#67e8f9',
-])
+export type Theme = 'light' | 'sepia' | 'dark' | 'system'
+
+// Highlight swatches offered in Settings (DESIGN.md §1). Legacy stored
+// values outside this list still load — isValidColor accepts any #rrggbb.
+export const HIGHLIGHT_SWATCHES = [
+  '#FCD34D', // Honey (default)
+  '#C4B5FD', // Lavender
+  '#6EE7B7', // Mint
+  '#F9A8D4', // Rose
+  '#7DD3FC', // Sky
+  '#FCA5A5', // Coral
+  '#FDBA74', // Peach
+  '#67E8F9', // Aqua
+] as const
+
+const VALID_COLORS = new Set<string>(HIGHLIGHT_SWATCHES)
 
 export interface SettingsState {
   voice: string
@@ -22,22 +28,61 @@ export interface SettingsState {
   bionicMode: boolean
   bionicFixation: number
   bionicBoldRatio: number
+  /** Words shorter than this are left unbolded (`BionicOptions.minWordLength`). */
+  bionicMinWordLength: number
+  /** Leave the `COMMON_WORDS` set unbolded (`BionicOptions.skipCommonWords`). */
+  bionicSkipCommonWords: boolean
   highlightEnabled: boolean
+  theme: Theme
 }
+
+/** Bounds of the minimum-word-length slider, in characters. */
+export const BIONIC_MIN_WORD_LENGTH_RANGE = { min: 1, max: 8 } as const
 
 const DEFAULTS: SettingsState = {
   voice: 'af_heart',
-  highlightColor: '#fef08a',
+  highlightColor: '#FCD34D',
   autoscroll: true,
   hotkeysEnabled: true,
   bionicMode: false,
   bionicFixation: 1,
   bionicBoldRatio: 0.5,
+  // Match `DEFAULT_BIONIC_OPTIONS`, so an untouched install renders exactly what
+  // the algorithm's own defaults describe.
+  bionicMinWordLength: 3,
+  bionicSkipCommonWords: true,
   highlightEnabled: true,
+  theme: 'system',
 }
 
 function isValidColor(c: string): boolean {
   return VALID_COLORS.has(c) || /^#[0-9a-fA-F]{6}$/.test(c)
+}
+
+function isValidTheme(t: unknown): t is Theme {
+  return t === 'light' || t === 'sepia' || t === 'dark' || t === 'system'
+}
+
+function isMinWordLength(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= BIONIC_MIN_WORD_LENGTH_RANGE.min &&
+    value <= BIONIC_MIN_WORD_LENGTH_RANGE.max
+  )
+}
+
+function resolveTheme(theme: Theme): 'light' | 'sepia' | 'dark' {
+  if (theme !== 'system') return theme
+  if (typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches) {
+    return 'dark'
+  }
+  return 'light'
+}
+
+function applyTheme(theme: Theme): void {
+  if (typeof document === 'undefined') return
+  document.documentElement.dataset.theme = resolveTheme(theme)
 }
 
 function readFromStorage(): SettingsState {
@@ -59,7 +104,14 @@ function readFromStorage(): SettingsState {
       bionicBoldRatio: typeof parsed.bionicBoldRatio === 'number' && parsed.bionicBoldRatio >= 0.2 && parsed.bionicBoldRatio <= 0.8
         ? parsed.bionicBoldRatio
         : DEFAULTS.bionicBoldRatio,
+      bionicMinWordLength: isMinWordLength(parsed.bionicMinWordLength)
+        ? parsed.bionicMinWordLength
+        : DEFAULTS.bionicMinWordLength,
+      bionicSkipCommonWords: typeof parsed.bionicSkipCommonWords === 'boolean'
+        ? parsed.bionicSkipCommonWords
+        : DEFAULTS.bionicSkipCommonWords,
       highlightEnabled: typeof parsed.highlightEnabled === 'boolean' ? parsed.highlightEnabled : DEFAULTS.highlightEnabled,
+      theme: isValidTheme(parsed.theme) ? parsed.theme : DEFAULTS.theme,
     }
   } catch {
     return { ...DEFAULTS }
@@ -79,6 +131,21 @@ function createSettingsStore() {
 
   subscribe(saveToStorage)
 
+  // Keep <html data-theme> in sync with the stored preference. Guarded for
+  // jsdom (no matchMedia) and SSR (no document/window).
+  if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+    let currentTheme: Theme = 'system'
+    subscribe(s => {
+      currentTheme = s.theme
+      applyTheme(s.theme)
+    })
+    if (typeof matchMedia === 'function') {
+      matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+        if (currentTheme === 'system') applyTheme('system')
+      })
+    }
+  }
+
   return {
     subscribe,
 
@@ -93,6 +160,11 @@ function createSettingsStore() {
     setHighlightColor(color: string) {
       if (!isValidColor(color)) return
       update(s => ({ ...s, highlightColor: color }))
+    },
+
+    setTheme(theme: Theme) {
+      if (!isValidTheme(theme)) return
+      update(s => ({ ...s, theme }))
     },
 
     toggleAutoscroll() {
@@ -117,6 +189,19 @@ function createSettingsStore() {
       if (!Number.isFinite(value)) return
       const clamped = Math.max(0.2, Math.min(0.8, Math.round(value * 20) / 20))
       update(s => ({ ...s, bionicBoldRatio: clamped }))
+    },
+
+    setBionicMinWordLength(value: number) {
+      if (!Number.isFinite(value)) return
+      const clamped = Math.max(
+        BIONIC_MIN_WORD_LENGTH_RANGE.min,
+        Math.min(BIONIC_MIN_WORD_LENGTH_RANGE.max, Math.round(value)),
+      )
+      update(s => ({ ...s, bionicMinWordLength: clamped }))
+    },
+
+    toggleBionicSkipCommonWords() {
+      update(s => ({ ...s, bionicSkipCommonWords: !s.bionicSkipCommonWords }))
     },
 
     toggleHighlight() {

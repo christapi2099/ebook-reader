@@ -1,9 +1,19 @@
+import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+
+# Before every project import below: db.database, services.modal_remote and
+# services.engine_manager read some variables at import time, and a later load
+# would leave backend/.env unable to set them (see env_file.py).
+from env_file import load_env_file
+
+load_env_file()
 
 from db.database import create_engine_and_tables
 from routers import documents, library
@@ -11,31 +21,65 @@ from routers import tts as tts_router
 from routers import voices as voices_router
 from routers import mp3 as mp3_router
 from routers import bookmarks as bookmarks_router
+from routers import folders as folders_router
 from routers import user as user_router
+from routers import system as system_router
+from services import audio_cache, engine_manager, kokoro_runtime
+
+logger = logging.getLogger(__name__)
+
+# The model identity lives in services/engine_manager.py, which owns the engine
+# choice now; main only decides *when* to start one.
 
 
-def _init_kokoro():
-    try:
-        import os, torch
-        from kokoro import KPipeline
-        os.environ.setdefault("HF_HUB_OFFLINE", "1")
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"[kokoro] initializing on {device}")
-        return KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M", device=device)
-    except Exception as e:
-        print(f"[warn] Kokoro not available: {e}")
-        return None
+def _init_kokoro() -> Any | None:
+    """Choose the Kokoro backend at startup.
+
+    Thin wrapper over :mod:`services.engine_manager`, which owns the choice from
+    here on — including the device, which it picks from the same probe the
+    Settings selector consults. Order: the engine persisted in Settings, then
+    ``KOKORO_BACKEND`` (``local`` → GPU if this machine has one, else CPU;
+    ``remote`` → Modal; ``auto`` → Modal only when a probe says it answers), then
+    local. Every failure path falls back so the reader keeps working without a
+    network.
+    """
+    return engine_manager.manager.startup(os.environ.get("KOKORO_BACKEND"))
+
+
+def _apply_kokoro(kokoro: Any) -> None:
+    """Push the live engine into every router that holds one.
+
+    Registered with the engine manager, so a runtime switch in Settings reaches
+    the WebSocket, voice preview and export paths through exactly this function
+    instead of three ad-hoc assignments scattered around startup.
+    """
+    tts_router.set_kokoro(kokoro)
+    voices_router.set_kokoro(kokoro)
+    mp3_router.set_kokoro(kokoro)
+
+
+engine_manager.register_applier(_apply_kokoro)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    create_engine_and_tables()
+    engine = create_engine_and_tables()
     Path("uploads").mkdir(exist_ok=True)
-    kokoro = _init_kokoro()
-    tts_router.set_kokoro(kokoro)
-    voices_router.set_kokoro(kokoro)
-    mp3_router.set_kokoro(kokoro)
-    yield
+    _apply_kokoro(_init_kokoro())
+    # Audio cache eviction lives here, not in the write path: one sweep at
+    # startup, then the periodic task below for the life of the process, so
+    # every writer is covered instead of only the flows we remembered
+    # (services/audio_cache.py, and §7 of the synthesis-strategy research,
+    # explain why that distinction matters). Both are safe with an empty cache
+    # and with a database that already sits under the cap.
+    await audio_cache.sweep_once(engine)
+    sweeper = audio_cache.start_periodic_sweep(engine)
+    try:
+        yield
+    finally:
+        # Cancelled and awaited on shutdown so the task cannot outlive the
+        # engine, and a sweep in flight cannot keep the process alive.
+        await audio_cache.stop_periodic_sweep(sweeper)
 
 
 app = FastAPI(lifespan=lifespan)
@@ -55,10 +99,21 @@ app.include_router(tts_router.router)
 app.include_router(voices_router.router)
 app.include_router(mp3_router.router)
 app.include_router(bookmarks_router.router)
+app.include_router(folders_router.router)
+app.include_router(system_router.router)
 
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    # Additive only: `status` keeps its original value and meaning. The extra
+    # keys say which backend is live, which is the first thing to check when the
+    # reader is silent. Details live on GET /api/system/capabilities.
+    state = kokoro_runtime.runtime
+    return {
+        "status": "ok",
+        "backend": state.active_backend,
+        "device": state.device,
+        "synthesis_available": state.active_backend != "none",
+    }

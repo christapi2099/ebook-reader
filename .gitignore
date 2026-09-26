@@ -4,6 +4,9 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+# Local uv cache (only needed by sandboxed runs where ~/.cache/uv is read-only).
+# uv.lock is intentionally NOT ignored — it must be committed.
+.uv-cache/
 *.db
 uploads/
 
@@ -27,8 +30,46 @@ Thumbs.db
 .pytest_cache/
 htmlcov/
 .coverage
+test-results/
+playwright-report/
+blob-report/
+# Scratch output from test-timing runs.
+.perfile_timing*.txt
+backend/tests/.logs/
+
+# Code intelligence / local tooling
+.codegraph/
 
 # Claude memory / scratch
 .memory/
 .opencode/deepseek_research.md
 .opencode/glm_speed_analysis.md
+
+# Local implementation plans. Deliberately NOT tracked here: plans live in a
+# separate private repo. They stay on disk because implementers and reviewers read
+# them from the working tree, they just do not belong in this history.
+docs/plans/
+
+# Agent safety-net snapshots (scripts/agent-safety.sh)
+.snapshots/
+
+# Scratch diagnostics written by agents (logs, captured runs, DB fingerprints)
+.final_backend.txt
+.full_run.txt
+.slow_run.out
+.stall_probe.txt
+.db_before_full
+.pw_install*.log
+*_run.txt
+
+# Per-agent worktrees (scripts/agent-worktree.sh)
+.worktrees/
+
+# Runtime voice directory: user uploads and converted .pt voices. Tests redirect
+# VOICES_DIR into tmp_path, but test_voices_router.py uploads files named
+# test_voice.pt / custom1.pt, and before that guard existed they were committed
+# from here by accident (58a62a0).
+backend/voices/
+
+# Flake-hunt logs from the selective test runner
+backend/flake*.log
