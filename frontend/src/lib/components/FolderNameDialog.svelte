@@ -1,7 +1,8 @@
 <script lang="ts">
   import { untrack } from 'svelte'
-  import { overlayLayer } from '$lib/actions/overlay-layer'
   import { toDetailMessage } from '$lib/utils/errors'
+  import Dialog from '$lib/ui/Dialog.svelte'
+  import Button from '$lib/ui/Button.svelte'
   import type { Folder } from '$lib/api'
 
   /**
@@ -38,13 +39,11 @@
   }
 </script>
 
-<div
-  class="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
-  role="dialog"
-  aria-modal="true"
-  aria-labelledby="folder-name-title"
-  tabindex="-1"
-  use:overlayLayer={{ onClose, closeOnBackdrop: true, initialFocus: '#folder-name-input' }}
+<Dialog
+  titleId="folder-name-title"
+  {onClose}
+  closeOnBackdrop
+  initialFocus="#folder-name-input"
 >
   <form class="mx-4 w-full max-w-sm rounded-xl bg-surface p-6 shadow-3" onsubmit={handleSubmit}>
     <h2 id="folder-name-title" class="text-lg font-bold text-fg">
@@ -66,20 +65,10 @@
     {/if}
 
     <div class="mt-6 flex justify-end gap-2">
-      <button
-        type="button"
-        class="min-h-11 rounded-lg border border-border px-4 text-sm text-fg hover:bg-surface-sunken"
-        onclick={onClose}
-      >
-        Cancel
-      </button>
-      <button
-        type="submit"
-        class="min-h-11 rounded-lg bg-accent px-4 text-sm font-medium text-accent-fg hover:bg-accent-hover disabled:opacity-50"
-        disabled={saving}
-      >
+      <Button variant="secondary" onclick={onClose}>Cancel</Button>
+      <Button type="submit" variant="primary" disabled={saving}>
         {isRename ? 'Rename' : 'Create'}
-      </button>
+      </Button>
     </div>
   </form>
-</div>
+</Dialog>

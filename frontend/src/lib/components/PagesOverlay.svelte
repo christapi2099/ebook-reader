@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { overlayLayer } from '$lib/actions/overlay-layer'
+  import Dialog from '$lib/ui/Dialog.svelte'
+  import Button from '$lib/ui/Button.svelte'
   import type { PageEntry } from '$lib/utils/page-index'
 
   /**
@@ -17,17 +18,11 @@
   } = $props()
 </script>
 
-<div
-  class="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
-  role="dialog"
-  aria-modal="true"
-  aria-labelledby="pages-overlay-title"
-  tabindex="-1"
-  use:overlayLayer={{
-    onClose,
-    closeOnBackdrop: true,
-    initialFocus: '[data-page-entry][aria-current="page"]',
-  }}
+<Dialog
+  titleId="pages-overlay-title"
+  {onClose}
+  closeOnBackdrop
+  initialFocus='[data-page-entry][aria-current="page"]'
 >
   <div class="mx-4 flex max-h-[85vh] w-full max-w-2xl flex-col rounded-xl bg-surface shadow-3">
     <div class="flex items-center justify-between gap-3 border-b border-border px-4 py-3">
@@ -37,13 +32,7 @@
           {bookTitle} · page {currentPage + 1} of {pages.length}
         </p>
       </div>
-      <button
-        type="button"
-        class="min-h-11 shrink-0 rounded-lg border border-border px-4 text-sm text-fg hover:bg-surface-sunken"
-        onclick={onClose}
-      >
-        Close
-      </button>
+      <Button variant="secondary" class="shrink-0" onclick={onClose}>Close</Button>
     </div>
 
     {#if pages.length === 0}
@@ -72,4 +61,4 @@
       </ul>
     {/if}
   </div>
-</div>
+</Dialog>

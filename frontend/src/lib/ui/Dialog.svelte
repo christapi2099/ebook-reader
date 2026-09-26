@@ -12,19 +12,28 @@
    * dialog despite being the same kind of thing. Both problems are structural,
    * so they are fixed once, here.
    *
-   * The panel is deliberately left to the caller. The six panels differ
+   * The panel is deliberately left to the caller. The panels differ
    * meaningfully — one is a `<form>`, one is a full-height list, one is a
-   * bottom-anchored sheet — and wrapping them in a shared `<div>` would change
-   * the rendered DOM of every dialog for no gain. Only the part that was
-   * genuinely identical moved in here.
+   * right-hand sheet — and wrapping them in a shared `<div>` would change the
+   * rendered DOM of every dialog for no gain. Only the part that was genuinely
+   * identical moved in here.
    *
    * `role="dialog"` and the action stay on this element, not on the panel:
    * backdrop-close works by comparing `event.target` to the node the action is
    * applied to, and the tests click that node directly.
    */
+  type Layout = 'centered' | 'sheet'
+
+  const LAYOUT_CLASSES: Record<Layout, string> = {
+    centered: 'items-center justify-center',
+    // A sheet fills the height and lets its panel align itself with `ml-auto`.
+    sheet: 'items-stretch',
+  }
+
   let {
     titleId,
     onClose,
+    layout = 'centered',
     closeOnBackdrop = false,
     initialFocus,
     modal = true,
@@ -34,6 +43,7 @@
     /** Id of the element naming this dialog, for `aria-labelledby`. */
     titleId: string
     onClose: () => void
+    layout?: Layout
     closeOnBackdrop?: boolean
     /** Selector for the element that receives focus when the dialog opens. */
     initialFocus?: string
@@ -44,7 +54,7 @@
 </script>
 
 <div
-  class="fixed inset-0 z-dialog flex items-center justify-center bg-overlay {className}"
+  class="fixed inset-0 z-dialog flex bg-overlay {LAYOUT_CLASSES[layout]} {className}"
   role="dialog"
   aria-modal={modal ? 'true' : undefined}
   aria-labelledby={titleId}

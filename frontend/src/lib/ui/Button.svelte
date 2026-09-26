@@ -5,13 +5,18 @@
   /**
    * The app's one button.
    *
-   * Before this existed the accent-button class string was written out at 17
-   * call sites across two generations: older files used raw `bg-blue-500` /
-   * `bg-blue-600` and newer ones the semantic `bg-accent`. Those are different
-   * colours (`#3b82f6` against `#5146d9`), and only the semantic one follows the
-   * theme — so in dark and sepia mode the raw-blue buttons stayed bright blue
-   * against a palette that had moved on. Which colour a button was depended on
-   * when it happened to be written.
+   * The accent-button class string had been written out at every call site, and
+   * the call sites disagreed about what "accent" means: 12 buttons used the raw
+   * `bg-blue-500` / `bg-blue-600` pair while others used the semantic
+   * `bg-accent`. Those are different colours (`#3b82f6` against `#5146d9`), and
+   * only the semantic one follows the theme — so in dark and sepia mode the
+   * raw-blue buttons stayed bright blue against a palette that had moved on.
+   * Which colour a button was depended on when it happened to be written.
+   *
+   * This absorbs the *button* sites only. The same raw blue also sits on five
+   * non-button surfaces — two progress fills, three waveform bars and one icon
+   * tile — which are not buttons and are deliberately not routed through here.
+   * Those need a token sweep, not a component; the two problems are orthogonal.
    *
    * Variants are presentational state, not behaviour switches, so they stay
    * props rather than separate components: `Button` renders one element and the

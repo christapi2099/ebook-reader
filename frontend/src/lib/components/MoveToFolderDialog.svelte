@@ -1,7 +1,8 @@
 <script lang="ts">
   import { untrack } from 'svelte'
-  import { overlayLayer } from '$lib/actions/overlay-layer'
   import { toDetailMessage } from '$lib/utils/errors'
+  import Dialog from '$lib/ui/Dialog.svelte'
+  import Button from '$lib/ui/Button.svelte'
   import type { Book, Folder } from '$lib/api'
 
   /**
@@ -46,13 +47,11 @@
   }
 </script>
 
-<div
-  class="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
-  role="dialog"
-  aria-modal="true"
-  aria-labelledby="move-dialog-title"
-  tabindex="-1"
-  use:overlayLayer={{ onClose, closeOnBackdrop: true, initialFocus: 'input[name="folder"]:checked' }}
+<Dialog
+  titleId="move-dialog-title"
+  {onClose}
+  closeOnBackdrop
+  initialFocus='input[name="folder"]:checked'
 >
   <div class="mx-4 w-full max-w-md rounded-xl bg-surface p-6 shadow-3">
     <h2 id="move-dialog-title" class="text-lg font-bold text-fg">Move “{book.title}”</h2>
@@ -99,21 +98,8 @@
     {/if}
 
     <div class="mt-6 flex justify-end gap-2">
-      <button
-        type="button"
-        class="min-h-11 rounded-lg border border-border px-4 text-sm text-fg hover:bg-surface-sunken"
-        onclick={onClose}
-      >
-        Cancel
-      </button>
-      <button
-        type="button"
-        class="min-h-11 rounded-lg bg-accent px-4 text-sm font-medium text-accent-fg hover:bg-accent-hover disabled:opacity-50"
-        disabled={saving}
-        onclick={handleSubmit}
-      >
-        Move
-      </button>
+      <Button variant="secondary" onclick={onClose}>Cancel</Button>
+      <Button variant="primary" disabled={saving} onclick={handleSubmit}>Move</Button>
     </div>
   </div>
-</div>
+</Dialog>
