@@ -45,10 +45,10 @@ backend/tests/.logs/
 .opencode/deepseek_research.md
 .opencode/glm_speed_analysis.md
 
-# NOTE: docs/plans/ is intentionally COMMITTED. An earlier agent ignored it as
-# local scratch, but the plans are the deliverable that implementers and reviewers
-# are handed, and a plan that only exists on one machine cannot be the contract
-# between three agents. Keep them in git.
+# Local implementation plans. Deliberately NOT tracked here: plans live in a
+# separate private repo. They stay on disk because implementers and reviewers read
+# them from the working tree, they just do not belong in this history.
+docs/plans/
 
 # Agent safety-net snapshots (scripts/agent-safety.sh)
 .snapshots/
