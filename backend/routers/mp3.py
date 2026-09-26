@@ -73,12 +73,13 @@ class _ExportState:
     SQLite writes.
     """
 
-    def __init__(self, export_id: int) -> None:
+    def __init__(self, export_id: int, initial_phase: str) -> None:
         self.export_id = export_id
-        # None, not a phase: the first set_phase() must always reach the row,
-        # otherwise an export that fails before its first transition would keep
-        # whatever the request wrote.
-        self.phase: str | None = None
+        # Seeded with the phase the request already recorded, so the worker does
+        # not write the same value a second time the moment it starts: the row's
+        # first write is then the first *change*, which is what everyone polling
+        # the status endpoint actually cares about.
+        self.phase: str | None = initial_phase
         self._lock = threading.Lock()
 
     def set_phase(self, phase: str, **fields) -> None:
@@ -108,6 +109,21 @@ def _update_export(export_id: int, **fields) -> None:
         logger.warning("Could not record export %s state %s", export_id, fields, exc_info=True)
 
 
+def _initial_phase() -> str:
+    """The phase an export starts in, decided by the engine that will run it.
+
+    A local export never has an invisible GPU start-up, so it must not claim to
+    be starting one; only the Modal path can be "starting". Used by both the
+    request that creates the row and the worker that updates it, so the two
+    cannot disagree and the first worker write is not a duplicate.
+    """
+    return (
+        engine_manager.PHASE_STARTING
+        if _modal_client() is not None
+        else engine_manager.PHASE_PROCESSING
+    )
+
+
 def _run_export_blocking(
     export_id: int,
     book_id: str,
@@ -121,7 +137,7 @@ def _run_export_blocking(
     blocking calls. This is only ever reached through _run_export(), which
     offloads it to a worker thread so the event loop keeps serving requests.
     """
-    state = _ExportState(export_id)
+    state = _ExportState(export_id, _initial_phase())
     _update_export(export_id, status="processing")
 
     try:
@@ -540,13 +556,7 @@ async def create_export(body: ExportRequest):
             speed=speed,
             status="pending",
             progress=0,
-            # A local export never has an invisible GPU start-up, so it must not
-            # claim to be starting one: only the Modal path can be "starting".
-            phase=(
-                engine_manager.PHASE_STARTING
-                if _modal_client() is not None
-                else engine_manager.PHASE_PROCESSING
-            ),
+            phase=_initial_phase(),
             format=fmt,
             bitrate_kbps=bitrate,
             options=options.as_json(),

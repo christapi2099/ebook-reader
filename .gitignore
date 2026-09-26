@@ -62,3 +62,12 @@ docs/plans/
 
 # Per-agent worktrees (scripts/agent-worktree.sh)
 .worktrees/
+
+# Runtime voice directory: user uploads and converted .pt voices. Tests redirect
+# VOICES_DIR into tmp_path, but test_voices_router.py uploads files named
+# test_voice.pt / custom1.pt, and before that guard existed they were committed
+# from here by accident (58a62a0).
+backend/voices/
+
+# Flake-hunt logs from the selective test runner
+backend/flake*.log

@@ -11,12 +11,31 @@ checked that an export finished or produced a file. It does now.
 """
 import time
 
+import pytest
 from sqlmodel import Session
 
 from db.models import MP3Export
+from routers import mp3 as mp3_router
 
 TERMINAL_STATES = ("done", "error")
 EXPORT_TIMEOUT = 30.0
+
+
+@pytest.fixture(autouse=True)
+def _drain_export_tasks():
+    """Let every export this test started finish before the test ends.
+
+    ``_run_export`` offloads the work to a worker thread and the export path reads
+    ``db.database.engine`` at call time. A thread that outlives its test therefore
+    wakes up *after* the isolation guard has restored that global, opens the next
+    test's database -- where export id 1 is a different row -- and marks it
+    ``error``. That is a genuine cross-test interference, so each test waits here.
+    """
+    yield
+    deadline = time.monotonic() + EXPORT_TIMEOUT
+    while mp3_router._export_tasks and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert not mp3_router._export_tasks, "an export task did not finish in time"
 
 
 def _upload(client, content=b"fakepdf"):
@@ -54,6 +73,9 @@ class TestCreateExport:
         r = client.post("/mp3/export", json={"book_id": bid, "voice": "af_heart", "speed": 1.0})
         assert r.status_code == 200
         assert "export_id" in r.json()
+        # Let the background task finish here rather than after the test, which is
+        # when the next test's database becomes "the" database.
+        _await_terminal_status(client, r.json()["export_id"])
 
     def test_create_export_nonexistent_book_returns_404(self, client):
         r = client.post("/mp3/export", json={"book_id": "nonexistent", "voice": "af_heart", "speed": 1.0})
@@ -114,6 +136,7 @@ class TestListExports:
         assert rows[0]["book_title"] == "test.pdf"
         assert rows[0]["voice"] == "af_heart"
         assert rows[0]["speed"] == 1.0
+        _await_terminal_status(client, export_id)
 
 
 class TestDeleteExport:

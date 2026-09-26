@@ -85,6 +85,24 @@ def seeded(engine, monkeypatch, tmp_path):
     mp3_router._export_tasks.clear()
 
 
+def _drain_exports(timeout: float = 15.0) -> None:
+    """Wait for exports started through the API to stop touching the database.
+
+    Must be called while the TestClient (and therefore its event loop) is still
+    open, otherwise the task can never complete. It matters beyond tidiness: the
+    export worker resolves ``db.database.engine`` at call time, so a task that
+    outlives its test starts writing into whatever engine the *next* test
+    installs. That is not hypothetical — leaving the clamped-speed export from
+    the last test in this file running made the following test file see a
+    missing Book and a missing export row.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not [t for t in mp3_router._export_tasks.values() if not t.done()]:
+            return
+        time.sleep(0.02)
+
+
 def _install_kokoro(monkeypatch, *, delay=0.0, calls=None, threads=None, samples=2400):
     def kokoro(text, voice=None, speed=None):
         if calls is not None:
@@ -465,6 +483,10 @@ class TestExportSpeedValidation:
     def test_out_of_band_speeds_are_clamped_not_rejected(self, seeded, engine, monkeypatch):
         with self._client(monkeypatch) as client:
             response = client.post("/mp3/export", json={"book_id": "bk", "speed": 99})
+            assert response.status_code == 200
+            # Let the export this POST started finish before the fixtures swap
+            # the database out from under its worker thread.
+            _drain_exports()
         assert response.status_code == 200
         with Session(engine) as s:
             row = s.get(MP3Export, response.json()["export_id"])

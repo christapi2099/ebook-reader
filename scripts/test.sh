@@ -535,9 +535,9 @@ ${C_BOLD}USAGE${C_OFF}
   ./scripts/test.sh [mode] [args...]
 
 ${C_BOLD}MODES${C_OFF}
-  ${C_BOLD}fast${C_OFF}                     (default) curated backend subset, ~45 s.
+  ${C_BOLD}fast${C_OFF}                     (default) curated backend subset, ~40 s.
                            Excludes only the files in SLOW_TESTS.
-  ${C_BOLD}slow${C_OFF}                     only the files \`fast\` excludes (~2-4 min).
+  ${C_BOLD}slow${C_OFF}                     only the files \`fast\` excludes (~1.5 min).
   ${C_BOLD}backend${C_OFF} [target...]      one backend file, node id, or -k pattern.
                              ./scripts/test.sh backend test_tts_engine
                              ./scripts/test.sh backend tests/test_folders.py

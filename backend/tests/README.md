@@ -3,7 +3,7 @@
 **Run this instead of bare `pytest`:**
 
 ```bash
-./scripts/test.sh fast          # ~45 s, the default check after a small change
+./scripts/test.sh fast          # ~40 s, the default check after a small change
 ./scripts/test.sh backend tests/test_tts_engine.py
 ./scripts/test.sh --help
 ```
@@ -11,16 +11,22 @@
 Everything below explains what is in the suite, what is dangerous, what is
 already broken, and why some of it is slow.
 
-> Measurements in this document were taken on 2026-09-26 between 11:20 and 12:20
-> on this checkout. The suite is under active repair by another change, so
-> **counts and the failing baseline drift**. Re-measure with
-> `./scripts/test.sh --list` and `./scripts/test.sh fast` before trusting a number.
+> Measurements in this document were taken on 2026-09-26 between 11:20 and 12:35
+> on this checkout. Several agents edit this repo at once, so **counts and the
+> failing baseline drift** — one run during this investigation reported 27
+> failures that were gone, unfixed, four minutes later. Re-measure with
+> `./scripts/test.sh fast` before trusting a number, and check whether a failing
+> file is one somebody is currently editing.
+>
+> Timing note: the numbers below were taken under heavy CPU contention (load
+> average 8–13, other agents running their own suites). They are pessimistic;
+> on an idle machine `fast` measured 45.8 s and later 40 s for the same set.
 
 ---
 
 ## 1 · Inventory
 
-29 files, ~630 tests. "Cost" is the wall time of that file alone under the
+29 files, 560 tests. "Cost" is the wall time of that file alone under the
 current `conftest.py`, including ~4 s of interpreter start-up.
 
 | File | Tests | What it actually needs | Cost | Hazards |
@@ -195,23 +201,33 @@ current shape of `main.py`.
 Before blaming your change, check whether the failure is in a file this list
 already covers, and whether the file is currently being edited.
 
-As measured on **2026-09-26 ~12:05**, the suite was **green apart from**:
+As measured on **2026-09-26 ~12:34** (whole suite, `./scripts/test.sh backend`,
+`6 failed, 553 passed, 1 xfailed in 100.4 s`):
 
-| File | Result |
-|---|---|
-| `test_system_capabilities.py` | 4 failed — `AttributeError: module 'main' has no attribute '_init_remote_kokoro'` (in-flight edit of `main.py`, not a real defect in the test) |
+| Test | Failure | Whose problem |
+|---|---|---|
+| `test_system_capabilities.py::TestBackendSelection::test_local_is_the_default_and_never_touches_the_remote` | `AttributeError: module 'main' has no attribute '_init_remote_kokoro'` | in-flight edit of `backend/main.py` — the test monkeypatches a global that has been renamed |
+| `…::test_remote_failure_falls_back_to_local_and_records_the_reason` | same | same |
+| `…::test_remote_success_uses_the_remote_backend` | same | same |
+| `…::test_total_failure_is_recorded_not_silent` | same | same |
+| `test_mp3_export.py::TestListExports::test_list_includes_book_title_and_status` | `IndexError: tuple index out of range` | in-flight `routers/mp3.py` refactor |
+| `test_mp3_export_nonblocking.py::test_export_is_no_longer_a_coroutine_without_await_points` | `assert 'run_in_threadpool' in ...` failed | same refactor, mid-edit |
 
-Earlier in the same hour the same suite also showed transient failures in
-`test_tts_engine.py` (13), `test_word_timestamps.py` (5), `test_voices_path_traversal.py` (2)
-and `test_mp3_export.py`; all of those were fixed by the test-repair change
-during this investigation. **The baseline moves.** Re-run
-`./scripts/test.sh fast` and compare against the runner's failure list rather
-than against this table.
+Those same four `test_system_capabilities` failures are what `./scripts/test.sh fast`
+reports today (`4 failed, 530 passed, 1 xfailed in 35.1 s`). If you see exactly
+this set, nothing you did caused it.
+
+**The baseline moves within minutes.** During this investigation the same
+command reported, at different times: 0 failures; 4 failures; 27 failures; 49
+failures. Every swing tracked a file some other agent was writing at that
+moment (`conftest.py`, `routers/tts.py`, `services/tts_engine.py`,
+`frontend/src/tests/stores/settings.test.ts`). Re-run `./scripts/test.sh fast`
+and compare against the runner's failure list rather than against this table.
 
 Two historical facts worth keeping, because they explain old reports:
 
 * `test_tts_engine.py` had **13 pre-existing failures** and `test_speed_engine.py`
-  was intentionally red (TDD). Both are green now.
+  was intentionally red (TDD). Both are green now (38 and 60 tests).
 * Under the old `conftest.py`, `test_base_engine.py` passed 9/9 alone but errored
   in a full run, because tests assigned `db.database.engine` directly and only
   some restored it. The autouse guard fixes the leak.
@@ -259,67 +275,103 @@ list in `scripts/test.sh` instead of `-m`.
 
 ## 6 · Measured results
 
-All on 2026-09-26, `backend/.venv/bin/python` (Python 3.12.3), cold-ish process.
+All on 2026-09-26, `backend/.venv/bin/python` (Python 3.12.3, the uv-managed env
+— the runner auto-detects it), under heavy CPU contention from other agents.
 
 | Command | Wall clock | Result |
 |---|---:|---|
-| `./scripts/test.sh fast` | **45.8 s** | 27 files, 534 passed, 1 xfailed, 0 failed |
-| `./scripts/test.sh slow` | **114 s** | 2 files, all passed |
-| `./scripts/test.sh backend` (whole suite) | ~127 s | all passed |
-| `./scripts/test.sh backend test_text_filter` | 9.4 s | 42 passed |
-| `./scripts/test.sh backend test_tts_engine` | ~7 s | 38 passed |
-| `./scripts/test.sh unit` (vitest, `npm run test:unit`) | 4.3 s reported / ~5 s wall | 6 files, 106 passed |
+| `./scripts/test.sh fast` | **40–43 s** | every file except the two slow ones (28 at the time of writing), 540 passed, 1 xfailed, 4 failed¹ |
+| `./scripts/test.sh fast` (on a quieter tree, ~11:55) | **45.8 s** | 27 files, 534 passed, 1 xfailed, 0 failed |
+| `./scripts/test.sh slow` | **86 s** | 2 files, all passed |
+| `./scripts/test.sh backend` (whole suite) | **105 s** | 560 tests, 553 passed, 1 xfailed, 6 failed¹ |
+| `./scripts/test.sh backend test_text_filter` | **4.5 s** | 42 passed |
+| `./scripts/test.sh backend test_tts_engine` | **5.2 s** | 38 passed |
+| `./scripts/test.sh unit` (vitest) | **5 s** | 15 files, 212 passed |
 | `./scripts/test.sh unit <file>` | 2.6 s | one file |
 | `npm run test:unit:changed` | 3.3 s | 8 files, 139 passed |
-| `./scripts/test.sh check` (svelte-check) | 8 s | clean |
-| `./scripts/test.sh e2e` | n/a | **blocked — see §7** |
+| `./scripts/test.sh check` (svelte-check) | **5.6 s** | clean |
+| `./scripts/test.sh e2e` | not run | e2e execution is paused by decision — see §7 |
 
-Baseline for comparison: before the conftest fix, the same suite was measured at
-`28 failed, 188 passed, 1 skipped, 27 errors in ~58 s`, and a re-run had to be
-SIGTERM-killed at 600 s.
+¹ The failures are the six listed in §4; they belong to other agents' in-flight
+edits, not to the runner or to this config. `fast` reports the four
+`test_system_capabilities` ones.
 
-### 6.1 pytest-xdist: not used
+**What "before" looked like:** there was no way to run a subset at all. The only
+option was the whole suite, measured at
+`28 failed, 188 passed, 1 skipped, 27 errors in ~58 s`, with a re-run that had to
+be SIGTERM-killed at 600 s. `fast` is therefore ~40 s *and* bounded, and it is
+now possible to check a change without dragging in a real book parser.
 
-Deliberately. `pytest-xdist` is **not installed** in either environment, and
-`./scripts/test.sh` does not depend on it. It would not be a good fit here even
-if it were available: `conftest.py` sandboxes the working directory at import
-time and monkeypatches process-wide globals (`db.database.engine`), so worker
-processes would each get their own sandbox while the ASGI app and the module
-globals are shared per worker — the classic recipe for flaky, order-dependent
-failures in exactly the suite that just stopped being order-dependent. Measured
-`fast` is 45.8 s single-process; parallelising it is not worth re-introducing
-that risk. If you want to try it, do it as an experiment and measure both the
-time and the flake rate before adopting it.
+Note that `fast` (40 s) + `slow` (86 s) is *more* than the whole suite (105 s):
+running everything in one process amortises interpreter start-up and the spaCy
+model. The point of splitting is selectivity, not total throughput.
+
+### 6.1 pytest-xdist: not used, and not measured as faster
+
+`pytest-xdist` is **not installed** in either environment, and `./scripts/test.sh`
+does not depend on it — so there is no before/after number to report, and none is
+claimed. Beyond availability, it is a poor fit here: `conftest.py` sandboxes the
+working directory at import time and monkeypatches process-wide globals
+(`db.database.engine`), so worker processes would each get their own sandbox
+while sharing the ASGI app and module globals per worker — the classic recipe for
+flaky, order-dependent failures in exactly the suite that just stopped being
+order-dependent. Measured `fast` is 40–46 s single-process. If you want to try
+it, do it as an experiment and measure both the time and the flake rate before
+adopting it; do not assume it helps.
 
 ---
 
 ## 7 · Frontend
 
-`frontend/package.json` keeps the four handoff gates (`test:unit`, `test:e2e`,
-`check`) and two convenience scripts were added:
+`frontend/package.json` already carries these (no new dependency was added):
 
 ```bash
-npm run test:unit                                  # all vitest, ~4 s
-npm run test:unit -- src/tests/stores/settings.test.ts   # one file (npm's -- passes args)
+npm run test:unit                                  # all vitest, 15 files / 212 tests, ~5 s
+npm run test:unit -- src/tests/stores/settings.test.ts   # one file (npm's `--` passes args)
 npm run test:unit:changed                          # vitest --changed, ~3 s
-npm run test:e2e                                   # all playwright specs
-npm run test:e2e -- tests/library.spec.ts           # one spec
-npm run test:e2e:list                              # list specs/tests without running
+npm run test:e2e                                   # Playwright: the @critical flows only
+npm run test:e2e:all                               # Playwright: all 121 specs (E2E_ALL=1)
+npm run test:e2e:list                              # list specs/tests without running them
+npm run check                                      # svelte-check
 ```
 
-**Playwright cannot run in this environment.** `@playwright/test` 1.59.1 expects
-browser build `chromium_headless_shell-1217`, while `~/.cache/ms-playwright`
-only holds `-1234` and `-1243`, so every spec fails instantly with
-`browserType.launch: Executable doesn't exist at .../chromium_headless_shell-1217/...`.
-The fix is one command, which did **not** complete here —
-`npx playwright install chromium` was killed at 420 s having downloaded nothing,
-although the CDN itself is reachable (a ranged `curl` against the exact
-`chrome-headless-shell` URL returned HTTP 206 at ~3.2 MB/s, so the environment's
-proxy, not the CDN, is the likely obstacle):
+**e2e policy (changed after this work started).** Only *critical* user flows get
+Playwright coverage. `playwright.config.ts` sets a default `grep` of `/@critical/`,
+so `npm run test:e2e` runs the 32 tagged tests and `E2E_ALL=1` (or
+`npm run test:e2e:all`) runs all 121. `frontend/tests/README.md` lists them and
+explains the reasoning. `./scripts/test.sh e2e` therefore just forwards to
+`npm run test:e2e` — it never widens the selection on its own, and it can run a
+single spec by name (`./scripts/test.sh e2e library`).
 
-```bash
-cd frontend && npx playwright install chromium      # needs a working download path
-```
+**Execution is deliberately paused** — the human ruling was no e2e runs until
+implementation is finished, so nothing here has been verified by running
+Playwright. `gates` still *defines* the e2e step (it is one of the four handoff
+gates) but it was not executed either.
 
-Until then `./scripts/test.sh e2e` correctly selects the spec you name and fails
-fast with that message instead of hanging.
+Two things to know before you do run it:
+
+1. **The browser build is missing.** `@playwright/test` 1.59.1 wants
+   `chromium_headless_shell-1217`; `~/.cache/ms-playwright` only holds `-1234`
+   and `-1243`, so every spec fails instantly with
+   `browserType.launch: Executable doesn't exist at .../chromium_headless_shell-1217/...`.
+   `npx playwright install chromium` was killed at 420 s here having downloaded
+   nothing, even though the CDN is reachable (a ranged `curl` against the exact
+   `chrome-headless-shell` URL returned HTTP 206 at ~3.2 MB/s), so this
+   environment's network path, not the CDN, is the likely obstacle.
+2. **e2e needs the API.** The specs assert against a live backend on `:8000`
+   (`cd backend && uv run uvicorn main:app`); Playwright starts only the Vite dev
+   server itself.
+
+### 7.1 Do not add `-q` to a pytest invocation
+
+`backend/pytest.ini` already sets `addopts = -q --tb=short`. pytest merges CLI
+flags with `addopts`, so **`pytest -q` becomes `-qq` and the `N passed` summary
+line disappears entirely** — a fully green run prints nothing you can grep for.
+This bit two separate measurements during this work. `scripts/test.sh` passes
+neither `-q` nor `--tb`, deliberately; the comment above its `PYTEST` array says
+so. If you script pytest yourself, do not add `-q`.
+
+Relatedly: `scripts/test.sh` writes its per-suite logs to
+`test-results/test-sh/` (already gitignored) rather than `/tmp`, because under a
+sandboxed agent harness each shell call may get its own private `/tmp`, making a
+printed `/tmp` path unreadable from the next call.

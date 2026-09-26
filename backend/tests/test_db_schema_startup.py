@@ -146,3 +146,174 @@ def _schema_snapshot(engine) -> dict[str, list[str]]:
             table: [row[1] for row in conn.execute(text(f"PRAGMA table_info({table})"))]
             for table in tables
         }
+
+
+# --------------------------------------------------------------------------- #
+# _migrate() contract, column by column
+# --------------------------------------------------------------------------- #
+# create_all() creates missing *tables* but never adds a column to a table that
+# already exists, so every column below is _migrate()'s responsibility. This
+# mapping is the regression net for the whole set: one migration was silently
+# lost to a concurrent edit once, and a per-column expectation is what catches
+# that instead of a hand-picked subset.
+
+MIGRATED_COLUMNS = {
+    "audiocache": {"word_timestamps"},
+    "sentence": {"words", "chapter", "chapter_title"},
+    "usersettings": {"highlight_enabled", "tts_engine"},
+    "mp3export": {
+        "effective_speed",
+        "phase",
+        "batches_done",
+        "batches_total",
+        "format",
+        "bitrate_kbps",
+        "options",
+    },
+    "book": {"folder_id"},
+}
+
+#: Indexes _migrate() owns. Both are created with IF NOT EXISTS so they are
+#: idempotent, but they must actually exist: the audio-cache sweep orders by
+#: ``created_at`` on a table holding ~800 MB of PCM, and every Book query filters
+#: on ``folder_id``.
+MIGRATED_INDEXES = {
+    "audiocache": {"ix_audiocache_created_at"},
+    "book": {"ix_book_folder_id"},
+}
+
+#: The shape of a database written before any of the above existed.
+_LEGACY_TABLES = (
+    'CREATE TABLE book (id TEXT PRIMARY KEY, title TEXT, author TEXT, file_path TEXT, '
+    "file_type TEXT, page_count INTEGER, cover_page INTEGER DEFAULT 0, "
+    "created_at TIMESTAMP, last_opened TIMESTAMP, ephemeral BOOLEAN DEFAULT 0)",
+    'CREATE TABLE sentence (id INTEGER PRIMARY KEY, book_id TEXT, "index" INTEGER, '
+    "text TEXT, page INTEGER, x0 FLOAT, y0 FLOAT, x1 FLOAT, y1 FLOAT, filtered BOOLEAN)",
+    "CREATE TABLE audiocache (text_hash TEXT PRIMARY KEY, audio_data BLOB, "
+    "duration_ms INTEGER, voice TEXT, created_at TIMESTAMP)",
+    "CREATE TABLE usersettings (id INTEGER PRIMARY KEY, last_book_id TEXT, "
+    "last_sentence_index INTEGER DEFAULT 0)",
+    "CREATE TABLE mp3export (id INTEGER PRIMARY KEY, book_id TEXT, voice TEXT, speed REAL, "
+    "status TEXT, progress INTEGER DEFAULT 0, file_path TEXT, file_size INTEGER, "
+    "error_message TEXT, created_at TIMESTAMP)",
+)
+
+
+@pytest.fixture
+def legacy_engine(tmp_path):
+    """A pre-migration database carrying one row per table, already migrated."""
+    db_file = tmp_path / "legacy-full.db"
+    conn = sqlite3.connect(db_file)
+    for statement in _LEGACY_TABLES:
+        conn.execute(statement)
+    conn.execute(
+        "INSERT INTO book (id, title, file_path, file_type, page_count, created_at) "
+        "VALUES ('legacy-book', 'Legacy', '/tmp/l.pdf', 'pdf', 1, '2024-01-01 00:00:00')"
+    )
+    conn.execute(
+        'INSERT INTO sentence (book_id, "index", text, page, x0, y0, x1, y1, filtered) '
+        "VALUES ('legacy-book', 0, 'Legacy sentence.', 0, 0, 0, 1, 1, 0)"
+    )
+    conn.execute(
+        "INSERT INTO audiocache (text_hash, audio_data, duration_ms, voice, created_at) "
+        "VALUES ('legacy-hash', X'00', 100, 'af_heart', '2024-01-01 00:00:00')"
+    )
+    conn.execute("INSERT INTO usersettings (id, last_book_id, last_sentence_index) "
+                 "VALUES (1, 'legacy-book', 7)")
+    conn.execute(
+        "INSERT INTO mp3export (id, book_id, voice, speed, status, created_at) "
+        "VALUES (1, 'legacy-book', 'af_heart', 1.0, 'done', '2024-01-01 00:00:00')"
+    )
+    conn.commit()
+    conn.close()
+
+    return _db.create_engine_and_tables(db_url=f"sqlite:///{db_file}")
+
+
+@pytest.mark.parametrize("table", sorted(MIGRATED_COLUMNS))
+def test_migrate_adds_every_column_it_owns(legacy_engine, table):
+    columns = {c["name"] for c in inspect(legacy_engine).get_columns(table)}
+    missing = MIGRATED_COLUMNS[table] - columns
+    assert not missing, f"_migrate() no longer adds {sorted(missing)} to {table}"
+
+
+@pytest.mark.parametrize("table", sorted(MIGRATED_INDEXES))
+def test_migrate_creates_the_indexes_it_owns(legacy_engine, table):
+    with legacy_engine.connect() as conn:
+        existing = {row[1] for row in conn.execute(text(f"PRAGMA index_list({table})"))}
+    missing = MIGRATED_INDEXES[table] - existing
+    assert not missing, f"missing index(es) on {table}: {sorted(missing)}"
+
+
+def test_legacy_rows_survive_and_get_the_declared_defaults(legacy_engine):
+    """Adding a column must not lose the rows that predate it, and the defaults
+    have to say something true about them: every pre-existing export is an MP3,
+    and existing installs had highlighting on."""
+    with legacy_engine.connect() as conn:
+        book = conn.execute(
+            text("SELECT title, folder_id FROM book WHERE id = 'legacy-book'")
+        ).one()
+        sentence = conn.execute(
+            text('SELECT text, words, chapter, chapter_title FROM sentence '
+                 'WHERE book_id = \'legacy-book\'')
+        ).one()
+        settings = conn.execute(
+            text("SELECT last_sentence_index, highlight_enabled, tts_engine "
+                 "FROM usersettings WHERE id = 1")
+        ).one()
+        export = conn.execute(
+            text("SELECT status, format, batches_done, batches_total, bitrate_kbps, options "
+                 "FROM mp3export WHERE id = 1")
+        ).one()
+
+    assert book.title == "Legacy"
+    assert book.folder_id is None, "a book that predates folders belongs to no folder"
+
+    assert sentence.text == "Legacy sentence."
+    assert sentence.words is None, "word timestamps were not stored back then"
+    assert sentence.chapter == 0
+    assert sentence.chapter_title is None
+
+    assert settings.last_sentence_index == 7
+    assert settings.highlight_enabled == 1
+    assert settings.tts_engine is None, "NULL means 'never chosen', so KOKORO_BACKEND decides"
+
+    assert export.status == "done"
+    assert export.format == "mp3"
+    assert export.batches_done == 0
+    assert export.batches_total == 0
+    assert export.bitrate_kbps is None
+    assert export.options is None
+
+
+def test_migrate_is_idempotent_on_the_full_legacy_schema(legacy_engine):
+    """Re-running every migration must change nothing: no duplicated columns, no
+    rewritten indexes, no data touched."""
+    first = _schema_snapshot(legacy_engine)
+    _db._migrate(legacy_engine)
+    _db._migrate(legacy_engine)
+    assert _schema_snapshot(legacy_engine) == first
+    for table, expected in MIGRATED_COLUMNS.items():
+        assert expected <= set(first[table])
+
+
+def test_fresh_databases_have_the_same_columns_as_migrated_ones(tmp_path):
+    """A new install and an upgraded install must not diverge.
+
+    This is the failure mode that hurts most in production: the app works on a
+    fresh database and dies on the developer's 800 MB one (or the reverse), which
+    is exactly what happened when ``book.folder_id`` was only in the model.
+    """
+    migrated = _schema_snapshot(
+        _db.create_engine_and_tables(db_url=f"sqlite:///{tmp_path / 'migrated.db'}")
+    )
+    from sqlmodel import SQLModel
+
+    fresh_engine = create_engine(f"sqlite:///{tmp_path / 'fresh.db'}")
+    SQLModel.metadata.create_all(fresh_engine)
+    fresh = _schema_snapshot(fresh_engine)
+    _db._migrate(fresh_engine)
+
+    assert _schema_snapshot(fresh_engine) == fresh, "_migrate() altered a fresh database"
+    assert migrated == fresh
+
