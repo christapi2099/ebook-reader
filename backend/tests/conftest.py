@@ -117,7 +117,7 @@ os.chdir(_SANDBOX)
 def _block_dotenv_file() -> None:
     """Keep ``backend/.env`` out of the suite's environment.
 
-    ``main.py`` calls ``_load_env_file()`` at *import* time, and that file is the
+    ``main.py`` calls ``env_file.load_env_file()`` at *import* time, and that file is the
     developer's own configuration. Importing ``main`` -- which half the suite
     does at collection -- therefore used to copy its contents into ``os.environ``
     for the whole process: measured here, ``KOKORO_BACKEND=local``, a live

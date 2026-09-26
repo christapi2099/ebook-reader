@@ -8,6 +8,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+# Before every project import below: db.database, services.modal_remote and
+# services.engine_manager read some variables at import time, and a later load
+# would leave backend/.env unable to set them (see env_file.py).
+from env_file import load_env_file
+
+load_env_file()
+
 from db.database import create_engine_and_tables
 from routers import documents, library
 from routers import tts as tts_router
@@ -23,26 +30,6 @@ logger = logging.getLogger(__name__)
 
 # The model identity lives in services/engine_manager.py, which owns the engine
 # choice now; main only decides *when* to start one.
-
-
-def _load_env_file() -> None:
-    """Load ``backend/.env`` if python-dotenv is installed and the file is there.
-
-    Real environment variables win over the file (``override=False``), and a
-    missing file or a missing python-dotenv is not an error: the app is meant to
-    run on nothing but its defaults.
-    """
-    try:
-        from dotenv import load_dotenv
-    except ImportError:
-        logger.debug("python-dotenv not installed; using the process environment only")
-        return
-    env_path = Path(__file__).with_name(".env")
-    if env_path.exists():
-        load_dotenv(env_path, override=False)
-        logger.info("[config] loaded %s", env_path.name)
-    else:
-        logger.info("[config] no %s found; using the process environment only", env_path.name)
 
 
 def _init_kokoro() -> Any | None:
@@ -72,9 +59,6 @@ def _apply_kokoro(kokoro: Any) -> None:
 
 
 engine_manager.register_applier(_apply_kokoro)
-
-
-_load_env_file()
 
 
 @asynccontextmanager
