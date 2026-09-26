@@ -56,9 +56,16 @@ cd backend && venv/bin/python -m uvicorn main:app --port 8000
 
 ## Gotchas
 
-- **Pinned browser build.** Playwright may ask for a build that is not in
-  `~/.cache/ms-playwright`. Other builds usually are; point `launchOptions.executablePath`
-  at one (see the workaround used for `folders.spec.ts`) rather than downloading.
+- **The pinned browser build is absent, and the config works around it.**
+  Playwright 1.59.1 wants chromium revision 1217; this machine has 1234 and 1243,
+  and `npx playwright install chromium` cannot fetch the pinned one (killed at
+  420 s having downloaded nothing). `playwright.config.ts` therefore resolves the
+  newest `chromium-*` build in `~/.cache/ms-playwright` itself — checking both the
+  `chrome-linux64` and `chrome-linux` layouts — and falls back to Playwright's own
+  resolution when it finds none, so a machine that has the pinned build is
+  unaffected. The tradeoff is stated in the config: this is not the exact browser
+  Playwright was released against. Set `PLAYWRIGHT_CHROMIUM_PATH` to override.
+  Verified by running a single test, which launched and passed in 10.6 s.
 - **`getByRole('switch')` in `bionic-reading.spec.ts`** used to select switches by
   unnamed position (`nth(3)`). Adding, removing or reordering a switch in
   `SettingsOverlay.svelte` silently retargeted those tests, so every switch now
