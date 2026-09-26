@@ -14,7 +14,8 @@
     type SystemCapabilities,
   } from '$lib/api'
   import { toDetailMessage } from '$lib/utils/errors'
-  import { overlayLayer } from '$lib/actions/overlay-layer'
+  import Dialog from '$lib/ui/Dialog.svelte'
+  import Switch from '$lib/ui/Switch.svelte'
 
   let { onClose }: { onClose: () => void } = $props()
 
@@ -178,37 +179,7 @@
   onMount(loadEngineInfo)
 </script>
 
-{#snippet switchRow(id: string, label: string, hint: string, checked: boolean, onToggle: () => void)}
-  <div class="flex items-center justify-between gap-3">
-    <div class="min-w-0">
-      <span id="{id}-label" class="text-sm font-medium text-fg">{label}</span>
-      <p id="{id}-hint" class="text-xs text-fg-muted">{hint}</p>
-    </div>
-    <button
-      type="button"
-      role="switch"
-      {id}
-      aria-checked={checked}
-      aria-labelledby="{id}-label"
-      aria-describedby="{id}-hint"
-      class="flex h-11 w-11 shrink-0 items-center justify-center"
-      onclick={onToggle}
-    >
-      <span class="relative block h-6 w-11 rounded-full transition-colors {checked ? 'bg-accent' : 'bg-border-strong'}">
-        <span class="absolute left-0.5 top-0.5 block h-5 w-5 rounded-full bg-surface shadow transition-transform {checked ? 'translate-x-5' : ''}"></span>
-      </span>
-    </button>
-  </div>
-{/snippet}
-
-<div
-  class="fixed inset-0 bg-overlay z-overlay flex items-center justify-center p-4"
-  role="dialog"
-  aria-modal="true"
-  aria-labelledby="settings-dialog-title"
-  tabindex="-1"
-  use:overlayLayer={{ onClose, closeOnBackdrop: true }}
->
+<Dialog titleId="settings-dialog-title" {onClose} closeOnBackdrop class="p-4">
   <div class="max-h-[calc(100vh-2rem)] w-full max-w-sm overflow-y-auto rounded-xl border border-border bg-surface p-6 shadow-3">
     <div class="mb-4 flex items-center justify-between">
       <h2 id="settings-dialog-title" class="text-lg font-bold text-fg">Settings</h2>
@@ -241,10 +212,34 @@
         </div>
       </div>
 
-      {@render switchRow('highlight-toggle', 'Sentence Highlight', 'Show highlight on current sentence while reading', settings.highlightEnabled, toggleHighlight)}
-      {@render switchRow('autoscroll-toggle', 'Auto-Scroll', 'Follow current sentence automatically', settings.autoscroll, toggleAutoscroll)}
-      {@render switchRow('hotkeys-toggle', 'Keyboard Hotkeys', 'Space, arrows, B, F, Esc', settings.hotkeysEnabled, toggleHotkeys)}
-      {@render switchRow('bionic-toggle', 'Bionic Reading', 'Bold initial letters to guide eye movement', settings.bionicMode, toggleBionicMode)}
+      <Switch
+        id="highlight-toggle"
+        label="Sentence Highlight"
+        hint="Show highlight on current sentence while reading"
+        checked={settings.highlightEnabled}
+        onToggle={toggleHighlight}
+      />
+      <Switch
+        id="autoscroll-toggle"
+        label="Auto-Scroll"
+        hint="Follow current sentence automatically"
+        checked={settings.autoscroll}
+        onToggle={toggleAutoscroll}
+      />
+      <Switch
+        id="hotkeys-toggle"
+        label="Keyboard Hotkeys"
+        hint="Space, arrows, B, F, Esc"
+        checked={settings.hotkeysEnabled}
+        onToggle={toggleHotkeys}
+      />
+      <Switch
+        id="bionic-toggle"
+        label="Bionic Reading"
+        hint="Bold initial letters to guide eye movement"
+        checked={settings.bionicMode}
+        onToggle={toggleBionicMode}
+      />
 
       {#if settings.bionicMode}
         <div class="space-y-4 rounded-lg border border-border bg-surface-sunken p-3">
@@ -302,7 +297,13 @@
             />
             <p class="text-xs text-fg-subtle">Words shorter than this are left unbolded.</p>
           </div>
-          {@render switchRow('bionic-common-words-toggle', 'Skip Common Words', 'Leave “the”, “and”, “of” and friends unbolded', settings.bionicSkipCommonWords, toggleBionicSkipCommonWords)}
+          <Switch
+            id="bionic-common-words-toggle"
+            label="Skip Common Words"
+            hint="Leave “the”, “and”, “of” and friends unbolded"
+            checked={settings.bionicSkipCommonWords}
+            onToggle={toggleBionicSkipCommonWords}
+          />
         </div>
       {/if}
 
@@ -413,4 +414,4 @@
       </div>
     </div>
   </div>
-</div>
+</Dialog>
