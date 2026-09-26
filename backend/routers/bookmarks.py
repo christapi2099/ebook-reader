@@ -5,7 +5,8 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from db.database import get_session
-from db.models import Book, Bookmark, Sentence
+from db.models import Bookmark, Sentence
+from routers.deps import require_book
 
 router = APIRouter(prefix="/bookmarks")
 
@@ -18,9 +19,9 @@ class BookmarkCreate(BaseModel):
 
 @router.post("")
 def create_bookmark(body: BookmarkCreate, session: Session = Depends(get_session)):
-    book = session.get(Book, body.book_id)
-    if not book:
-        raise HTTPException(status_code=404, detail="Book not found")
+    # Only the existence check matters here; the row itself is not used, so the
+    # return value is deliberately discarded.
+    require_book(session, body.book_id)
 
     # Resolve page from sentence
     sentence = session.exec(

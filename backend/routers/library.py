@@ -6,6 +6,7 @@ from sqlmodel import Session, func, select
 
 from db.database import get_session
 from db.models import Book, Bookmark, Folder, MP3Export, Progress, Sentence
+from routers.deps import require_book
 
 router = APIRouter(prefix="/library")
 
@@ -67,8 +68,7 @@ def update_progress(
     body: ProgressUpdate,
     session: Session = Depends(get_session),
 ):
-    if not session.get(Book, book_id):
-        raise HTTPException(status_code=404, detail="Book not found")
+    require_book(session, book_id)
     row = session.get(Progress, book_id)
     if row:
         row.sentence_index = body.sentence_index
@@ -90,9 +90,7 @@ def set_book_folder(
     session: Session = Depends(get_session),
 ):
     """File a book into a folder, or clear it by sending `folder_id: null`."""
-    book = session.get(Book, book_id)
-    if not book:
-        raise HTTPException(status_code=404, detail="Book not found")
+    book = require_book(session, book_id)
     if body.folder_id is not None and not session.get(Folder, body.folder_id):
         raise HTTPException(status_code=404, detail="Folder not found")
     book.folder_id = body.folder_id
@@ -103,9 +101,7 @@ def set_book_folder(
 
 @router.get("/{book_id}")
 def get_book(book_id: str, session: Session = Depends(get_session)):
-    book = session.get(Book, book_id)
-    if not book:
-        raise HTTPException(status_code=404, detail="Book not found")
+    book = require_book(session, book_id)
     count = session.exec(
         select(func.count(Sentence.id)).where(Sentence.book_id == book_id)
     ).one()
@@ -121,9 +117,7 @@ def get_progress(book_id: str, session: Session = Depends(get_session)):
 
 @router.delete("/{book_id}")
 def delete_book(book_id: str, session: Session = Depends(get_session)):
-    book = session.get(Book, book_id)
-    if not book:
-        raise HTTPException(status_code=404, detail="Book not found")
+    book = require_book(session, book_id)
     for s in session.exec(select(Sentence).where(Sentence.book_id == book_id)):
         session.delete(s)
     for p in session.exec(select(Progress).where(Progress.book_id == book_id)):
