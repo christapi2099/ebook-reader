@@ -59,24 +59,4 @@
       </button>
     {/each}
   </nav>
-
-  <div class="p-2 border-t border-border">
-    <button
-      class="w-full flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-fg hover:bg-surface-sunken transition-colors"
-      onclick={() => onNavigate('/account')}
-    >
-      <svg
-        class="w-5 h-5"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-      >
-        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z" />
-      </svg>
-      Account
-    </button>
-  </div>
 </aside>
