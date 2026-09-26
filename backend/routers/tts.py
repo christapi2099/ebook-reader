@@ -62,6 +62,10 @@ async def tts_websocket(websocket: WebSocket, book_id: str):
     consumer_task: asyncio.Task | None = None
     prefetch_task: asyncio.Task | None = None
     prefetch_cancel = asyncio.Event()
+    # One `speed_unavailable` notice per connection: the ability to honour a
+    # requested rate is a property of the engine, not of a sentence, so saying it
+    # once is enough and repeating it per sentence would be noise.
+    speed_downgrade_notified = False
 
     async def _producer(from_index: int, voice: str, speed: float) -> None:
         for idx in sorted(sentence_data.keys()):
@@ -82,6 +86,7 @@ async def tts_websocket(websocket: WebSocket, book_id: str):
         any message that slips out after we've been cancelled is harmlessly
         discarded downstream.
         """
+        nonlocal speed_downgrade_notified
         try:
             while True:
                 if engine_tts.queue.empty() and producer_task and producer_task.done():
@@ -116,6 +121,31 @@ async def tts_websocket(websocket: WebSocket, book_id: str):
                 meta = engine_tts._sentence_meta.pop(job.sentence_index, {})
                 duration_ms = meta.get("duration_ms", chunk_count * 100)
                 word_timestamps = meta.get("word_timestamps", [])
+
+                # Tell the client, once per session, if the rate it asked for is
+                # not the rate it is getting. Silently playing 1.0x audio while
+                # the UI still shows 1.5x is exactly the kind of pretended
+                # capability the handoff's rule 7 forbids; the engine knows the
+                # truth but nothing was reporting it, so the capability was
+                # computed and discarded. One message per session, not per
+                # sentence, because it is a property of the engine and repeating
+                # it would be noise. The session_id tag lets the client's existing
+                # stale-session filter discard it if the user has since seeked.
+                requested_speed = meta.get("requested_speed")
+                effective_speed = meta.get("effective_speed")
+                if (
+                    not speed_downgrade_notified
+                    and requested_speed is not None
+                    and effective_speed is not None
+                    and effective_speed != requested_speed
+                ):
+                    speed_downgrade_notified = True
+                    await websocket.send_text(json.dumps({
+                        "type": "speed_unavailable",
+                        "requested_speed": requested_speed,
+                        "effective_speed": effective_speed,
+                        "session_id": session_id,
+                    }))
 
                 # Prune this index from the cancelled set so it doesn't leak into
                 # the next session (defence in depth — router also clears the set).
