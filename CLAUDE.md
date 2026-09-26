@@ -50,6 +50,42 @@ Models: `deepseek/deepseek-reasoner` (plan) · `deepseek/deepseek-chat` (fast) �
 
 Always prepend `$(cat .opencode/instructions.md)` to agent prompts for Svelte rules + project context.
 
+## Working with other agents (read this before any git command)
+
+Several agents may be editing this repo at once. **Never run `git stash`,
+`git checkout -- <path>`, `git restore`, `git reset` or `git clean` in the shared
+working tree.** Each of those can silently destroy another agent's uncommitted
+work, and it has already happened here once: a `git stash push` of a file two
+agents co-owned reverted it to HEAD and lost both agents' edits.
+
+**Prefer a worktree.** Each agent gets its own checkout with its own index and
+HEAD, so its git commands cannot touch anyone else's files:
+
+```bash
+scripts/agent-worktree.sh add <name>     # creates .worktrees/<name> on agent/<name>
+scripts/agent-worktree.sh list
+scripts/agent-worktree.sh remove <name>
+```
+
+It symlinks the heavy gitignored state (`backend/venv`, `backend/.venv`,
+`.uv-cache`, `frontend/node_modules`) instead of copying gigabytes. File isolation
+is real, but **`refs/stash` is shared across worktrees** — a stash made in one
+appears in `git stash list` everywhere, so never pop a stash you did not create.
+Commit rather than stash.
+
+If you must work in the shared tree, the safety net makes destruction recoverable:
+
+```bash
+scripts/agent-safety.sh snapshot   # or `watch 90` to run it on a loop
+scripts/agent-safety.sh check      # stash list, destructive reflog, at-risk count
+scripts/agent-safety.sh restore <id>
+```
+
+It captures tracked changes (a `git stash create` commit under `refs/autosave/`)
+and **untracked** files (an rsync copy in `.snapshots/`), which is where most new
+work lives. **Commit often** — a stash can only lose what is uncommitted, so
+frequent commits are the cheapest protection available.
+
 ## Memory Bank
 After significant features/bug fixes, update:
 - `~/.claude/projects/-home-christapia/memory/bugs_fixed_ebook_reader.md` — bugs + fixes
