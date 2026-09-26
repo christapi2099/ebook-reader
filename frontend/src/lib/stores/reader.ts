@@ -159,8 +159,9 @@ export const seek = async (index: number): Promise<void> => {
   readerStore.update(s => ({ ...s, currentIndex: clamped }))
   if (bookId === null) return
   // Persist the clamped value, not the requested one. `seek(999)` on a
-  // hundred-sentence book used to store 999 — the server does not clamp this
-  // field — and the reader then resumed out of bounds.
+  // hundred-sentence book used to store 999, and the reader then resumed out of
+  // bounds. The server now clamps too (POST /library/{id}/progress), but this
+  // keeps the local position and the stored one identical without a round trip.
   clearSaveTimer()
   await writeProgress(bookId, clamped)
 }

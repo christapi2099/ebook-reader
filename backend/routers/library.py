@@ -122,19 +122,31 @@ def update_progress(
     body: ProgressUpdate,
     session: Session = Depends(get_session),
 ):
+    """Store the reading position, clamped into the book's sentence range.
+
+    An out-of-range index (a stale client, a beacon sent for an older import, a
+    hand-written request) would otherwise be stored as-is and handed back on the
+    next open as a position past the end of the book. Sentences are written in
+    the same transaction as the book, so the count is always known here. The
+    stored value is returned so the caller can see what was actually kept.
+    """
     require_book(session, book_id)
+    count = session.exec(
+        select(func.count(Sentence.id)).where(Sentence.book_id == book_id)
+    ).one()
+    sentence_index = max(0, min(body.sentence_index, count - 1))
     row = session.get(Progress, book_id)
     if row:
-        row.sentence_index = body.sentence_index
+        row.sentence_index = sentence_index
         row.updated_at = datetime.now(timezone.utc)
     else:
         session.add(Progress(
             book_id=book_id,
-            sentence_index=body.sentence_index,
+            sentence_index=sentence_index,
             updated_at=datetime.now(timezone.utc),
         ))
     session.commit()
-    return {"ok": True}
+    return {"ok": True, "sentence_index": sentence_index}
 
 
 @router.post("/{book_id}/folder")

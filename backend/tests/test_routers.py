@@ -98,10 +98,30 @@ class TestProgress:
         assert r.status_code == 200
 
     def test_get_progress(self, client, book_id):
-        client.post(f"/library/{book_id}/progress", json={"sentence_index": 42})
+        client.post(f"/library/{book_id}/progress", json={"sentence_index": 3})
         r = client.get(f"/library/{book_id}/progress")
         assert r.status_code == 200
-        assert r.json()["sentence_index"] == 42
+        assert r.json()["sentence_index"] == 3
+
+    def _last_index(self, client, book_id):
+        return len(client.get(f"/documents/{book_id}/sentences").json()) - 1
+
+    def test_index_past_the_end_is_clamped_to_the_last_sentence(self, client, book_id):
+        last = self._last_index(client, book_id)
+        r = client.post(f"/library/{book_id}/progress", json={"sentence_index": last + 1000})
+        assert r.json()["sentence_index"] == last
+        assert client.get(f"/library/{book_id}/progress").json()["sentence_index"] == last
+
+    def test_negative_index_is_clamped_to_zero(self, client, book_id):
+        r = client.post(f"/library/{book_id}/progress", json={"sentence_index": -7})
+        assert r.json()["sentence_index"] == 0
+        assert client.get(f"/library/{book_id}/progress").json()["sentence_index"] == 0
+
+    def test_in_range_index_is_stored_unchanged(self, client, book_id):
+        last = self._last_index(client, book_id)
+        assert last >= 1, "the fixture book needs two sentences for this to mean anything"
+        r = client.post(f"/library/{book_id}/progress", json={"sentence_index": last})
+        assert r.json()["sentence_index"] == last
 
     def test_no_progress_returns_zero(self, client, book_id):
         r = client.get(f"/library/{book_id}/progress")
