@@ -1,0 +1,147 @@
+{
+  "db": {
+    "rows": 4553,
+    "total_audio_bytes": 808521600,
+    "avg_bytes_per_row": 177580.0,
+    "min_bytes": 10800,
+    "max_bytes": 1243200,
+    "avg_duration_ms": 3699.6,
+    "avg_duration_s": 3.7,
+    "total_audio_hours": 4.679,
+    "distinct_books_with_sentences": 7,
+    "distinct_voices_in_cache": 3,
+    "word_timestamp_bytes": 1767168,
+    "db_file_bytes": 839917568,
+    "derived_bytes_per_audio_s": 48000.00854893825,
+    "expected_bytes_per_audio_s": 48000,
+    "avg_chars_per_speakable_sentence": 85.5,
+    "books": [
+      {
+        "title": "cleancodebook.pdf",
+        "pages": 462,
+        "sentences": 9663,
+        "speakable": 9070
+      },
+      {
+        "title": "gnu-c-manual.pdf",
+        "pages": 91,
+        "sentences": 2483,
+        "speakable": 2205
+      },
+      {
+        "title": "Untitled Text",
+        "pages": 17,
+        "sentences": 17,
+        "speakable": 17
+      },
+      {
+        "title": "Untitled Text",
+        "pages": 4,
+        "sentences": 4,
+        "speakable": 4
+      },
+      {
+        "title": "Untitled Text",
+        "pages": 3,
+        "sentences": 3,
+        "speakable": 3
+      },
+      {
+        "title": "Untitled Text",
+        "pages": 1,
+        "sentences": 1,
+        "speakable": 1
+      },
+      {
+        "title": "Untitled Text",
+        "pages": 1,
+        "sentences": 1,
+        "speakable": 1
+      }
+    ]
+  },
+  "book_300pp": {
+    "source_book": "cleancodebook.pdf",
+    "source_pages": 462,
+    "source_sentences": 9663,
+    "source_speakable": 9070,
+    "sentences_per_page": 20.92,
+    "speakable_ratio": 0.9386,
+    "sentences_300pp": 6275,
+    "speakable_sentences_300pp": 5890,
+    "crosscheck_words": 85396
+  },
+  "chars_per_audio_s_1x_measured": 12.06,
+  "audio_seconds_per_sentence": {
+    "db_blend_measured": 3.7,
+    "bench_derived_at_1x": 7.093,
+    "implied_blend_speed": 1.92
+  },
+  "disk": {
+    "db_blend": {
+      "book_bytes_at_1_0x": 1045945833,
+      "book_gib_at_1_0x": 0.97,
+      "seventeen_speed_sum_factor_7": 6.6333,
+      "all_7_speeds_gib": 6.46,
+      "eleven_speed_sum_factor_11": 8.4128,
+      "all_11_speeds_gib": 8.2,
+      "all_7_speeds_x_28_voices_gib": 180.93,
+      "all_11_speeds_x_28_voices_gib": 229.46,
+      "all_7_speeds_x_28_voices_x_7_books_gib": 1266.48
+    },
+    "bench_1x": {
+      "book_bytes_at_1_0x": 2005253508,
+      "book_gib_at_1_0x": 1.87,
+      "seventeen_speed_sum_factor_7": 6.6333,
+      "all_7_speeds_gib": 12.39,
+      "eleven_speed_sum_factor_11": 8.4128,
+      "all_11_speeds_gib": 15.71,
+      "all_7_speeds_x_28_voices_gib": 346.86,
+      "all_11_speeds_x_28_voices_gib": 439.92,
+      "all_7_speeds_x_28_voices_x_7_books_gib": 2428.05
+    }
+  },
+  "free_disk_gib": 529.0,
+  "free_disk_gb": 568.0,
+  "time": {
+    "db_blend": {
+      "audio_hours_at_1_0x": 6.05,
+      "cpu_wall_hours_one_pass": 15.63,
+      "gpu_est_realtime_factor_low": 1.0,
+      "gpu_est_realtime_factor_high": 20.0,
+      "gpu_est_wall_hours_one_pass_pessimistic_1x": 6.05,
+      "gpu_est_wall_minutes_one_pass_likely_11x": 33.0,
+      "gpu_est_wall_minutes_one_pass_optimistic_20x": 18.2,
+      "cpu_wall_hours_11_speed_changes_1_voice": 171.93,
+      "gpu_est_hours_11_speed_changes_1_voice_at_11x": 6.05
+    },
+    "bench_1x": {
+      "audio_hours_at_1_0x": 11.6,
+      "cpu_wall_hours_one_pass": 15.63,
+      "gpu_est_realtime_factor_low": 1.0,
+      "gpu_est_realtime_factor_high": 20.0,
+      "gpu_est_wall_hours_one_pass_pessimistic_1x": 11.6,
+      "gpu_est_wall_minutes_one_pass_likely_11x": 63.3,
+      "gpu_est_wall_minutes_one_pass_optimistic_20x": 34.8,
+      "cpu_wall_hours_11_speed_changes_1_voice": 171.93,
+      "gpu_est_hours_11_speed_changes_1_voice_at_11x": 11.6
+    }
+  },
+  "measured_cpu_per_sentence_s": 9.5534,
+  "measured_cpu_rtf": 1.7721,
+  "measured_cpu_rttf_median": 8.9902,
+  "growth": {
+    "note": "AudioCache has no eviction; every new (text,voice,speed) is a permanent row",
+    "rows_added_per_full_book_pass": 5890,
+    "bytes_added_per_full_book_pass_gib_dbblend": 0.97,
+    "three_hours_listening_at_1_5x_sentences": 1946
+  },
+  "prefetch_reality_check": {
+    "current_prefetch_count": 50,
+    "audio_seconds_warmed_dbblend": 185.0,
+    "wall_seconds_to_warm_measured_cpu": 477.7,
+    "can_cpu_keep_up_at_1x": false,
+    "can_cpu_keep_up_at_1_5x": false,
+    "cpu_rtf": 1.7721
+  }
+}

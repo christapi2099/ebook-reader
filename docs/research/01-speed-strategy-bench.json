@@ -1,0 +1,146 @@
+{
+  "device": "cpu (sandbox: /dev/nvidia* not exposed)",
+  "torch": "2.14.0+cu130",
+  "kokoro_samples": [
+    {
+      "text": "short",
+      "speed": 0.5,
+      "wall_s": 7.3207,
+      "samples": 213600,
+      "audio_s": 8.9,
+      "frames": 356,
+      "frames_per_phoneme_proxy": null,
+      "rtf": 0.8226
+    },
+    {
+      "text": "short",
+      "speed": 0.75,
+      "wall_s": 7.3517,
+      "samples": 144000,
+      "audio_s": 6.0,
+      "frames": 240,
+      "frames_per_phoneme_proxy": null,
+      "rtf": 1.2253
+    },
+    {
+      "text": "short",
+      "speed": 1.0,
+      "wall_s": 7.9124,
+      "samples": 105600,
+      "audio_s": 4.4,
+      "frames": 176,
+      "frames_per_phoneme_proxy": null,
+      "rtf": 1.7983
+    },
+    {
+      "text": "short",
+      "speed": 1.25,
+      "wall_s": 6.3101,
+      "samples": 88800,
+      "audio_s": 3.7,
+      "frames": 148,
+      "frames_per_phoneme_proxy": null,
+      "rtf": 1.7054
+    },
+    {
+      "text": "short",
+      "speed": 1.5,
+      "wall_s": 5.2962,
+      "samples": 70800,
+      "audio_s": 2.95,
+      "frames": 118,
+      "frames_per_phoneme_proxy": null,
+      "rtf": 1.7953
+    },
+    {
+      "text": "short",
+      "speed": 2.0,
+      "wall_s": 6.7275,
+      "samples": 59400,
+      "audio_s": 2.475,
+      "frames": 99,
+      "frames_per_phoneme_proxy": null,
+      "rtf": 2.7182
+    },
+    {
+      "text": "short",
+      "speed": 3.0,
+      "wall_s": 5.8329,
+      "samples": 49200,
+      "audio_s": 2.05,
+      "frames": 82,
+      "frames_per_phoneme_proxy": null,
+      "rtf": 2.8453
+    },
+    {
+      "text": "long",
+      "speed": 0.5,
+      "wall_s": 26.3679,
+      "samples": 617400,
+      "audio_s": 25.725,
+      "frames": 1029,
+      "frames_per_phoneme_proxy": null,
+      "rtf": 1.025
+    },
+    {
+      "text": "long",
+      "speed": 0.75,
+      "wall_s": 19.0425,
+      "samples": 418800,
+      "audio_s": 17.45,
+      "frames": 698,
+      "frames_per_phoneme_proxy": null,
+      "rtf": 1.0913
+    },
+    {
+      "text": "long",
+      "speed": 1.0,
+      "wall_s": 12.5403,
+      "samples": 306600,
+      "audio_s": 12.775,
+      "frames": 511,
+      "frames_per_phoneme_proxy": null,
+      "rtf": 0.9816
+    },
+    {
+      "text": "long",
+      "speed": 1.25,
+      "wall_s": 73.7526,
+      "samples": 259800,
+      "audio_s": 10.825,
+      "frames": 433,
+      "frames_per_phoneme_proxy": null,
+      "rtf": 6.8132
+    },
+    {
+      "text": "long",
+      "speed": 1.5,
+      "wall_s": 52.3807,
+      "samples": 197400,
+      "audio_s": 8.225,
+      "frames": 329,
+      "frames_per_phoneme_proxy": null,
+      "rtf": 6.3685
+    },
+    {
+      "text": "long",
+      "speed": 2.0,
+      "wall_s": 29.2048,
+      "samples": 170400,
+      "audio_s": 7.1,
+      "frames": 284,
+      "frames_per_phoneme_proxy": null,
+      "rtf": 4.1134
+    },
+    {
+      "text": "long",
+      "speed": 3.0,
+      "wall_s": 43.5773,
+      "samples": 142800,
+      "audio_s": 5.95,
+      "frames": 238,
+      "frames_per_phoneme_proxy": null,
+      "rtf": 7.3239
+    }
+  ]
+}

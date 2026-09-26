@@ -1,0 +1,47 @@
+{
+  "device": "cpu",
+  "cuda_available": false,
+  "model_load_s": 10.644,
+  "g2p": {
+    "times_s": [
+      0.0046,
+      0.0073,
+      0.027
+    ],
+    "mean_s": 0.013
+  },
+  "torch_forward": {
+    "times_s": [
+      25.1868,
+      25.0473,
+      42.4567
+    ],
+    "mean_s": 30.8969
+  },
+  "event_loop": {
+    "heartbeat_interval_s": 0.01,
+    "baseline_median_gap_s": 0.01117,
+    "max_gap_s": 83.0083,
+    "n_gaps": 5,
+    "gaps_over_1s": 1,
+    "gaps_over_0_1s": 1,
+    "synth_wall_s": 83.004,
+    "per_sentence_s": [
+      26.563,
+      20.261,
+      36.18
+    ],
+    "interpretation": "max_gap is how long the asyncio event loop was unable to run ANY other task (HTTP request, WebSocket frame, cancellation check) while one sentence was being synthesized."
+  },
+  "concurrency": {
+    "individual_s": {
+      "play": 24.563,
+      "prefetch": 23.318
+    },
+    "sum_of_individuals_s": 47.881,
+    "wall_when_concurrent_s": 47.881,
+    "overlap_ratio": 1.0,
+    "max_event_loop_gap_s": 47.8807,
+    "interpretation": "overlap_ratio ~= 1.0 means the two tasks were fully SERIALIZED (no parallelism): prefetch steals wall-clock from playback one-for-one."
+  }
+}
