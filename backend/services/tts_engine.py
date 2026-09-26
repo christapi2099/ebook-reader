@@ -22,7 +22,9 @@ SAMPLE_RATE = 24000
 # Speeds are normalised to this many decimals before being hashed into a cache
 # key. The UI only offers multiples of 0.25 in [0.5, 3.0], so two decimals is
 # lossless for every reachable input while collapsing float noise
-# (1.15 vs 1.1500000000000001) onto a single key.
+# (1.15 vs 1.1500000000000001) onto a single key. `_cache_key` must keep emitting
+# the legacy `f"{speed}"` spelling for these values, or every row on disk is
+# orphaned; see TestCacheKeyBackwardCompatibility.
 SPEED_PRECISION = 2
 
 _g2p = None
@@ -92,7 +94,15 @@ class TTSEngine:
             return []
 
     def _cache_key(self, text: str, voice: str, speed: float) -> str:
-        normalised = f"{round(float(speed), SPEED_PRECISION):.{SPEED_PRECISION}f}"
+        """Cache key for one ``(text, voice, speed)`` triple.
+
+        ``repr`` of the rounded float is deliberate. For every speed the UI can
+        produce (all multiples of 0.25) it is byte-identical to the legacy
+        ``f"{speed}"`` key, so rows already on disk stay reachable. A fixed-point
+        format such as ``"1.00"`` would silently orphan the entire existing cache
+        and force a re-synthesis of every sentence in the library.
+        """
+        normalised = repr(round(float(speed), SPEED_PRECISION))
         return hashlib.sha256(f"{text}:{voice}:{normalised}".encode()).hexdigest()
 
     def _effective_speed(self, requested: float) -> float:

@@ -11,6 +11,7 @@ audio on the *requested* speed. That silently and permanently cached 1.0x audio
 under e.g. the 1.5x key, so every later request at 1.5x replayed the wrong rate.
 """
 import asyncio
+import hashlib
 
 import numpy as np
 import pytest
@@ -172,3 +173,37 @@ class TestPrefetchRespectsSpeed:
                 AudioCache, engine._cache_key("Prefetched.", "af_heart", 2.0)
             )
         assert wrongly_cached is None
+
+
+class TestCacheKeyBackwardCompatibility:
+    """Normalising the speed must not change the key for speeds already shipped.
+
+    `_cache_key` is the only producer of `AudioCache.text_hash`, and the live
+    database holds hundreds of megabytes of rows written with the legacy
+    `f"{speed}"` spelling. A normalisation that renders 1.0 as "1.00" would
+    silently orphan every one of those rows and make the reader re-synthesise
+    each sentence once — a slow, user-visible regression that no crash would
+    reveal.
+    """
+
+    # The reader's full speed range as offered by the UI.
+    UI_SPEEDS = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0]
+
+    @staticmethod
+    def _legacy_key(text: str, voice: str, speed: float) -> str:
+        """Reproduces the pre-fix key derivation, verbatim."""
+        return hashlib.sha256(f"{text}:{voice}:{speed}".encode()).hexdigest()
+
+    @pytest.mark.parametrize("speed", UI_SPEEDS)
+    def test_ui_speeds_still_map_to_their_legacy_key(self, speed):
+        engine = TTSEngine(kokoro_speed_supported)
+        assert engine._cache_key("Hello world.", "af_heart", speed) == self._legacy_key(
+            "Hello world.", "af_heart", speed
+        ), f"speed {speed} no longer resolves to its legacy cache key"
+
+    def test_int_speed_still_reaches_float_rows(self):
+        """A caller passing `speed=1` must still find rows written for `1.0`."""
+        engine = TTSEngine(kokoro_speed_supported)
+        assert engine._cache_key("Hello.", "af_heart", 1) == self._legacy_key(
+            "Hello.", "af_heart", 1.0
+        )
