@@ -28,7 +28,7 @@ test.describe('Library Page', () => {
     await expect(page.getByText('No books yet')).toBeVisible({ timeout: 10000 })
   })
 
-  test('shows error and Retry button on API failure', async ({ page }) => {
+  test('@critical shows error and Retry button on API failure', async ({ page }) => {
     await page.route('http://localhost:8000/library', r => r.fulfill({ status: 500, json: {} }))
     await page.route('http://localhost:8000/user/settings', r => r.fulfill({ json: { last_book_id: null, last_sentence_index: 0 } }))
     await page.goto('/library')
@@ -52,7 +52,7 @@ test.describe('Library Page', () => {
     await expect(page.getByText('Test Book Three')).toBeVisible({ timeout: 10000 })
   })
 
-  test('renders book grid', async ({ page }) => {
+  test('@critical renders book grid', async ({ page }) => {
     await page.route('http://localhost:8000/library', r => r.fulfill({ json: MOCK_BOOKS }))
     await page.route('http://localhost:8000/user/settings', r => r.fulfill({ json: { last_book_id: null, last_sentence_index: 0 } }))
     await page.goto('/library')
@@ -63,7 +63,7 @@ test.describe('Library Page', () => {
     await expect(page.getByText('EPUB')).toBeVisible()
   })
 
-  test('clicking book navigates to reader', async ({ page }) => {
+  test('@critical clicking book navigates to reader', async ({ page }) => {
     await page.route('http://localhost:8000/library', r => r.fulfill({ json: MOCK_BOOKS }))
     await page.route('http://localhost:8000/user/settings', r => r.fulfill({ json: { last_book_id: null, last_sentence_index: 0 } }))
     await page.goto('/library')

@@ -194,14 +194,14 @@ function openMoveDialog(page: Page, bookTitle: string) {
 }
 
 test.describe('Library folders', () => {
-  test('shows a tile per folder with the count the server reported', async ({ page }) => {
+  test('@critical shows a tile per folder with the count the server reported', async ({ page }) => {
     await openLibrary(page)
 
     await expect(page.getByLabel('Open folder Reading list, 1 book')).toBeVisible()
     await expect(page.getByLabel('Open folder Someday, 0 books')).toBeVisible()
   })
 
-  test('opening a folder filters the grid and shows a breadcrumb', async ({ page }) => {
+  test('@critical opening a folder filters the grid and shows a breadcrumb', async ({ page }) => {
     await openLibrary(page)
 
     await page.getByLabel('Open folder Reading list, 1 book').click()
@@ -236,7 +236,7 @@ test.describe('Library folders', () => {
     await expect(page.getByText('No books yet')).toBeHidden()
   })
 
-  test('creates a folder and renders the count the refreshed list reports', async ({ page }) => {
+  test('@critical creates a folder and renders the count the refreshed list reports', async ({ page }) => {
     const backend = await openLibrary(page)
 
     await page.getByRole('button', { name: 'New folder' }).click()
@@ -258,7 +258,7 @@ test.describe('Library folders', () => {
     await expect(page.getByText(/HTTP \d\d\d/)).toBeHidden()
   })
 
-  test('a duplicate name is rejected case-insensitively with the backend message', async ({ page }) => {
+  test('@critical a duplicate name is rejected case-insensitively with the backend message', async ({ page }) => {
     await openLibrary(page)
 
     await page.getByRole('button', { name: 'New folder' }).click()
@@ -303,7 +303,7 @@ test.describe('Library folders', () => {
   })
 
   // The dialog is the accessible path; drag-and-drop below is only an extra.
-  test('the move dialog files a book with the keyboard', async ({ page }) => {
+  test('@critical the move dialog files a book with the keyboard', async ({ page }) => {
     const backend = await openLibrary(page)
 
     const options = page.getByLabel('Book options for Deep Work')
@@ -356,7 +356,7 @@ test.describe('Library folders', () => {
     await expect(options).toBeFocused()
   })
 
-  test('dragging a book onto a folder tile files it', async ({ page }) => {
+  test('@critical dragging a book onto a folder tile files it', async ({ page }) => {
     const backend = await openLibrary(page)
 
     await page.getByLabel('Deep Work by Cal Newport').dragTo(
@@ -392,7 +392,7 @@ test.describe('Library folders', () => {
     })
   })
 
-  test('deleting a folder keeps its books and offers an undo', async ({ page }) => {
+  test('@critical deleting a folder keeps its books and offers an undo', async ({ page }) => {
     const backend = await openLibrary(page)
     page.on('dialog', dialog => dialog.accept())
 
@@ -440,7 +440,7 @@ test.describe('Library folders', () => {
     }
   })
 
-  test('backend down: error and Retry, and no folder controls pretending otherwise', async ({ page }) => {
+  test('@critical backend down: error and Retry, and no folder controls pretending otherwise', async ({ page }) => {
     await page.route(`${API}/user/settings`, route =>
       route.fulfill({ json: { last_book_id: null, last_sentence_index: 0 } }),
     )

@@ -1,6 +1,15 @@
 import { defineConfig } from '@playwright/test'
 
+// Only the critical user flows run by default, tagged `@critical` in the specs.
+// See tests/README.md for the list and the reasoning: e2e is the slowest gate and
+// the suite had grown to 121 tests, most of them guarding behaviour that unit
+// tests already cover (bionic rendering, search styling, buffering indicators).
+// Set E2E_ALL=1 to run everything.
+const CRITICAL_TAG = /@critical/
+const grep = process.env.E2E_ALL ? undefined : CRITICAL_TAG
+
 export default defineConfig({
+  grep,
   testDir: './tests',
   fullyParallel: true,
   forbidOnly: !!process.env.CI,

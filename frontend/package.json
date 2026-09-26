@@ -11,7 +11,10 @@
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
 		"test:e2e": "playwright test",
+		"test:e2e:all": "E2E_ALL=1 playwright test",
+		"test:e2e:list": "playwright test --list",
 		"test:unit": "vitest run",
+		"test:unit:changed": "vitest run --changed",
 		"test:unit:watch": "vitest"
 	},
 	"devDependencies": {

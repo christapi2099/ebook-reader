@@ -65,12 +65,12 @@ test.describe('Highlight–Audio Sync', () => {
     expect(errors.filter(e => !e.includes('favicon'))).toHaveLength(0)
   })
 
-  test('initial highlight on sentence 0', async ({ page }) => {
+  test('@critical initial highlight on sentence 0', async ({ page }) => {
     await expect(sentenceOverlay(page, 0, 'true')).toBeVisible()
     await expect(page.locator('[data-highlighted="true"]')).toHaveCount(1)
   })
 
-  test('highlight advances and previous clears', async ({ page }) => {
+  test('@critical highlight advances and previous clears', async ({ page }) => {
     await playBtn(page).click()
     await driver.sendSentenceStart(IDX.second, SID.first)
     await driver.sendAudioChunk(MOCK_AUDIO_CHUNK)
@@ -92,7 +92,7 @@ test.describe('Highlight–Audio Sync', () => {
     await expect(pauseBtn(page)).toBeVisible()
   })
 
-  test('pause freezes highlight', async ({ page }) => {
+  test('@critical pause freezes highlight', async ({ page }) => {
     await playBtn(page).click()
     await driver.sendSentenceStart(IDX.second, SID.first)
     await driver.sendAudioChunk(MOCK_AUDIO_CHUNK)
@@ -105,7 +105,7 @@ test.describe('Highlight–Audio Sync', () => {
     await expect(sentenceOverlay(page, 1, 'true')).toBeVisible()
   })
 
-  test('resume continues from paused index', async ({ page }) => {
+  test('@critical resume continues from paused index', async ({ page }) => {
     await playBtn(page).click()
     await driver.sendSentenceStart(IDX.second, SID.first)
     await driver.sendAudioChunk(MOCK_AUDIO_CHUNK)
@@ -116,14 +116,14 @@ test.describe('Highlight–Audio Sync', () => {
     expect(resumeAction?.['from_index']).toBe(IDX.second)
   })
 
-  test('sentence click triggers seek and highlight jumps', async ({ page }) => {
+  test('@critical sentence click triggers seek and highlight jumps', async ({ page }) => {
     await playBtn(page).click()
     await page.locator('[data-index="3"]').click()
     expect(driver.actionsOf('seek')[0]?.['to_index']).toBe(IDX.clicked)
     await expect(sentenceOverlay(page, 3, 'true')).toBeVisible()
   })
 
-  test('complete stops playback, last sentence stays highlighted', async ({ page }) => {
+  test('@critical complete stops playback, last sentence stays highlighted', async ({ page }) => {
     await playBtn(page).click()
     await driver.sendSentenceStart(IDX.last, SID.first)
     await driver.sendAudioChunk(MOCK_AUDIO_CHUNK)
@@ -284,7 +284,7 @@ test.describe('Word-level highlighting', () => {
     expect(errors.filter(e => !e.includes('favicon'))).toHaveLength(0)
   })
 
-  test('word_divs_rendered_for_sentences_with_words', async ({ page }) => {
+  test('@critical word_divs_rendered_for_sentences_with_words', async ({ page }) => {
     await expect(page.locator('[data-word-index="0"][data-sentence-index="0"]')).toHaveCount(1)
     await expect(page.locator('[data-word-index="1"][data-sentence-index="0"]')).toHaveCount(1)
     await expect(page.locator('[data-word-index="0"][data-sentence-index="1"]')).toHaveCount(1)
@@ -292,7 +292,7 @@ test.describe('Word-level highlighting', () => {
     expect(totalWordDivs).toBe(3)
   })
 
-  test('current_word_div_gets_background_color', async ({ page }) => {
+  test('@critical current_word_div_gets_background_color', async ({ page }) => {
     await page.waitForSelector('[data-overlay]', { timeout: 10000 })
     await playBtn(page).click()
     await driver.sendSentenceStart(IDX.first, SID.first)
@@ -316,7 +316,7 @@ test.describe('Word-level highlighting', () => {
     expect(debug).not.toBe('')
   })
 
-  test('word_highlight_advances_to_next_word', async ({ page }) => {
+  test('@critical word_highlight_advances_to_next_word', async ({ page }) => {
     await page.waitForSelector('[data-overlay]', { timeout: 10000 })
     await playBtn(page).click()
     await driver.sendSentenceStart(IDX.first, SID.first)
@@ -344,7 +344,7 @@ test.describe('Word-level highlighting', () => {
     expect(word1Bg).not.toBe('')
   })
 
-  test('word_highlight_clears_on_pause', async ({ page }) => {
+  test('@critical word_highlight_clears_on_pause', async ({ page }) => {
     await page.waitForSelector('[data-overlay]', { timeout: 10000 })
     await playBtn(page).click()
     await driver.sendSentenceStart(IDX.first, SID.first)

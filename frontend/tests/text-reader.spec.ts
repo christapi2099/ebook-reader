@@ -31,7 +31,7 @@ test.describe('Text Reader Homepage', () => {
     await expect(playBtn).toBeEnabled()
   })
 
-  test('submitting creates book and transitions to reading mode', async ({ page }) => {
+  test('@critical submitting creates book and transitions to reading mode', async ({ page }) => {
     // Mock API responses
     await page.route('**/documents/text', async route => {
       route.fulfill({ json: { book_id: 'text-book-1', sentence_count: 2, already_existed: false } })
@@ -55,7 +55,7 @@ test.describe('Text Reader Homepage', () => {
     await expect(page.getByText('This is another sentence.')).toBeVisible()
   })
 
-  test('sentences displayed as list in reading mode', async ({ page }) => {
+  test('@critical sentences displayed as list in reading mode', async ({ page }) => {
     await page.route('**/documents/text', r => r.fulfill({ json: { book_id: 'text-book-1', sentence_count: 2 } }))
     await page.route('**/documents/text-book-1/sentences', r => r.fulfill({
       json: [
@@ -72,7 +72,7 @@ test.describe('Text Reader Homepage', () => {
     await expect(page.locator('[data-sentence-index="1"]')).toBeVisible()
   })
 
-  test('current sentence highlighted', async ({ page }) => {
+  test('@critical current sentence highlighted', async ({ page }) => {
     await page.route('**/documents/text', r => r.fulfill({ json: { book_id: 'text-book-1', sentence_count: 2 } }))
     await page.route('**/documents/text-book-1/sentences', r => r.fulfill({
       json: [
@@ -89,7 +89,7 @@ test.describe('Text Reader Homepage', () => {
     await expect(page.locator('[data-sentence-index="0"][data-highlighted="true"]')).toBeVisible()
   })
 
-  test('pause button freezes highlight', async ({ page }) => {
+  test('@critical pause button freezes highlight', async ({ page }) => {
     await page.route('**/documents/text', r => r.fulfill({ json: { book_id: 'text-book-1', sentence_count: 2 } }))
     await page.route('**/documents/text-book-1/sentences', r => r.fulfill({
       json: [
@@ -108,7 +108,7 @@ test.describe('Text Reader Homepage', () => {
     await expect(page.locator('[data-sentence-index="0"][data-highlighted="true"]')).toBeVisible()
   })
 
-  test('seek by clicking sentence', async ({ page }) => {
+  test('@critical seek by clicking sentence', async ({ page }) => {
     await page.route('**/documents/text', r => r.fulfill({ json: { book_id: 'text-book-1', sentence_count: 3 } }))
     await page.route('**/documents/text-book-1/sentences', r => r.fulfill({
       json: [
@@ -129,7 +129,7 @@ test.describe('Text Reader Homepage', () => {
     await expect(page.locator('[data-sentence-index="2"][data-highlighted="true"]')).toBeVisible()
   })
 
-  test('speed change works', async ({ page }) => {
+  test('@critical speed change works', async ({ page }) => {
     await page.route('**/documents/text', r => r.fulfill({ json: { book_id: 'text-book-1', sentence_count: 2 } }))
     await page.route('**/documents/text-book-1/sentences', r => r.fulfill({
       json: [
