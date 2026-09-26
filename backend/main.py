@@ -53,7 +53,10 @@ def _init_local_kokoro() -> tuple[Any | None, str | None, str | None]:
     Settings can ask for an explicit device instead of taking pot luck.
     Returns ``(pipeline, device, error)``.
     """
-    device = "cuda" if engine_manager._cuda_available() else "cpu"
+    # The manager owns the "is there a GPU" answer, so asking the same probe it
+    # uses keeps the startup device and the Settings selector from disagreeing.
+    torch_info = kokoro_runtime.probe_local_torch()
+    device = "cuda" if torch_info["cuda_available"] else "cpu"
     pipeline, error = engine_manager.build_local(device)
     if pipeline is None:
         return None, None, error

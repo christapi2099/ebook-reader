@@ -247,11 +247,17 @@ class EngineManager:
         self,
         local_builder: Callable[[str], tuple[Any | None, str | None]] = build_local,
         remote_builder: Callable[..., tuple[Any | None, str | None]] = build_remote,
-        cuda_probe: Callable[[], bool] | None = None,
+        torch_probe: Callable[[], dict[str, Any]] | None = None,
+        remote_probe: Callable[..., dict[str, Any]] | None = None,
     ) -> None:
         self._local_builder = local_builder
         self._remote_builder = remote_builder
-        self._cuda_probe = cuda_probe or _cuda_available
+        # Both probes are injectable, and both the selector and the startup path
+        # go through these same two callables: reading cuda_available from one
+        # source while a switch consulted another is how a machine with no GPU
+        # could still be offered the GPU card.
+        self._torch_probe = torch_probe or kokoro_runtime.probe_local_torch
+        self._remote_probe = remote_probe or modal_remote.probe
         self._lock = threading.RLock()
         self._current: Any | None = None
         self._active: str | None = None
@@ -286,6 +292,51 @@ class EngineManager:
                 "options": [o.as_dict() for o in (options if options is not None else self.options())],
             }
 
+    def availability(self, engine_id: str) -> EngineOption:
+        """Whether one engine can run here, from that engine's own probe.
+
+        Deliberately per-engine: asking about the local engines must not touch
+        the network. Probing Modal to decide whether to start Kokoro on the CPU
+        would make the local-first path depend on the internet, which is exactly
+        the property this backend is built to keep.
+        """
+        if engine_id in (CPU, GPU):
+            return self._local_availability(engine_id)
+        if engine_id == MODAL:
+            return self._modal_availability()
+        raise UnknownEngine(f"Unknown engine {engine_id!r}; expected one of {', '.join(ENGINE_IDS)}")
+
+    def _local_availability(self, engine_id: str) -> EngineOption:
+        info = self._torch_probe()
+        torch_ok = info.get("torch_version") is not None
+        if engine_id == CPU:
+            available = torch_ok
+            reason = None if torch_ok else f"PyTorch unavailable: {info.get('error')}"
+        else:
+            available = bool(info.get("cuda_available"))
+            if available:
+                reason = None
+            elif not torch_ok:
+                reason = f"PyTorch unavailable: {info.get('error')}"
+            else:
+                reason = "No CUDA GPU detected"
+        return EngineOption(engine_id, ENGINE_LABELS[engine_id], available, reason)
+
+    def _modal_availability(self) -> EngineOption:
+        remote = self._remote_probe(timeout_s=OPTIONS_PROBE_SECONDS)
+        available = bool(remote.get("configured") and remote.get("reachable"))
+        reason = None if available else _modal_reason(remote)
+        return EngineOption(MODAL, ENGINE_LABELS[MODAL], available, reason)
+
+    def options(self) -> list[EngineOption]:
+        """Every engine, with the reason each one is or is not usable.
+
+        This is the selector's data source, so it probes all three — including
+        Modal, because the UI has to be able to say *why* the cloud card is
+        greyed out.
+        """
+        return [self.availability(engine_id) for engine_id in ENGINE_IDS]
+
     def playback_phase(self) -> str | None:
         """What to tell the reader about the GPU before it starts playing.
 
@@ -304,39 +355,6 @@ class EngineManager:
                 return self._phase
         return PHASE_STARTING
 
-    # -- probes -----------------------------------------------------------
-
-    def options(self) -> list[EngineOption]:
-        """Per-engine availability, from real probes only.
-
-        Nothing here is a guess: the CPU card follows ``import torch``, the GPU
-        card follows ``torch.cuda.is_available()``, and the Modal card follows a
-        genuine reachability check.
-        """
-        torch_info = kokoro_runtime.probe_local_torch()
-        # Capped: this runs on a UI-facing GET, and a probe that cannot reach
-        # Modal must not hold the response open for the full endpoint budget.
-        remote = modal_remote.probe(timeout_s=OPTIONS_PROBE_SECONDS)
-
-        cpu_ok = torch_info["torch_version"] is not None
-        gpu_ok = bool(torch_info["cuda_available"])
-        modal_ok = bool(remote["configured"] and remote["reachable"])
-
-        cpu_reason = None if cpu_ok else f"PyTorch unavailable: {torch_info['error']}"
-        if gpu_ok:
-            gpu_reason = None
-        elif not cpu_ok:
-            gpu_reason = f"PyTorch unavailable: {torch_info['error']}"
-        else:
-            gpu_reason = "No CUDA GPU detected"
-        modal_reason = None if modal_ok else _modal_reason(remote)
-
-        return [
-            EngineOption(CPU, ENGINE_LABELS[CPU], cpu_ok, cpu_reason),
-            EngineOption(GPU, ENGINE_LABELS[GPU], gpu_ok, gpu_reason),
-            EngineOption(MODAL, ENGINE_LABELS[MODAL], modal_ok, modal_reason),
-        ]
-
     # -- switching --------------------------------------------------------
 
     def switch(self, engine_id: str, persist: bool = True, background_warmup: bool = True) -> Any:
@@ -352,8 +370,8 @@ class EngineManager:
             )
 
         with self._lock:
-            option = next((o for o in self.options() if o.id == engine_id), None)
-            if option is not None and not option.available:
+            option = self.availability(engine_id)
+            if not option.available:
                 raise EngineUnavailable(engine_id, option.reason or "unavailable")
 
             self._switching = True
@@ -457,7 +475,7 @@ class EngineManager:
             except (EngineUnavailable, EngineBuildError) as exc:
                 logger.warning("[kokoro] engine %r unavailable at startup: %s", engine_id, exc)
 
-        kokoro_runtime.runtime.record_failure("no Kokoro backend available")
+        kokoro_runtime.runtime.record_failure("No Kokoro backend available")
         logger.error(
             "[kokoro] no Kokoro backend is available, TTS will produce no audio: %s",
             kokoro_runtime.runtime.error,
@@ -471,8 +489,9 @@ class EngineManager:
         if requested == "auto":
             # Modal only when the probe says it answers; otherwise local. The
             # GPU is preferred over the CPU when this machine actually has one.
-            remote = modal_remote.probe(timeout_s=5.0)
-            preferred = MODAL if remote["reachable"] else (GPU if self._cuda_probe() else CPU)
+            remote = self._remote_probe(timeout_s=5.0)
+            cuda = bool(self._torch_probe().get("cuda_available"))
+            preferred = MODAL if remote["reachable"] else (GPU if cuda else CPU)
             return [preferred, GPU, CPU] if preferred == MODAL else [preferred, CPU]
         return [GPU, CPU]
 
@@ -520,15 +539,6 @@ class EngineManager:
         with self._lock:
             self._phase = PHASE_READY
         logger.info("[kokoro] Modal warm-up %s", "finished" if finished.is_set() else "timed out")
-
-
-def _cuda_available() -> bool:
-    try:
-        import torch
-
-        return bool(torch.cuda.is_available())
-    except Exception:
-        return False
 
 
 def _runner_count(client: Any) -> int | None:

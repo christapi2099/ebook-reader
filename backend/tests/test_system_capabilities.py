@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 import main as main_module
 from main import app
-from services import kokoro_runtime
+from services import engine_manager, kokoro_runtime
 from services.modal_remote import RemoteConfig, RemoteSynthesisError, reset_probe_cache
 
 # ``conftest.isolate_from_real_resources`` replaces ``main._init_kokoro`` with a
@@ -179,57 +179,59 @@ class TestCapabilitiesEndpoint:
 
 
 class TestBackendSelection:
-    """``_init_kokoro`` must never need the network, and must say why it failed."""
+    """``main._init_kokoro`` is now a thin call into the engine manager.
 
-    def test_local_is_the_default_and_never_touches_the_remote(self, monkeypatch):
-        monkeypatch.delenv("KOKORO_BACKEND", raising=False)
+    The selection logic itself (env mapping, fallbacks, persistence precedence)
+    is covered in depth by ``test_engine_manager.py``; what is asserted here is
+    the wiring — that startup really goes through the manager, and that the
+    logged reason survives the move.
+    """
+
+    def test_init_kokoro_returns_whatever_the_manager_built(self, monkeypatch):
         sentinel = object()
-        monkeypatch.setattr(main_module, "_init_local_kokoro", lambda: (sentinel, "cuda", None))
-
-        def forbidden(requested):  # pragma: no cover - must not run
-            raise AssertionError("local backend must not probe Modal")
-
-        monkeypatch.setattr(main_module, "_init_remote_kokoro", forbidden)
-
+        monkeypatch.setattr(engine_manager.manager, "startup", lambda env_backend=None: sentinel)
         assert _REAL_INIT_KOKORO() is sentinel
-        assert kokoro_runtime.runtime.active_backend == "local"
-        assert kokoro_runtime.runtime.device == "cuda"
-        assert kokoro_runtime.runtime.requested_backend == "local"
 
-    def test_remote_failure_falls_back_to_local_and_records_the_reason(self, monkeypatch):
+    def test_init_kokoro_passes_the_env_var_through(self, monkeypatch):
+        seen = {}
         monkeypatch.setenv("KOKORO_BACKEND", "remote")
-        sentinel = object()
-        monkeypatch.setattr(main_module, "_init_remote_kokoro", lambda requested: (None, "no credentials"))
-        monkeypatch.setattr(main_module, "_init_local_kokoro", lambda: (sentinel, "cuda", None))
 
-        assert _REAL_INIT_KOKORO() is sentinel
-        assert kokoro_runtime.runtime.remote_error == "no credentials"
+        def record(env_backend=None):
+            seen["env"] = env_backend
+            return None
+
+        monkeypatch.setattr(engine_manager.manager, "startup", record)
+        _REAL_INIT_KOKORO()
+        assert seen["env"] == "remote"
+
+    def test_default_is_local_and_never_probes_the_remote(self, monkeypatch):
+        """KOKORO_BACKEND unset must not cost a network round-trip."""
+        monkeypatch.delenv("KOKORO_BACKEND", raising=False)
+        monkeypatch.setattr(engine_manager, "load_persisted_engine", lambda: None)
+
+        def forbidden(*args, **kwargs):  # pragma: no cover - must not run
+            raise AssertionError("the local backend must not probe Modal")
+
+        manager = engine_manager.EngineManager(
+            local_builder=lambda device: (object(), None),
+            remote_builder=forbidden,
+            torch_probe=lambda: {"torch_version": "2.14.0", "cuda_available": False, "error": None},
+            remote_probe=forbidden,
+        )
+        assert manager.startup(None) is not None
         assert kokoro_runtime.runtime.active_backend == "local"
-
-    def test_remote_success_uses_the_remote_backend(self, monkeypatch):
-        monkeypatch.setenv("KOKORO_BACKEND", "auto")
-        from services.modal_remote import ModalKokoroClient
-
-        client = ModalKokoroClient(config=RemoteConfig(transport="sdk"), invoke=lambda payload: {})
-        monkeypatch.setattr(main_module, "_init_remote_kokoro", lambda requested: (client, None))
-
-        def forbidden():  # pragma: no cover - must not run
-            raise AssertionError("a reachable remote backend must not load the local model")
-
-        monkeypatch.setattr(main_module, "_init_local_kokoro", forbidden)
-
-        assert _REAL_INIT_KOKORO() is client
-        assert kokoro_runtime.runtime.active_backend == "remote"
 
     def test_total_failure_is_recorded_not_silent(self, monkeypatch):
-        monkeypatch.setenv("KOKORO_BACKEND", "local")
-        monkeypatch.setattr(
-            main_module, "_init_local_kokoro", lambda: (None, None, "ImportError: no torch")
+        manager = engine_manager.EngineManager(
+            local_builder=lambda device: (None, "ImportError: no torch"),
+            remote_builder=lambda *args, **kwargs: (None, "no credentials"),
+            torch_probe=lambda: {"torch_version": None, "cuda_available": False, "error": "no torch"},
+            remote_probe=lambda **kwargs: {"configured": False, "reachable": False},
         )
-
-        assert _REAL_INIT_KOKORO() is None
+        monkeypatch.setattr(engine_manager, "load_persisted_engine", lambda: None)
+        assert manager.startup("local") is None
         assert kokoro_runtime.runtime.active_backend == "none"
-        assert kokoro_runtime.runtime.error == "ImportError: no torch"
+        assert kokoro_runtime.runtime.error == "No Kokoro backend available"
 
     def test_local_init_reports_a_traceback_instead_of_a_silent_none(self, monkeypatch, caplog):
         """A broken local pipeline must log the real reason, with a traceback."""
@@ -243,11 +245,10 @@ class TestBackendSelection:
             return real_import(name, *args, **kwargs)
 
         monkeypatch.setattr(builtins, "__import__", fake_import)
-        with caplog.at_level("ERROR", logger="main"):
-            pipeline, device, error = main_module._init_local_kokoro()
+        with caplog.at_level("ERROR", logger="services.engine_manager"):
+            pipeline, error = engine_manager.build_local("cpu")
 
         assert pipeline is None
-        assert device is None
         assert error == "RuntimeError: no CUDA driver"
         assert "failed to initialise" in caplog.text
         assert "no CUDA driver" in caplog.text

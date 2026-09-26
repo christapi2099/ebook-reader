@@ -5,15 +5,30 @@ schema evolution, the frontend, the end-to-end reading pipeline, the test gates,
 behind all of it.
 
 **Scope boundary.** This document owns **the system**. Speech synthesis, playback speed, the
-speed-strategy tradeoff, the synthesis/pre-synthesis policy and the audio cache's internals are owned
-by [`docs/TTS_ARCHITECTURE.md`](TTS_ARCHITECTURE.md) — "how this app turns text into sound". Where the
-two touch (the `Sentence` table, the `POST /ws/tts/{book_id}` router, `stores/audio.ts`) this document
-says so, gives the contract, and stops. It does not explain Kokoro internals or speed semantics.
+speed-strategy tradeoff, the synthesis/pre-synthesis policy, the audio cache's internals, the WebSocket
+*protocol* semantics, the concurrency model and backend/hardware selection are owned by
+[`docs/TTS_ARCHITECTURE.md`](TTS_ARCHITECTURE.md) — "how this app turns text into sound". Where the two
+touch (the `Sentence` table, the `POST /ws/tts/{book_id}` router, `stores/audio.ts`, the
+`AudioCache` table) this document gives the **contract** — what the table holds, who writes it, what
+the client must send — and stops. It does not explain Kokoro internals, the speed mechanism, or the
+scheduling decision. If you want the *why* behind anything audible, read that document; if you want the
+*why* behind everything else, read this one.
 
-**Repo root.** Paths are relative to the repository root. `git rev-parse --show-toplevel` reports
-`/home/christapia50/Repos/ebook-reader`. Some older task text spells it `/home/christia50/...` (one `p`
-short); that spelling does not resolve, and the in-session shell reports it as the session workspace
-even though `cd` to it fails. Relative paths always work.
+### Companion documents
+
+| Document | Owns | Use it for |
+|---|---|---|
+| [`docs/TTS_ARCHITECTURE.md`](TTS_ARCHITECTURE.md) | Speech, speed, audio cache, synthesis scheduling, WebSocket protocol, engine selection, hardware | Anything audible |
+| [`implementation-handoff.md`](../implementation-handoff.md) | The requirements of record. §9 lists places where the spec contradicts the repo | What the app is *supposed* to be |
+| [`frontend/DESIGN.md`](../frontend/DESIGN.md) | The design-system contract: tokens, themes, component inventory, test selectors | UI work — noting that §3 and §4 are a **plan**, not a description (§6.6) |
+| [`CLAUDE.md`](../CLAUDE.md) | Hard rules for contributors, including the concurrent-agent git policy | Before your first commit |
+| [`docs/research/`](research/) | Measurements: `01-speed-strategy.md`, `02-synthesis-strategy.md`, `kokoro-runtime-picks.md`, `kokoro-accelerated-backends-benchmarks.md`, `kokoro-82m-t600-4gb-research.md`, `cuda-display-gpu-low-vram-findings.md` | Evidence behind the TTS decisions. **Cited, not re-verified here** — I did not reproduce their benchmarks |
+| [`frontend/tests/README.md`](../frontend/tests/README.md) | The `@critical` e2e policy and its reasoning | Before adding an e2e spec |
+
+**Repo root.** Paths are relative to the repository root. `git rev-parse --show-toplevel` is the
+authority — use it rather than any path quoted in a task description. The handoff's two spellings
+(`christiapia50` and `christia50`) are both unreliable: the in-session shell reports the latter as the
+session workspace, and `cd` to it fails. Relative paths always work.
 
 ---
 
@@ -27,9 +42,20 @@ unless it was read in the code or executed.
 
 | Label | Meaning |
 |---|---|
-| **Verified** | Read in the code at the cited line, or executed and observed. |
+| **Measured** | I ran something and read its output. Numbers, gate results, reproductions. |
+| **Verified** | I read it in the code at the cited location. Not inferred from behaviour. |
+| **Cited** | It comes from another document in this repo (`implementation-handoff.md`, `DESIGN.md`, `CLAUDE.md`, `docs/TTS_ARCHITECTURE.md`, `docs/research/*`). I relay it and say whose claim it is. |
 | **Inferred** | Not stated anywhere; reasoned from the code. The reasoning is given. |
 | **Intended** | Stated in a spec or comment but *not* implemented. Says so explicitly. |
+
+**How to read the citations.** A `file:line` reference is a **locator**, not a contract: it was
+correct when I took the reading and the tree has moved under this document more than once. The
+**symbol name next to it** (`_migrate`, `AudioCache`, `EngineManager`, `load_sentences`) is the
+authoritative part. If a line number does not match, trust the name and re-grep it. Where a claim's
+truth depends on a line number rather than a symbol — which is rare — I say so.
+
+Claims that contradict another document in the repo are called out in place and in §10, with both
+sides cited. Nothing is described as working because a spec says it works.
 
 ### Snapshot
 
@@ -38,14 +64,14 @@ This document describes the tree at:
 | | |
 |---|---|
 | Commit | `012ef03` — `fix(tests): stop test_voices_path_traversal shadowing the fake_kokoro fixture` |
-| Working tree | **dirty** — 21 modified files, 14 untracked at first measurement, and still growing |
-| Measured at | 2026-09-26 19:05–19:10 UTC (12:05–12:10 local) |
+| Working tree | **dirty** — 33 modified files, 8 untracked at final measurement |
 | Branch | `folders-and-pages` |
+| Readings taken | 2026-09-26 19:05–19:30 UTC (12:05–12:30 local) |
+| Repo root | `git rev-parse --show-toplevel` → `/home/christiapia50`-adjacent; the tool reports `/home/christia50/Repos/ebook-reader` in-session, and the handoff's two spellings are both unreliable. Relative paths always work. |
 
 > **Concurrent change — read this before trusting any single paragraph.** Several agents were editing
-> `backend/` and `frontend/src/` while this document was written. Four of the architectural risks the
-> brief for this document asked me to verify were repaired *during* the writing session, in commits
-> that landed underneath me:
+> `backend/` and `frontend/src/` throughout. Four of the architectural risks the brief asked me to
+> verify were repaired *during* the writing session, in commits that landed underneath me:
 >
 > | Commit | What it changed |
 > |---|---|
@@ -54,29 +80,31 @@ This document describes the tree at:
 > | `be59ba5` | Bounded `AudioCache` growth with FIFO eviction |
 > | `881d918`, `36e2120`, `8c3c0c3`, `cb00ed8`, `43526fa`, `012ef03` | Prefetch budget, speed ceiling, word-highlight stall, export/engine unification, `speed_unavailable` notice, test isolation |
 >
-> **The tree also advanced past `012ef03` while I was writing, in *uncommitted* work.** I re-read the
-> affected files at the end rather than leaving stale text, so the sections below describe the working
-> tree at ~19:10 UTC, not the commit. The uncommitted additions I found and incorporated are:
+> **The tree also advanced past `012ef03` while I was writing, entirely in *uncommitted* work.** I
+> re-read the affected files at the end rather than leaving stale text, so the sections below describe
+> the **working tree**, not the commit. The uncommitted additions I incorporated are:
 >
 > * `backend/services/engine_manager.py` (**new, 553 lines**) — a runtime-swappable Kokoro engine
->   manager (`cpu` / `gpu` / `modal`), replacing the "decide once at startup" wiring described in §3.1.
-> * New model columns: `UserSettings.tts_engine`, and `MP3Export.phase`, `batches_done`,
->   `batches_total`, `format`, `bitrate_kbps`, `options`.
-> * Seven new `_migrate` steps for those columns; `db/database.py` grew from 95 to 119 lines.
-> * `frontend/src/lib/components/Toaster.svelte` plus folder UI (`FolderTile.svelte`,
->   `FolderNameDialog.svelte`, `MoveToFolderDialog.svelte`), `frontend/tests/folders.spec.ts`,
->   `frontend/src/tests/api/folders.test.ts`, `frontend/src/tests/components/library-folders.test.ts`.
-> * `frontend/src/lib/api.ts` gained folder functions and a `toApiError()` helper that *does* now
->   throw a typed `ApiError` from the shared path.
-> * `scripts/test.sh` and `backend/pytest.ini` (both untracked).
-> * The **MP3 export path was reworked**: `services/export_batches.py` (chapter-grouped batching for
->   Modal fan-out) and `services/export_encoding.py` (four output formats) are new, `routers/mp3.py`
->   grew from 253 to 681 lines, and it gained `GET /mp3/formats`.
-> * `routers/system.py` gained `GET` and `POST /api/system/engine` for switching the live engine at
->   runtime. **The route count went from 32 to 34** during the session; §3.2 reflects the latest read.
+>   manager (`cpu` / `gpu` / `modal`), replacing the "decide once at startup" wiring. It added
+>   `GET`/`POST /api/system/engine`, and **its own tests are currently red** (§8.4, §10 R10).
+> * `backend/services/sentence_source.py` (**new, 49 lines**) — the shared sentence loader.
+> * `backend/tests/conftest.py` grew from 12 to **610 lines** with an autouse isolation guard (§8.4).
+> * New model columns: `UserSettings.tts_engine`; `MP3Export.phase`, `batches_done`, `batches_total`,
+>   `format`, `bitrate_kbps`, `options`; plus 7 new `_migrate` steps (`db/database.py` 95 → 119 lines).
+> * The **MP3 export path was reworked**: `services/export_batches.py` and
+>   `services/export_encoding.py` are new, `routers/mp3.py` grew from 253 to **681** lines, and it
+>   gained `GET /mp3/formats`.
+> * Frontend: `Toaster.svelte` and folder UI (`FolderTile`, `FolderNameDialog`, `MoveToFolderDialog`),
+>   `frontend/tests/folders.spec.ts`, `frontend/tests/README.md`, plus `folders.test.ts` and
+>   `library-folders.test.ts` under `frontend/src/tests/`.
+> * `stores/settings.ts` gained `bionicMinWordLength` and `bionicSkipCommonWords`; **the unit gate went
+>   red because of it** (§8.3).
+> * `scripts/test.sh` and `backend/pytest.ini` (both untracked). `docs/TTS_ARCHITECTURE.md` also landed
+>   during the session, committed as `6f809b1`.
 >
-> **Consequence for a reader:** if a line number below does not match the tree you are reading, the
-> tree has moved — re-check the symbol by name. Every **Verified** label refers to the timestamp above.
+> **The route count went from 32 to 34** during the session. §3.2 reflects the latest read. Where a
+> later commit changed a fact I had already written down, I corrected the text rather than leaving two
+> versions.
 
 ---
 
@@ -346,6 +374,7 @@ own dicts inline, and `Book` is shaped three different ways across the API surfa
 | `services/modal_remote.py` | 879 | A locally-importable client that is call-compatible with `KPipeline`. |
 | `services/export_batches.py` | 103 | **Uncommitted.** Plans the sentence batches a Modal export fans out over, grouped by chapter (the unit a reader recognises and the dialog can report progress in), splitting any chapter longer than `DEFAULT_MAX_SENTENCES = 150`. Its docstring records the constraint that forces batching: `KModel.forward_with_tokens` handles batch size 1 only, so the way to use more than one GPU is to send *more text per call* — one batch is one Modal container. |
 | `services/export_encoding.py` | 437 | **Uncommitted.** Turns one assembled float32 track into a downloadable file in four formats (`mp3` via LAME at an explicit bitrate, `m4b` AAC with chapter markers, `opus`, `wav`), with `FORMATS` as the single source of truth that `/mp3/formats` serves. Its docstring records why ffmpeg is involved for three of the four: soundfile cannot write AAC/M4B or attach chapters. |
+| `services/sentence_source.py` | 49 | Exposes `load_sentences(book_id)`, the one query both synthesis paths use. See §3.5. |
 
 `services/__init__.py` is empty, so `import services` pulls in nothing.
 
@@ -382,7 +411,10 @@ at `tts_engine.py:115-122`, and the GPU/CUDA-context reason is owned by the TTS 
 
 ### 3.5 The WebSocket streaming path
 
-`routers/tts.py:52-340`, one WebSocket per open reader. **Verified** flow:
+The `tts_websocket` handler in `routers/tts.py`, one WebSocket per open reader. **Verified** flow (the
+handler's internals — the queue, the synthesis pool, the phase reporting — are
+[`TTS_ARCHITECTURE.md`](TTS_ARCHITECTURE.md)'s subject; what follows is the contract this document
+depends on):
 
 ```
 client                         router (event loop)                  TTSEngine
@@ -433,21 +465,27 @@ chunks already in the WebSocket receive buffer, so tag-filtering is the last lin
 `_cancel_and_clear()` `await`s the dying tasks before starting new ones precisely to narrow that
 window (`tts.py:218-253`).
 
-**`_load_sentences` opens a short-lived session and detaches by converting rows to plain dicts**
-(`tts.py:37-49`) so a database session is not held for the lifetime of the connection. **Inferred**
-reason, corroborated by the docstring at `:37`: holding a SQLModel session open across a long-lived
-WebSocket would pin a pooled connection for the whole reading session.
+**Sentence loading is shared, via `services/sentence_source.load_sentences` — Verified.** The WebSocket
+router no longer queries the database itself: it calls `load_sentences(book_id)` and gets back
+`{index: sentence}` or `None`. The module's docstring records why it exists — the two synthesis paths
+(the streaming WebSocket and the MP3 export) "had grown two copies of the same query, and the copies
+had already drifted: one returned the full model dump, the other a hand-picked subset". Three
+properties matter:
 
-Two blockings on the event loop remain on this path — **Verified by reading**, magnitude unknown:
+* The session is **short-lived** and every row is copied into a plain dict before it closes, because
+  callers hold the result far longer than a session should live.
+* Only the fields synthesis reads are copied (`text`, `filtered`, `chapter`, `chapter_title`), which
+  makes the caller's dependency visible instead of incidental.
+* `None` means "no such book" and is **deliberately distinct** from "a book with no sentences": the
+  WebSocket closes with 4004 for the former, the export records an error, and the two cannot be
+  collapsed.
 
-* `_load_sentences` performs a synchronous SQLite read on the event loop at accept time
-  (`tts.py:38-47`).
-* `stream_job` performs a synchronous `session.get(AudioCache, cache_key)` (`tts_engine.py:399-400`)
-  and a synchronous `_write_cache_entry(...)` whose `commit()` writes a multi-hundred-kilobyte blob
-  (`tts_engine.py:466-468` → `:335-338`).
+**One blocking call remains on this path — Verified by reading**, magnitude unknown:
+`load_sentences` performs a synchronous SQLite read when the WebSocket is accepted, on the event loop.
+It is unavoidable without making the loader async, and it is small compared with synthesis.
 
-Both are short compared with the synthesis work that commit `354764d` moved off the loop, and neither
-is annotated as a known issue in the code. They are residual, not headline, risks — see §10 R8.
+It is short compared with the synthesis work that commit `354764d` moved off the loop, and it is not
+annotated as a known issue in the code. Residual, not headline — see §10 R8.
 
 ---
 
@@ -803,7 +841,7 @@ runes — runes mode (enforced by `svelte.config.js:6`) does not forbid Svelte s
 |---|---|---|---|
 | `stores/reader.ts` | 79 | `bookId`, `sentences[]`, `currentIndex`, `isPlaying`, `speed` | The authoritative reading position. `loadBook()` fetches sentences then restores `currentIndex` from `getProgress()` (`:23-37`); `seek()` clamps to `[0, sentences.length-1]` (`:43`), then writes both `saveProgress()` and `userStore.updateLastRead()` (`:47-49`). `setSpeed()` clamps to `[0.5, 3.0]` (`:54`). |
 | `stores/audio.ts` | 433 | `isPlaying`, `speed`, `currentIndex`, `currentWordIndex`, `voice`, `buffering`, `elapsedSeconds`, `sentenceDurations` | The playback engine, and the only owner of `TTSSocket` state. Owns the `AudioContext`, the serialized `decodeChain`, the `generation` counter, the `sessionId` counter, `sentenceTimings`, `wordTimings`, and the rAF loop that advances `currentIndex` in **audio time**. |
-| `stores/settings.ts` | 189 | `voice`, `highlightColor`, `autoscroll`, `hotkeysEnabled`, `bionicMode`, `bionicFixation`, `bionicBoldRatio`, `highlightEnabled`, `theme` | Persisted whole to `localStorage['kokoro-settings']` on every change (`:106`). Only `highlightEnabled` reaches the server (`:171`). Applies `document.documentElement.dataset.theme` (`:62-66`). |
+| `stores/settings.ts` | 189 | `voice`, `highlightColor`, `autoscroll`, `hotkeysEnabled`, `bionicMode`, `bionicFixation`, `bionicBoldRatio`, `bionicMinWordLength`, `bionicSkipCommonWords`, `highlightEnabled`, `theme` — **11 fields** | Persisted whole to `localStorage['kokoro-settings']` on every change (`setItem` in `saveToStorage`). Only `highlightEnabled` reaches the server (`toggleHighlight`). Applies `document.documentElement.dataset.theme`. The last two fields are recent and are the cause of the current unit-gate failure (§8.3). |
 | `stores/user.ts` | 95 | `settings` (`last_book_id`, `last_sentence_index`), `loading`, `error` | Mirrors server settings; rolls back on failure (`:63-69`). |
 | `stores/ui.ts` | 54 | `sidebarCollapsed`, `immersive`, `activePanel` (`'search' \| 'bookmarks' \| 'settings' \| 'chapters' \| null`) | Written during this session's revamp effort. Only `activePanel` types are defined; the reader route still uses its own three booleans (`settingsOpen`, `searchOpen`, `bookmarksOpen`, `routes/reader/[id]/+page.svelte:29-31`), so `uiStore.activePanel` is **Intended, not wired up**. |
 | `stores/toast.ts` | 78 | `Toast[]` | `push({tone, title, message?, action?, duration?})`, auto-dismiss, max 3, per-toast `setTimeout` with cleanup. Consumed by `components/Toaster.svelte`. |
@@ -1176,25 +1214,32 @@ anyway. Nothing records which behaviour was intended.
 
 ## 8 · Testing and quality gates
 
-Four gates, all invoked from `CLAUDE.md` and `implementation-handoff.md` §1.6. **All numbers below are a
-snapshot taken at 2026-09-26 19:05 UTC with the tree at `012ef03` plus the uncommitted changes listed in
-the header. Other agents were repairing these suites throughout the session; treat every number as
-perishable.**
+Four gates, invoked from `CLAUDE.md` and `implementation-handoff.md` §1.6. **Every number below was
+measured by me at 2026-09-26 19:20–19:30 UTC on the working tree described in the header — commit
+`012ef03` plus the uncommitted changes listed there. The tree was still moving; treat every number as
+perishable.** Where a figure differs from the brief I was given, I record both.
 
 ### 8.1 Summary
 
-| Gate | Command | Result at snapshot | Prior figure given in the brief |
+| Gate | Command | **Measured now** | Brief's figure |
 |---|---|---|---|
 | Type/compile check | `cd frontend && npm run check` | **Green** — `0 errors and 19 warnings in 6 files` | Green — `0 errors, 29 warnings in 7 files` |
-| Frontend unit | `cd frontend && npm run test:unit` | **Green** — `139 passed (139)` in `8` files | Green — `~106 tests, 6 files` |
-| Browser e2e | `cd frontend && npm run test:e2e` | **Red, environmentally** — `121 failed` of 121, every one `browserType.launch: Executable doesn't exist at ~/.cache/ms-playwright/chromium_headless_shell-1217/...` | "had never been run at the time of writing" |
-| Backend | `cd backend && uv run pytest` | **Green** — `559 passed, 1 xfailed` in ~122 s, twice consecutively | **Not green** — `28 failed, 188 passed, 1 skipped, 27 errors`, order-dependent, once hung past 600 s |
+| Frontend unit | `cd frontend && npm run test:unit` | **RED** — `2 failed \| 137 passed (139)` in `8` files | Green — `139 tests in 8 files` |
+| Backend | `cd backend && uv run pytest` | **RED** — `14 failed, 603 passed, 1 xfailed` in 96 s | Green — `559 passed, 1 xfailed` |
+| Browser e2e | `cd frontend && npm run test:e2e` | **Not green. Not run to completion.** The default run is now 32 `@critical` tests, and the human has paused e2e execution. Last full attempt: 121 failed of 121, all `browserType.launch: Executable doesn't exist at ~/.cache/ms-playwright/chromium_headless_shell-1217/...` | "runs only the 32 `@critical` tests by default" |
 
-Both green figures moved because the tree moved: eight test files were added between the brief's
-measurement and mine (`test_audio_cache_eviction.py`, `test_db_schema_startup.py`, `test_folders.py`,
-`test_modal_remote.py`, `test_mp3_export_nonblocking.py`, `test_speed_adversarial.py`,
-`test_system_capabilities.py`, `test_voices_path_traversal.py`), plus two frontend unit files and one
-e2e spec. **The backend suite is the one worth reading the detail on** — see §8.4.
+**Two of the four gates are red where I was told they were green.** The brief I was given said pytest was
+"effectively green: 559 passed, 1 xfailed" and `test:unit` was "139 tests in 8 files"; measured now,
+pytest is `14 failed, 603 passed, 1 xfailed` and the unit gate is `2 failed | 137 passed`. Both
+regressions are in work that landed *after* that brief was written. The other two gates match what I was
+told: `npm run check` is green, and e2e is explicitly not green and not being run. §8.3 and §8.4 give
+the causes rather than the counts alone.
+
+The suite also grew: eight backend test modules and three frontend unit files appeared during the
+session (`test_audio_cache_eviction.py`, `test_db_schema_startup.py`, `test_folders.py`,
+`test_engine_manager.py`, `test_modal_remote.py`, `test_mp3_export_nonblocking.py`,
+`test_speed_adversarial.py`, `test_system_capabilities.py`, `test_voices_path_traversal.py`), which is
+why the pass count rose from 559 to 603.
 
 ### 8.2 `npm run check` — svelte-check
 
@@ -1233,101 +1278,175 @@ components rendered with `@testing-library/svelte`. `Verified` coverage:
 | `src/tests/stores/audio-voice.test.ts` | 6 | Voice selection reaching the socket. |
 | `src/tests/api/folders.test.ts` | 13 | The folder API functions. |
 
-Measured: **139 passed / 8 files**, 4.2 s. Nothing here exercises `stores/audio.ts`'s scheduling logic
-directly — that is covered only by the Playwright suite, which cannot currently run (§8.5).
+Measured: **2 failed | 137 passed (139)** in **2.2 s**. The gate is **red**, and the cause is a
+one-line test-maintenance miss in the newest settings work:
+
+```
+FAIL  src/tests/stores/settings.test.ts > settingsStore > has correct default values
+FAIL  src/tests/stores/settings.test.ts > settingsStore > reset returns all values to defaults
+AssertionError: expected { voice: 'af_heart', …(10) } to deeply equal { voice: 'af_heart', …(8) }
+```
+
+`stores/settings.ts`'s `SettingsState` gained two fields — `bionicMinWordLength` and
+`bionicSkipCommonWords` — and the test file keeps its **own copy** of the expected defaults, which was
+not updated. Ten fields now, eight expected. The store is fine; the assertion is stale. Note that this
+is the same class of failure the whole document is about: a checked-in expectation drifting behind the
+code it describes.
+
+Nothing in this suite exercises `stores/audio.ts`'s scheduling logic directly — that is covered only by
+the Playwright suite, which is not being run (§8.5).
 
 ### 8.4 `pytest` — the backend suite
 
-**How to run it.** `CLAUDE.md` now says `cd backend && uv sync && uv run <cmd>` (uv-managed `.venv`,
-locked by `uv.lock`). A legacy `backend/venv` still exists and also works. `conftest.py` imports
-`Path.home() / "Documents" / "EBooks"` fixtures for `sample_pdf_path`, `sample_epub_path`,
-`logic_pdf_path` and `hardthing_pdf_path` — four tests depend on **files outside the repo** in the
-developer's home directory. `Verified`: `backend/tests/conftest.py:4-6`.
+**How to run it.** `CLAUDE.md` says `cd backend && uv sync && uv run <cmd>` (uv-managed `.venv`, locked
+by `uv.lock`). A legacy `backend/venv` still exists and also works. `backend/pytest.ini` (untracked at
+the snapshot) now owns the pytest configuration, replacing the `[tool.pytest.ini_options]` block in
+`pyproject.toml`, which carries a comment saying so.
 
-**Measured, twice, back to back, on a copy of the tree at `/tmp` with `DB_PATH` redirected:**
+**Measured on the working tree, in place:**
 
 ```
-559 passed, 1 xfailed, 4 warnings in 122.57s (0:02:02)
-559 passed, 1 xfailed, 4 warnings in 137.18s (0:02:17)
+14 failed, 603 passed, 1 xfailed, 4 warnings in 96.17s (0:01:36)
 ```
 
-**Why I ran it on a copy.** `tests/test_voice_change.py:78`, `tests/test_websocket_integration.py:108`
-and `tests/test_folders.py:19` do `from main import app` and enter its lifespan, which calls
-`create_engine_and_tables()` **with no argument** and therefore opens the real
-`backend/ebook_reader.db`. `create_all` on a database that predates `Folder` adds the `folder` table, so
-running the suite **writes to the user's 802 MB database**. I was told not to modify that file, so I
-tar-copied `backend/` to `/tmp`, symlinked `.venv`, and set `DB_PATH` to a scratch file. Every read I
-performed against the real database used `sqlite3.connect("file:ebook_reader.db?mode=ro", uri=True)`.
+The failure set is **not stable between runs**. Three consecutive full runs produced 4, 5 and 14
+failures, and the identity of the failing tests changed each time. Everything I could pin down:
 
-That workaround is itself the finding: **the backend suite has no test-wide database isolation.** Most
-test modules redirect the engine by monkeypatching `db.database.engine` (12 files do), but the three
-that go through `main.app`'s lifespan do not, so the suite's behaviour depends on the developer's real
-database. The real database's mtime and size did in fact change during this session (to
-840,077,312 bytes at 11:50) — someone else ran the suite against it.
+| Failing test | Reproducible alone? | Cause |
+|---|---|---|
+| `test_system_capabilities.py::TestBackendSelection` (4 tests) | **Yes** — deterministic | `AttributeError: module 'main' has no attribute '_init_remote_kokoro'`. The test monkeypatches a `main`-level symbol that the `EngineManager` refactor **deleted**; remote-backend choice now lives in `services/engine_manager.py`. The test was not updated with the code. |
+| `test_engine_manager.py` (10 tests, incl. `TestBuildLocal`, `TestSwitch`, `TestStartup`) | **No** — `41 passed` when the file runs alone | Cross-test pollution / ordering. Passes in isolation, fails in the full run. |
+| `test_mp3_export_nonblocking.py::TestExportSpeedValidation::test_out_of_band_speeds_are_clamped_not_rejected` | No — appeared in some runs only | Same pattern; flaky under full-suite ordering. |
+| `test_ws_mimo.py` (4), `test_websocket_integration.py`, `test_word_timestamps.py` | No — appeared in one earlier run only | Same pattern. |
 
-**The suite is order-dependent and can hang.** I reproduced both, and both are worth stating precisely
-because the given baseline was "order-dependent and once hung past 600 s":
+**So the honest statement is: the backend gate is red, and 4 of the 14 failures are a real,
+deterministic API-drift bug in the newest subsystem while the other 10 are order-dependence that
+disappears when their file runs alone.** The brief I was given said "pytest is effectively green:
+559 passed, 1 xfailed, 0 failed". That was true of an earlier tree; it is not true of this one.
 
-| Observation | Detail |
-|---|---|
-| **Hang, reproduced twice** | Two runs of the full suite on an earlier snapshot (19:0x) were killed by `timeout` at 620 s and 520 s. With incrementally flushed output, the first stalled after **201 tests** (~27%) with three failures already recorded. The same tree, re-run later, completed in 120 s. |
-| **Order dependence, reproduced in both directions** | Running the suite file by file gave `test_mp3_export.py` **1 failed**, `test_voice_change.py` **1 failed** (`test_play_passes_voice_to_engine`) and `test_voices_path_traversal.py` **2 failed**. Running all three files together gave only the 2 traversal failures. Running the whole suite gave 2 failures; two later runs gave 0. |
-| **The 2 traversal failures were a fixture-shadowing bug, not a product bug** | Both failed with `HTTPException: 400: Synthesis failed: 'dict' object is not callable` at `routers/voices.py:153` — `voices._kokoro` was a dict, not a callable. Fixed by commit `012ef03` (`fix(tests): stop test_voices_path_traversal shadowing the fake_kokoro fixture`). |
+**Isolation is now genuinely fixed, though — Measured, and this reverses my earlier finding.**
+`backend/tests/conftest.py` grew from 12 to **610 lines** and now installs an **autouse** guard
+(`isolate_from_real_resources`) that, for *every* test:
 
-**Conclusion on the backend gate.** At the snapshot it is **green (559 passed, 1 xfailed)** and has been
-green twice in a row. But it is green on a tree that is being actively repaired, with a known
-order-dependence in the same files, a known intermittent hang, no database isolation, and four fixtures
-that live outside the repository. **The correct posture is "green right now, not yet trustworthy",
-not "passing".** The specific structural fix — giving `main.app` a temporary database in a session
-fixture — is not present.
+* replaces `db.database.engine` with a throwaway in-memory engine and repoints
+  `db.database._DEFAULT_DB` into `tmp_path`, so even a bare `create_engine_and_tables()` builds a
+  scratch file and `get_session()` can never open `backend/ebook_reader.db`;
+* redirects `uploads/`, `voices/` and `exports/` under `tmp_path`, so a test cannot write into the
+  repository;
+* replaces `main`'s lifespan hooks (`_init_kokoro`, `create_engine_and_tables`) once `main` is
+  imported, so entering a `TestClient` cannot download the real Kokoro model;
+* pre-seeds `services.tts_engine._g2p` with a fake, because the real misaki `G2P()` constructor pulls
+  in spaCy and `transformers`.
+
+It also `os.chdir`s into a scratch sandbox **at import time**, before any test module is imported,
+because `main` mounts `StaticFiles(directory="uploads")` at import. The file's own docstring names the
+three ways the suite used to reach real data. This is a real improvement and it removes the reason I
+previously had to run the suite on a `/tmp` copy — I ran the measurements above in place, and the real
+database's size and mtime did not change.
+
+**What is still not hermetic — Verified.** Four fixtures still read real files from outside the
+repository: `sample_pdf_path`, `sample_epub_path`, `logic_pdf_path` and `hardthing_pdf_path` point at
+`~/Documents/EBooks/*.pdf|epub`. There is no skip guard, so on a machine without that directory those
+tests fail rather than skip. The brief describes intermittent 27-failure runs caused by a test reaching
+the real `_init_kokoro` and the model cache being read-only in this sandbox; I did **not** reproduce that
+specific mode (the autouse guard replaces `_init_kokoro`), but I did reproduce non-determinism of the
+same severity, so I treat "the suite is not yet fully hermetic or deterministic" as **open** (§10 R9)
+rather than solved.
+
+**Also worth recording, because it has bitten this suite before:** the earlier-traced failures
+`HTTPException: 400: Synthesis failed: 'dict' object is not callable` at `routers/voices.py` were a
+fixture-shadowing bug (`voices._kokoro` was a dict, not a callable), fixed by commit `012ef03`. Recent
+history here is full of *test* problems masquerading as *product* problems, which is why each failure
+above is labelled with whether it reproduces alone.
 
 ### 8.5 `npm run test:e2e` — playwright
 
 `playwright.config.ts`: `testDir: './tests'`, `fullyParallel: true`, one project (`chromium`), 30 s
 timeout, `webServer: npm run dev` on `http://localhost:5173` with `reuseExistingServer` outside CI.
-10 spec files, **121 tests** (`Verified` — the runner's own count).
+10 spec files, **121 tests** (`Measured` — the runner's own count).
 
-**Measured: `121 failed` out of 121.** Every failure is the same:
+**The default run is now a deliberate subset: 32 of 121.** `playwright.config.ts` sets
+`grep: /@critical/` unless `E2E_ALL=1`, and `frontend/tests/README.md` records the policy and the
+reasoning: the suite had grown to 121 tests, and most guarded behaviour that unit tests already cover
+faster and more precisely — bionic word rendering (26 tests, with a unit file alongside),
+search-highlight styling (7), buffering indicators (5), and the individual bug regressions in
+`text-reader-bugs.spec.ts` (11). The rule for tagging is stated as: **tag `@critical` only if its
+failure means a user cannot read their book.** The 32 are library entry (3), the read flow (6),
+playback controls (4), highlight/audio sync (6), word-level highlight (4), folders (8) and the PDF
+error state (1). Scripts: `test:e2e` (default, critical only), `test:e2e:all` (`E2E_ALL=1`),
+`test:e2e:list`.
+
+**Status: not green, and not being run to completion.** The human has paused e2e execution, so this is
+**not** a passing gate and I make no claim that it is. The last full attempt I ran produced `121 failed`
+of 121, every one identical:
 
 ```
 Error: browserType.launch: Executable doesn't exist at
   /home/christapia50/.cache/ms-playwright/chromium_headless_shell-1217/chrome-headless-shell-linux64/chrome-headless-shell
 ```
 
-So the gate is **red for an environmental reason, not a code reason**: the Playwright browser binaries
-are not installed in this checkout. `npx playwright install chromium` is the fix; nothing about the
-app's behaviour can be concluded from this run. The brief's "had never been run" is no longer accurate —
-it *has* now been run, and it fails before any test body executes. (Report artifacts from an earlier,
-apparently more successful attempt by another agent exist in `frontend/playwright-report/` and
-`frontend/test-results/`, dated 12:02 local.)
+That is an **environmental** failure, not a code failure: the Playwright browser build the config pins
+is not in `~/.cache/ms-playwright`, so every test dies before its body runs. `frontend/tests/README.md`
+documents the workaround (other builds usually are present; point `launchOptions.executablePath` at
+one). Nothing about the app's behaviour can be concluded from that run either way. Report artifacts from
+an earlier attempt by another agent exist in `frontend/playwright-report/` and `frontend/test-results/`,
+dated 12:02 local.
 
-**What the suite covers when it can run.** The specs mock HTTP with `page.route` and drive the
-WebSocket with a custom fixture, so they need no backend:
+**What the suite covers when it runs.** The specs mock HTTP with `page.route` and drive the WebSocket
+with a custom fixture (`tests/fixtures/ws-driver.ts`, `audio-context-mock.ts`, `mock-data.ts`), so they
+need **no backend**. `tests/README.md` notes that Playwright starts the frontend itself, and that a spec
+which talks to the real backend must start it by hand because nothing in the repo does.
 
-| Spec | Focus |
+| Spec | Critical? | Focus |
+|---|---|---|
+| `text-reader.spec.ts` | partly | Homepage paste flow: textarea, Play enablement, submit → reading mode, sentence list, highlight, pause, click-to-seek, speed change, save, reset, upload dialog, responsive overflow at 3 widths. |
+| `text-reader-bugs.spec.ts` | no | No autoplay after "Read Aloud", no word highlight before Play, pause stops playback, rapid play/pause/play does not stick, click-while-paused sends `play` with the right `from_index`, spinner cancels, speed carried into the `play` action, `play` queued while the socket is still opening. |
+| `highlight-sync.spec.ts` | partly | The largest spec: audio-clock highlight sync, `decodeAudioData` rejection, stream stall, viewport bounds, cross-page highlight, word-level highlight, and O(1) search-diff behaviour. |
+| `buffering-states.spec.ts` | no | Buffering indicators across `MediaBar`, `TextViewer`, `AudioProgressBar`. |
+| `mediabar.spec.ts` | yes | Transport controls and the speed group, including "speed change while paused sends no WS action". |
+| `library.spec.ts` | yes | Loading spinner, empty state, error + Retry, grid, navigation, LastRead presence/absence. |
+| `bionic-reading.spec.ts` | no | The bionic overlay on text. |
+| `error-states.spec.ts` | yes (1) | Backend failure and edge states. |
+| `folders.spec.ts` | yes (8) | Folder tiles, breadcrumbs, rename/delete, drag-and-drop filing — against a `page.route` fake that mirrors the real contract (case-insensitive duplicates, 60-char cap, `unfiled_books`). |
+| `simple-test.spec.ts` | no | A canary asserting `1 + 1 === 2`; proves the harness itself runs. |
+
+### 8.6 The full command surface, test-support files and other gates
+
+The four gates plus their variants, as they exist now:
+
+| Command | What it runs |
 |---|---|
-| `text-reader.spec.ts` | Homepage paste flow: textarea, Play enablement, submit → reading mode, sentence list, highlight, pause, click-to-seek, speed change, save, reset, upload dialog, responsive overflow at 3 widths. |
-| `text-reader-bugs.spec.ts` | Five regression scenarios: no autoplay after "Read Aloud", no word highlight before Play, pause stops playback, rapid play/pause/play does not stick, click-while-paused sends `play` with the right `from_index`, spinner cancels, speed carried into the `play` action, and `play` queued while the socket is still opening. |
-| `highlight-sync.spec.ts` | The largest spec: audio-clock highlight sync, `decodeAudioData` rejection, stream stall, viewport bounds, cross-page highlight, and O(1) search-diff behaviour. |
-| `buffering-states.spec.ts` | Buffering indicators across `MediaBar`, `TextViewer`, `AudioProgressBar`. |
-| `mediabar.spec.ts` | Transport controls and the speed group, including "speed change while paused sends no WS action". |
-| `library.spec.ts` | Loading spinner, empty state, error + Retry, grid, navigation, LastRead presence/absence. |
-| `bionic-reading.spec.ts` | The bionic overlay on text. |
-| `error-states.spec.ts` | Backend failure and edge states. |
-| `folders.spec.ts` | Folder tiles, breadcrumbs, rename/delete, drag-and-drop filing — against a `page.route` fake that mirrors the real contract (case-insensitive duplicates, 60-char cap, `unfiled_books`). |
-| `simple-test.spec.ts` | A canary asserting `1 + 1 === 2`; proves the harness itself runs. |
+| `cd frontend && npm run check` | `svelte-kit sync && svelte-check` — types + Svelte a11y/validity warnings |
+| `cd frontend && npm run test:unit` | `vitest run` (jsdom, `src/**/*.test.ts`) |
+| `cd frontend && npm run test:e2e` | Playwright, **32 `@critical` tests only** |
+| `cd frontend && npm run test:e2e:all` | Playwright, all 121 (`E2E_ALL=1`) |
+| `cd frontend && npm run test:e2e:list` | Lists what would run, without running it |
+| `cd frontend && npm run test:unit:changed` | `vitest run --changed` |
+| `cd backend && uv run pytest` | The backend suite |
 
-### 8.6 Test-support scripts and other gates
+Support files and other gates, all **Verified**:
 
-* `scripts/test.sh` is **untracked** at the snapshot, added during this session.
+* `scripts/test.sh` is **untracked** at the snapshot, added during this session. It is intended to be
+  the single command that runs the gates; until it is committed, use the table above.
 * `backend/pytest.ini` is **untracked**, added during this session as the replacement for the
   `[tool.pytest.ini_options]` block in `backend/pyproject.toml` — that block now carries the comment
   "Test/coverage configuration is owned by another change in flight; do not edit this block here
   (`backend/pytest.ini` is its replacement)". The two would conflict if both were present.
-* `verify-config.sh` and `start.sh` are repository-level convenience scripts. `start.sh` now resolves
-  the backend environment in three tiers (uv → `backend/.venv` → `backend/venv`) and fails with an
+* `backend/tests/conftest.py` (610 lines) is the shared fixture and isolation layer. Read its docstring
+  before writing a test: it explains the three ways the suite used to reach real data, and it supplies
+  the fakes (`fake_kokoro`, `FakeG2P`, `mock_engines`, `seed_book`, `client`, `ws_read`) that make a
+  hermetic test cheap to write.
+* `frontend/tests/README.md` is the e2e policy document, including the `@critical` tagging rule and the
+  known pinned-browser-build gotcha.
+* `verify-config.sh` and `start.sh` are repository-level convenience scripts. `start.sh` resolves the
+  backend environment in three tiers (uv → `backend/.venv` → `backend/venv`) and fails with an
   actionable message if none is present.
+* `scripts/agent-worktree.sh` and `scripts/agent-safety.sh` exist for the multi-agent workflow;
+  `CLAUDE.md` documents them and forbids `git stash`, `git checkout -- <path>`, `git restore`,
+  `git reset` and `git clean` in the shared tree. **Follow that rule** — an earlier agent's `git stash`
+  destroyed two other agents' uncommitted work.
 * `backend/requirements.txt` is generated from `uv.lock`; `CLAUDE.md` says never hand-edit it.
+* **There is no lint gate.** No ESLint, no Prettier, no config for either (§10 R8l).
 
 ---
 
@@ -1817,10 +1936,10 @@ catalogue.
 |---|---|---|
 | R8a | **No response models; the API contract exists twice.** No `response_model` anywhere in the backend, so OpenAPI documents no response bodies and `api.ts`'s interfaces are unverified against the server. | §3.2 |
 | R8b | **No database-level integrity.** No `PRAGMA foreign_keys=ON`; no `relationship()` or cascade rules. Deleting a book relies on four hand-written loops (`library.py:93-108`); anything that bypasses them (a script, a migration, a bug) leaves orphans. | `db/models.py`, `library.py:93-108` |
-| R8c | **`tests/conftest.py` depends on files outside the repo.** `~/Documents/EBooks/*.pdf|epub` for 4 fixtures (`conftest.py:4-6`). On any other machine those tests fail or skip; there is no `pytest.skip` guard. | `backend/tests/conftest.py` |
-| R8d | **`main.py` has no tests.** The composition root — backend selection, fallbacks, the entire wiring of the engine into three routers — is exercised only indirectly through `from main import app` in three test files. | `backend/tests/` |
+| R8c | **The suite reads real files outside the repo.** `~/Documents/EBooks/*.pdf|epub` backs 4 fixtures (`sample_pdf_path`, `sample_epub_path`, `logic_pdf_path`, `hardthing_pdf_path`) with no `pytest.skip` guard, so the gate's result depends on the machine. See R9. | `backend/tests/conftest.py` |
+| R8d | **`main.py` has almost no direct tests.** The composition root — engine selection, the fallbacks, and the wiring of the engine into three routers via `_apply_kokoro` — is exercised only indirectly through `from main import app` in a few test files. `services/engine_manager.py` is now well tested (41 tests); `main.py` itself is not. | `backend/tests/` |
 | R8e | **`OCREngine` is dead code.** 43 lines, no caller, `gpu=False` hard-coded. A scanned PDF with no text layer yields zero sentences and the upload succeeds with `sentence_count: 0`. | `services/ocr_engine.py`; no reference in `routers/` |
-| R8f | **`_load_sentences` and `_write_cache_entry` block the loop.** Synchronous SQLite reads/writes inside `async` functions on the WebSocket path. | `tts.py:38-47`, `tts_engine.py:399-400`, `:466-468` |
+| R8f | **The sentence loader blocks the loop.** A synchronous SQLite read inside `load_sentences` (`services/sentence_source.py`), called from the WebSocket accept path on the event loop. | `services/sentence_source.py`, called from `routers/tts.py` |
 | R8g | **A book is identified only by its bytes.** Re-uploading a corrected file creates a second book; `title` comes from the first upload's filename and can never be changed. | `documents.py:27`, `:76` |
 | R8h | **`POST /library/{id}/progress` does not validate `sentence_index`.** Any integer is stored and returned. The client clamps on read (`reader.ts:43`), so the effect is bounded — but the server's contract is "whatever you send". | `library.py:39-50` |
 | R8i | **`GET /library/{book_id}/progress` never 404s**, returning `0` for unknown books. It hides a caller bug rather than surfacing it. | `library.py:87-90` |
@@ -1829,6 +1948,70 @@ catalogue.
 | R8l | **No linting or formatting gate.** No ESLint, no Prettier, no config for either. `npm run check` is types + Svelte warnings only. Import ordering, unused imports (`API_BASE` in two routes) and naming are unenforced. | `frontend/package.json` |
 | R8m | **`persistTextBook` sends a `title` the server ignores.** `api.ts:287-289` JSON-encodes `{title}`; the handler takes no body (`documents.py:156`). Harmless today, misleading forever. | `api.ts:287`, `documents.py:155-169` |
 | R8n | **`text_filter`'s filters can never be reviewed or reversed.** `filtered` is set at ingestion and no endpoint can change it, so a false positive permanently removes a sentence from both playback and rendering with no user recourse. | `documents.py:52`, `db/models.py:62` |
+
+### R9 · The test suites are not hermetic and not deterministic — **Severity: High (open; being worked on)**
+
+This is the risk that most undermines everything else in this document, because it is the reason a
+reader cannot simply trust a green gate.
+
+**Measured.** Three consecutive full pytest runs on the same tree produced **4, then 5, then 14
+failures**, with the failing test identities changing each time. Ten of the fourteen
+(`test_engine_manager.py`) **pass when their file runs alone** (`41 passed`) and fail in the full run.
+The frontend unit gate is separately red for a stale assertion (§8.3).
+
+**Verified — what is already fixed.** `backend/tests/conftest.py` now carries an `autouse` guard
+(`isolate_from_real_resources`) that redirects the engine, `_DEFAULT_DB`, `uploads/`, `voices/`,
+`exports/`, `main`'s lifespan hooks and `services.tts_engine._g2p` for every test, and `os.chdir`s into
+a scratch sandbox at import time. This is a substantial and correct fix, and it is why I could run the
+suite in place without touching `backend/ebook_reader.db`.
+
+**Verified — what remains.**
+
+* **Four fixtures still read real files outside the repository** (`~/Documents/EBooks/*.pdf|epub`) with
+  no skip guard, so the suite's result depends on the machine.
+* **Order-dependence is still present** despite the guard, at a severity that changes the gate's colour.
+  The specific mechanism is not something I pinned down; I can only report that the same file passes
+  alone and fails in company.
+* **The brief describes a further failure mode I could not reproduce:** runs going red with 27 failures
+  because a test reaches the real `_init_kokoro`, which fails when the HuggingFace cache is read-only
+  in this sandbox. **Not reproduced** — the autouse guard replaces `_init_kokoro` — so I record it as
+  **Cited and unverified**, and note that the same class of breakage did occur in a different form.
+* **`GPU`-dependent tests are unverifiable here.** The sandbox hides `/dev/nvidia*`, so
+  `torch.cuda.is_available()` is `False` and any test asserting GPU selection can only be verified on
+  the host. The ten `test_engine_manager.py` failures include `TestBuildLocal` and `TestStartup` cases
+  about GPU preference; I could not distinguish "these fail because of environment" from "these fail
+  because of ordering".
+
+**Consequence:** the honest statement about the gates is the per-gate one in §8, not a single verdict.
+**Concurrent fix:** partly — another agent owns the hermeticity work, and it landed the autouse guard
+during this session.
+
+### R10 · Refactors are outrunning their tests — **Severity: Medium (open)**
+
+**Measured.** The `EngineManager` refactor moved remote-backend selection out of `main.py`. Four tests
+in `test_system_capabilities.py` still monkeypatch `main._init_remote_kokoro`, a symbol the refactor
+**deleted**, and therefore fail deterministically with
+`AttributeError: module 'main' has no attribute '_init_remote_kokoro'`. The engine-selection tests
+(`test_engine_manager.py`, `test_system_capabilities.py`) are the newest files in the suite and are
+where 14 of 14 current failures live.
+
+The frontend shows the same pattern in a different form: `stores/settings.ts` gained
+`bionicMinWordLength` and `bionicSkipCommonWords`, and `settings.test.ts` — which keeps its own copy of
+the expected defaults instead of importing `DEFAULTS` — was not updated, so `npm run test:unit` is red
+(§8.3).
+
+**Why this is architectural rather than incidental.** Both cases are the same root cause: **an
+expectation is duplicated rather than derived.** The test restates a shape the code owns. In a repo
+with this much concurrent refactoring, a duplicated expectation is a guaranteed future failure, and it
+converts a code change into an apparently unrelated red gate. The fix is to import the source of truth
+(the store's `DEFAULTS`, the module's real symbol) rather than to restate it.
+
+**Verified — the counter-example worth copying.** `backend/tests/conftest.py` builds its fakes from the
+real contract (`fake_kokoro_callable` mirrors `KPipeline.__call__` including the `1/speed` sample
+scaling, and `FakeG2P` mirrors the misaki token shape), which is why most of the suite survived the TTS
+refactors. Deriving from the source is markedly more robust than restating it.
+
+* **Concurrent fix:** partly — the failures are in files another agent owns.
 
 ### 10.1 Risks explicitly checked and **not** reproduced
 
@@ -1841,22 +2024,37 @@ Stated as required, so that a reader knows these were tested rather than assumed
 * **`AudioCache` unbounded growth (R1)** is no longer true as stated — the cap and sweep exist and are
   wired into the lifespan. I verified that by reading `main.py:104-105` and `services/audio_cache.py`,
   not by observing an eviction on a live process.
-* **The 620 s hang** the brief mentions is real but intermittent, not deterministic: I reproduced it
-  twice on one snapshot and then saw the same suite finish twice in ~122 s on the next. It is reported
-  as intermittent, with both observations, in §8.4.
+* **The earlier 620 s hang** the brief mentions is real but intermittent, not deterministic: I
+  reproduced it twice on one snapshot (killed at 620 s and 520 s, the first stalling after 201 tests)
+  and then saw the same suite finish in ~120 s. It is reported as intermittent, with both observations,
+  in §8.4.
 * **The `create_all` ordering hazard** does not reproduce through the application entrypoint
   (`main.py`) — only for a direct caller of `create_engine_and_tables`. Both measurements are in §5.2. It
   is fixed as of the snapshot.
+* **The "27 failures because a test reaches the real `_init_kokoro`" mode — Cited, not reproduced.**
+  The brief describes the suite going red when a test reaches the real `_init_kokoro` and the
+  HuggingFace cache is read-only in this sandbox. I could not reproduce that specific mechanism: the new
+  autouse guard in `backend/tests/conftest.py` replaces `_init_kokoro` for every test, so no test I ran
+  could reach it. What I *did* reproduce is non-determinism of comparable severity — 4, 5 and 14
+  failures across three runs of the same tree (§8.4, §10 R9). So: the *symptom class* is confirmed, the
+  *stated cause* is not, and I report it as an open risk rather than a solved one.
+* **The ten `test_engine_manager.py` failures are also GPU-adjacent and therefore partly unverifiable.**
+  `TestBuildLocal` and `TestStartup` include cases asserting GPU preference, and this sandbox reports
+  `torch.cuda.is_available() == False` because `/dev/nvidia*` is absent. I could not separate "fails
+  because the environment has no GPU" from "fails because of cross-test ordering" for those cases
+  specifically; the file as a whole passes in isolation, which points at ordering, but that is
+  **Inferred** for the GPU cases rather than measured.
 * **GPU/CUDA conclusions are sandbox-limited.** This sandbox exposes no `/dev/nvidia*` and no `/dev/dri`,
   `torch.cuda.is_available()` reads `False` here, and `nvidia-smi` cannot reach the driver. The host has
   an **NVIDIA T600 Laptop GPU (4 GB, Turing, cc 7.5)** with driver 580.178.04 and the `nvidia`,
   `nvidia_uvm` and `nvidia_drm` modules loaded. **Nothing in this document claims the backend chose CPU
   on the host** — `device = "cuda" if engine_manager._cuda_available() else "cpu"` (`main.py:56`)
-  resolves to
-  `"cpu"` *inside this sandbox only*, and `GET /api/system/capabilities` is the endpoint that reports
-  what actually happened (`services/kokoro_runtime.py:probe_local_torch`). Any GPU-path statement
-  elsewhere is labelled as sandbox-limited. `implementation-handoff.md` §9.3 records the same
-  restriction.
+  resolves to `"cpu"` *inside this sandbox only*, and `GET /api/system/capabilities` is the endpoint
+  that reports what actually happened (`services/kokoro_runtime.py:probe_local_torch`). Any GPU-path
+  statement elsewhere is labelled as sandbox-limited. `implementation-handoff.md` §9.3 records the same
+  restriction, and `docs/research/kokoro-82m-t600-4gb-research.md` plus
+  `docs/research/cuda-display-gpu-low-vram-findings.md` hold the host-side GPU measurements — **cited
+  here, not re-verified by me.**
 
 ---
 
@@ -1941,16 +2139,19 @@ cleanup).
 
 1. Read `implementation-handoff.md` §1.3 **first**. The rule is that a new store is justified only if
    the fact it holds has no owner. Do not create a second home for `currentIndex`, `speed`, `voice`,
-   `highlightColor`, `bionicMode`, `bionicFixation`, `bionicBoldRatio`, `highlightEnabled`, `autoscroll`,
-   `hotkeysEnabled` or `theme` — all eleven already live in `stores/settings.ts` or
-   `stores/reader.ts`.
+   `highlightColor`, `bionicMode`, `bionicFixation`, `bionicBoldRatio`, `bionicMinWordLength`,
+   `bionicSkipCommonWords`, `highlightEnabled`, `autoscroll`, `hotkeysEnabled` or `theme` — all
+   thirteen already live in `stores/settings.ts` or `stores/reader.ts`.
 2. Use `writable` from `svelte/store` and return a `{ subscribe, ...verbs }` object, matching all six
    existing stores. Name the verbs as imperatives (`setSpeed`, `toggleAutoscroll`, `updateLastRead`).
 3. **Put every HTTP call in `api.ts`**, import it, and never call `fetch` in the store (ADR-8).
 4. **Validate and clamp on write**, in the store and not in the component — `setBionicFixation` clamps
-   to `[1,5]` and `setBionicBoldRatio` to `[0.2,0.8]` in steps of 0.05 (`settings.ts:143-153`);
-   `reader.setSpeed` clamps to `[0.5,3.0]` (`reader.ts:54`). This is what keeps a bad value out of the
-   cache key.
+   to `[1,5]` and `setBionicBoldRatio` to `[0.2,0.8]` in steps of 0.05; `reader.setSpeed` clamps to
+   `[0.5,3.0]`. This is what keeps a bad value out of the audio cache key.
+   **And if you add a field, update `frontend/src/tests/stores/settings.test.ts`** — it keeps its own
+   copy of the expected defaults and is *currently red* because it was not updated for the last two
+   fields added. Deriving that expectation from the store's exported `DEFAULTS` instead of restating it
+   would have prevented the failure (§10 R10).
 5. If it needs to survive a reload and the server cannot store it, persist to `localStorage` under a
    namespaced key (`'kokoro-settings'` is the existing one) — and read defensively, as
    `readFromStorage()` does (`settings.ts:81-104`: every field type-checked, falling back to the

@@ -564,6 +564,9 @@ class ModalKokoroClient:
     config: RemoteConfig = field(default_factory=RemoteConfig.from_env)
     invoke: Callable[[dict], dict] | None = None
     warm: Callable[[dict], str] | None = None
+    # Injectable so an export batch run can be driven without Modal (tests, and
+    # any future caller that wants a different fan-out strategy).
+    batch_mapper: Callable[[Sequence[dict]], Iterator[dict]] | None = None
     _executor: ThreadPoolExecutor = field(
         default_factory=lambda: ThreadPoolExecutor(max_workers=1, thread_name_prefix="modal-tts"),
         repr=False,
@@ -691,7 +694,7 @@ class ModalKokoroClient:
             }
             for batch in batches
         ]
-        run = mapper or self._default_batch_mapper()
+        run = mapper or self.batch_mapper or self._default_batch_mapper()
         try:
             for result in run(payloads):
                 yield _decode_batch(result, self.config)
