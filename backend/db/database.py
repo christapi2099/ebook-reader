@@ -35,6 +35,20 @@ def _migrate(engine):
             conn.execute(text("ALTER TABLE audiocache ADD COLUMN word_timestamps TEXT"))
             conn.commit()
 
+        # Audio cache eviction (services/audio_cache.py) deletes the oldest rows
+        # first, ordered by `created_at`. The only index audio cache had was the
+        # implicit primary-key autoindex on `text_hash`, which cannot serve that
+        # ORDER BY, so without this the sweep is a full table scan - and the
+        # table holds ~800 MB of PCM. Unconditional under IF NOT EXISTS for the
+        # same reason as ix_book_folder_id below: it is a no-op once the index
+        # exists, which keeps _migrate idempotent and O(1) instead of rewriting
+        # the database file on every boot.
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_audiocache_created_at "
+            "ON audiocache(created_at)"
+        ))
+        conn.commit()
+
         sent_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(sentence)"))}
         if 'words' not in sent_cols:
             conn.execute(text("ALTER TABLE sentence ADD COLUMN words TEXT"))

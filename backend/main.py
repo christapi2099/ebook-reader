@@ -17,7 +17,7 @@ from routers import bookmarks as bookmarks_router
 from routers import folders as folders_router
 from routers import user as user_router
 from routers import system as system_router
-from services import kokoro_runtime, modal_remote
+from services import audio_cache, kokoro_runtime, modal_remote
 
 logger = logging.getLogger(__name__)
 
@@ -147,13 +147,26 @@ _load_env_file()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    create_engine_and_tables()
+    engine = create_engine_and_tables()
     Path("uploads").mkdir(exist_ok=True)
     kokoro = _init_kokoro()
     tts_router.set_kokoro(kokoro)
     voices_router.set_kokoro(kokoro)
     mp3_router.set_kokoro(kokoro)
-    yield
+    # Audio cache eviction lives here, not in the write path: one sweep at
+    # startup, then the periodic task below for the life of the process, so
+    # every writer is covered instead of only the flows we remembered
+    # (services/audio_cache.py, and §7 of the synthesis-strategy research,
+    # explain why that distinction matters). Both are safe with an empty cache
+    # and with a database that already sits under the cap.
+    await audio_cache.sweep_once(engine)
+    sweeper = audio_cache.start_periodic_sweep(engine)
+    try:
+        yield
+    finally:
+        # Cancelled and awaited on shutdown so the task cannot outlive the
+        # engine, and a sweep in flight cannot keep the process alive.
+        await audio_cache.stop_periodic_sweep(sweeper)
 
 
 app = FastAPI(lifespan=lifespan)
