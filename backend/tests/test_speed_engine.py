@@ -478,3 +478,92 @@ class TestPrefetchAudioBudget:
             )
 
         assert calls == []
+
+
+class _Token:
+    """A misaki-shaped token for _collect_result."""
+
+    def __init__(self, text, start, end, phonemes="x"):
+        self.text = text
+        self.phonemes = phonemes
+        self.start_ts = start
+        self.end_ts = end
+
+
+class _Chunk:
+    """A Kokoro-shaped result whose final element is the audio."""
+
+    def __init__(self, tokens, samples=240):
+        self.tokens = tokens
+        self._audio = np.zeros(samples, dtype=np.float32)
+
+    def __getitem__(self, index):
+        assert index == -1
+        return self._audio
+
+
+class TestWordTimestampRobustness:
+    """Missing token timings must not stall or desynchronise the highlight.
+
+    The frontend picks the last word whose `start` has already passed and
+    addresses words by POSITION, so a token without a timing must be given a
+    sensible monotonic start AND must still occupy its slot in the list.
+    """
+
+    @staticmethod
+    def _collect(tokens, offset=0.0):
+        engine = TTSEngine(kokoro_speed_supported)
+        stamps: list[dict] = []
+        engine._collect_result(_Chunk(tokens), [], stamps, offset)
+        return stamps
+
+    def test_a_word_with_no_timing_still_occupies_its_slot(self):
+        stamps = self._collect([
+            _Token("Alpha", 0.0, 0.5),
+            _Token("Beta", None, None),
+            _Token("Gamma", 1.0, 1.5),
+        ])
+        assert [s["word"] for s in stamps] == ["Alpha", "Beta", "Gamma"], (
+            "dropping an untimed word would desynchronise every word after it, "
+            "because the frontend indexes this list by position"
+        )
+
+    def test_a_missing_start_continues_from_the_previous_word(self):
+        """Coercing None to 0.0 made the word look like it began at the sentence
+        start, so the highlight jumped to it early and then stalled there."""
+        stamps = self._collect([
+            _Token("Alpha", 0.0, 0.5),
+            _Token("Beta", None, None),
+            _Token("Gamma", 1.0, 1.5),
+        ])
+        assert stamps[1]["start"] == 0.5
+        assert stamps[1]["end"] == 0.5, "an untimed word must not run backwards"
+
+    def test_timestamps_stay_monotonic(self):
+        stamps = self._collect([
+            _Token("Alpha", None, None),
+            _Token("Beta", 0.25, 0.5),
+            _Token("Gamma", None, 0.9),
+            _Token("Delta", 1.0, 1.2),
+        ])
+        starts = [s["start"] for s in stamps]
+        ends = [s["end"] for s in stamps]
+        assert starts == sorted(starts), f"starts must not go backwards: {starts}"
+        assert ends == sorted(ends), f"ends must not go backwards: {ends}"
+        for stamp in stamps:
+            assert stamp["end"] >= stamp["start"], f"inverted span: {stamp}"
+
+    def test_reversed_timings_are_clamped_rather_than_inverted(self):
+        stamps = self._collect([_Token("Alpha", 0.8, 0.3)])
+        assert stamps[0]["start"] == 0.8
+        assert stamps[0]["end"] == 0.8, "a reversed span must be clamped, not emitted"
+
+    def test_carried_forward_values_still_get_the_audio_offset(self):
+        stamps = self._collect([
+            _Token("Alpha", 0.0, 0.5),
+            _Token("Beta", None, None),
+        ], offset=2.0)
+        assert stamps[0]["start"] == 2.0
+        assert stamps[1]["start"] == 2.5, (
+            "the carried-forward value is in chunk time and must still be offset"
+        )

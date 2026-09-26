@@ -231,13 +231,31 @@ class TTSEngine:
         audio_data = audio if isinstance(audio, np.ndarray) else np.array(audio)
         audio_parts.append(audio_data)
 
+        # `None` means "this token carries no timing", not "this token starts at
+        # zero". Substituting 0.0 made the word look as though it began at the
+        # start of the sentence, and the frontend picks the last word whose
+        # `start` has already passed — so it highlighted that word early and then
+        # stalled on it until a later word with a real start arrived. Carrying the
+        # previous word's end forward keeps the sequence monotonic and the
+        # highlight moving.
+        #
+        # The entry is appended even when timings are missing: the frontend
+        # addresses words by POSITION (`currentWordIndex` indexes into this list),
+        # so dropping one would desynchronise every word after it.
+        previous_end = 0.0
         for t in (getattr(result, 'tokens', None) or []):
-            if _is_spoken_token(t):
-                word_timestamps.append({
-                    "word": t.text,
-                    "start": round((t.start_ts or 0) + audio_offset, 4),
-                    "end": round((t.end_ts or 0) + audio_offset, 4),
-                })
+            if not _is_spoken_token(t):
+                continue
+            start = t.start_ts if t.start_ts is not None else previous_end
+            end = t.end_ts if t.end_ts is not None else start
+            if end < start:
+                end = start
+            word_timestamps.append({
+                "word": t.text,
+                "start": round(start + audio_offset, 4),
+                "end": round(end + audio_offset, 4),
+            })
+            previous_end = end
 
         audio_flat = audio_data.flatten() if audio_data.ndim > 1 else audio_data
         return audio_data, audio_offset + len(audio_flat) / SAMPLE_RATE
