@@ -207,8 +207,8 @@ returns `True` when the callable is not introspectable, giving it the benefit of
 
 | | Local (`KPipeline`) | Remote (`ModalKokoroClient`) |
 |---|---|---|
-| Built by | `main._init_local_kokoro` | `services/modal_remote.ModalKokoroClient` |
-| Device | `device = "cuda" if torch.cuda.is_available() else "cpu"`, passed to `KPipeline(...)` | GPU chosen by Modal (`MODAL_KOKORO_GPU`, default `T4`) |
+| Built by | `engine_manager.build_local(device)` (`services/engine_manager.py:139`), called from `EngineManager._build` | `services/modal_remote.ModalKokoroClient` |
+| Device | chosen by `EngineManager` from its **injected** torch probe (`kokoro_runtime.probe_local_torch` by default) and passed explicitly to `KPipeline(..., device=...)` | GPU chosen by Modal (`MODAL_KOKORO_GPU`, default `T4`) |
 | Call | `pipeline(text, voice=..., speed=...)` returns a **generator** | `client(text, voice=..., speed=...)` returns a **`list[KokoroChunk]`** |
 | Streaming granularity | one `Result` per call; `next()` *is* the inference | the whole sentence arrives in one HTTP/gRPC round trip, then decodes |
 | Weight loading | 327 MB at process start | baked into a Modal volume at deploy time (`modal_kokoro._bake_model_into_volume`), `HF_HUB_OFFLINE=1` at runtime |
@@ -229,17 +229,29 @@ miss is the whole round trip including a possible GPU cold start. The local path
 
 ### 2.5 Device selection
 
+There is no device literal left in `main.py`. `main._init_kokoro()` is a thin wrapper over
+`engine_manager.manager.startup()`, and the device is chosen inside `EngineManager`:
+
 ```python
-# main.py:65, inside _init_local_kokoro
-device = "cuda" if torch.cuda.is_available() else "cpu"
+# services/engine_manager.py — EngineManager._env_candidates
+cuda = bool(self._torch_probe().get("cuda_available"))
+preferred = MODAL if remote["reachable"] else (GPU if cuda else CPU)
 ```
 
-That value is computed once, **logged, returned to the caller, and actually passed to `KPipeline`**
-(**Verified** — `main.py:66-71`; the comment above it exists because the earlier version computed the
-device, used it once, and discarded it, which `implementation-handoff.md` §9.2 flagged as the reason
-no capability probe was reachable). It is recorded on `kokoro_runtime.runtime` via
-`record_local(device=..., model_repo=...)` and reported by `GET /api/system/capabilities` (§9). There
-is no runtime device switch: changing it means restarting the process.
+The probe is **injected** (`torch_probe=kokoro_runtime.probe_local_torch` by default), and
+`_local_availability` (`:309`) reads the same callable, so the startup device and the Settings
+selector cannot disagree about whether this machine has a GPU (**Verified** — a test drives
+`availability("cpu")` with a remote probe that raises if touched, and `switch()`/`options()` agree
+over 30 probe combinations).
+
+`build_local(device)` never guesses, so `cpu` and `gpu` are genuinely different requests rather
+than "cuda if it happens to be there". The chosen device is recorded on `kokoro_runtime.runtime`
+via `record_local(device=..., model_repo=...)` and reported by `GET /api/system/capabilities` (§9).
+There is no runtime device switch: changing it means restarting the process.
+
+An earlier version computed the device in `main._init_local_kokoro()`. That function had **no
+callers**, and it read the device from a different source than the Settings selector — which is
+precisely how a machine with no GPU could still be offered the GPU card. It has been removed.
 
 ---
 

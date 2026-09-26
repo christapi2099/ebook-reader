@@ -1331,6 +1331,14 @@ failures, and the identity of the failing tests changed each time. Everything I 
 | `test_mp3_export_nonblocking.py::TestExportSpeedValidation::test_out_of_band_speeds_are_clamped_not_rejected` | No — appeared in some runs only | Same pattern; flaky under full-suite ordering. |
 | `test_ws_mimo.py` (4), `test_websocket_integration.py`, `test_word_timestamps.py` | No — appeared in one earlier run only | Same pattern. |
 
+> **Correction to the table's diagnosis, added later.** `main._init_remote_kokoro` **never existed**:
+> `git log -S"_init_remote_kokoro"` finds no addition and no removal, so the `AttributeError` was not a
+> refactor deleting a symbol — the test was monkeypatching a name that was always wrong. Every doc and
+> test claim that this symbol once existed is therefore false, including the cause given in the
+> `TestBackendSelection` row above. The measurement itself stands; only the explanation was wrong.
+> `main._init_local_kokoro`, a *different* symbol, did exist and was genuinely dead code with no
+> callers — it was removed in `595ca72`.
+
 **So the honest statement at the snapshot was: the backend gate is red, and 4 of the 14 failures are
 a real, deterministic API-drift bug in the newest subsystem while the other 10 are order-dependence
 that disappears when their file runs alone.** The brief I was given said "pytest is effectively green:
