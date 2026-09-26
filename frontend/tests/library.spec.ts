@@ -1,9 +1,9 @@
 import { test, expect } from '@playwright/test'
 
 const MOCK_BOOKS = [
-  { id: 'book-1', title: 'Test Book One', author: 'Author A', file_type: 'PDF', page_count: 10 },
-  { id: 'book-2', title: 'Test Book Two', author: 'Author B', file_type: 'EPUB', page_count: 25 },
-  { id: 'book-3', title: 'Test Book Three', author: null, file_type: 'PDF', page_count: 5 },
+  { id: 'book-1', title: 'Test Book One', author: 'Author A', file_type: 'pdf', page_count: 10 },
+  { id: 'book-2', title: 'Test Book Two', author: 'Author B', file_type: 'epub', page_count: 25 },
+  { id: 'book-3', title: 'Test Book Three', author: null, file_type: 'pdf', page_count: 5 },
 ]
 
 const MOCK_USER_SETTINGS = {

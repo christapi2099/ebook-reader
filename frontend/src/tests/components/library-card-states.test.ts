@@ -8,7 +8,7 @@ const BOOK: Book = {
   title: 'Deep Work',
   // No endpoint can set `Book.author`, so this is the ordinary case.
   author: null,
-  file_type: 'PDF',
+  file_type: 'pdf',
   page_count: 200,
   folder_id: null,
 }
@@ -29,8 +29,9 @@ describe('LibraryCard states', () => {
       const placeholder = document.querySelector('[data-cover-placeholder="book-1"]')
       expect(placeholder).toBeTruthy()
       expect(placeholder?.textContent).toContain('No cover')
-      // The real file type still shows through the placeholder.
-      expect(placeholder?.textContent).toContain('PDF')
+      // The real file type still shows through the placeholder. Stored values
+      // are lowercase; the badge uppercases with CSS, which textContent ignores.
+      expect(placeholder?.textContent).toContain('pdf')
     })
   })
 

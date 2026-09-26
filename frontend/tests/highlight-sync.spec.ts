@@ -38,7 +38,7 @@ test.describe('Highlight–Audio Sync', () => {
         await route.fulfill({ json: { sentence_index: 0 } })
       } else if (url.includes('/library/') && !url.includes('/progress')) {
         await route.fulfill({
-          json: { id: 'test-book', title: 'Test Book', author: 'Test Author', file_type: 'PDF', page_count: 5 }
+          json: { id: 'test-book', title: 'Test Book', author: 'Test Author', file_type: 'pdf', page_count: 5 }
         })
       } else if (url.includes('/uploads/')) {
         await route.fulfill({
@@ -257,7 +257,7 @@ test.describe('Word-level highlighting', () => {
         await route.fulfill({ json: { sentence_index: 0 } })
       } else if (url.includes('/library/') && !url.includes('/progress')) {
         await route.fulfill({
-          json: { id: 'test-book', title: 'Test Book', author: 'Test Author', file_type: 'PDF', page_count: 5 }
+          json: { id: 'test-book', title: 'Test Book', author: 'Test Author', file_type: 'pdf', page_count: 5 }
         })
       } else if (url.includes('/uploads/')) {
         await route.fulfill({
@@ -434,7 +434,7 @@ test.describe('Search diff (O(1) optimization)', () => {
         await route.fulfill({ json: { sentence_index: 0 } })
       } else if (url.includes('/library/') && !url.includes('/progress')) {
         await route.fulfill({
-          json: { id: 'test-book', title: 'Test Book', author: 'Test Author', file_type: 'PDF', page_count: 5 }
+          json: { id: 'test-book', title: 'Test Book', author: 'Test Author', file_type: 'pdf', page_count: 5 }
         })
       } else if (url.includes('/uploads/')) {
         await route.fulfill({
@@ -556,7 +556,7 @@ test.describe('Search highlight styling', () => {
         await route.fulfill({ json: { sentence_index: 0 } })
       } else if (url.includes('/library/') && !url.includes('/progress')) {
         await route.fulfill({
-          json: { id: 'test-book', title: 'Test Book', author: 'Test Author', file_type: 'PDF', page_count: 5 }
+          json: { id: 'test-book', title: 'Test Book', author: 'Test Author', file_type: 'pdf', page_count: 5 }
         })
       } else if (url.includes('/uploads/')) {
         await route.fulfill({

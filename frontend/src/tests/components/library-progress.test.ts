@@ -27,7 +27,7 @@ vi.mock('$lib/api', async (importOriginal) => {
 import { goto } from '$app/navigation'
 
 const STARTED: Book = {
-  id: 'book-1', title: 'Deep Work', author: null, file_type: 'PDF',
+  id: 'book-1', title: 'Deep Work', author: null, file_type: 'pdf',
   page_count: 10, folder_id: null, sentence_count: 120, sentence_index: 30,
 }
 

@@ -23,7 +23,7 @@ test.describe('MediaBar Controls', () => {
         await route.fulfill({ json: { sentence_index: 0 } })
       } else if (url.includes('/library/') && !url.includes('/progress')) {
         await route.fulfill({
-          json: { id: 'book-1', title: 'Test Book', author: 'Test Author', file_type: 'PDF', page_count: 5 }
+          json: { id: 'book-1', title: 'Test Book', author: 'Test Author', file_type: 'pdf', page_count: 5 }
         })
       } else if (url.includes('/uploads/')) {
         await route.fulfill({

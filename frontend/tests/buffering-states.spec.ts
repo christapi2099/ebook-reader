@@ -19,7 +19,7 @@ test.describe('Buffering States — MediaBar, TextViewer, AudioProgressBar', () 
         await route.fulfill({ json: { sentence_index: 0 } })
       } else if (url.includes('/library/') && !url.includes('/progress')) {
         await route.fulfill({
-          json: { id: 'buffer-test', title: 'Buffer Test', author: 'Test', file_type: 'PDF', page_count: 5 }
+          json: { id: 'buffer-test', title: 'Buffer Test', author: 'Test', file_type: 'pdf', page_count: 5 }
         })
       } else if (url.includes('/uploads/')) {
         await route.fulfill({ status: 200, headers: { 'content-type': 'application/pdf' }, body: makeMinimalPdf() })
