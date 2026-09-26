@@ -100,13 +100,38 @@ Must stay distinguishable from the playback highlight in every theme.
 
 ### 1.7 Z-index layers (named in one place in `app.css`)
 
-`base` < `sticky` < `dock` < `panel` < `overlay` < `dialog` < `toast` <
-`tooltip`.
+`sticky` 10 < `dock` 20 < `panel` 30 < `overlay` 40 < `dialog` 50 <
+`toast` 60 < `tooltip` 70.
+
+There is no `base` layer. This section used to name one, but `app.css` defines
+only the seven above and Tailwind 4 ships no `z-index` defaults, so `sticky` is
+the lowest named layer and ordinary content sits at `auto`.
+
+**Known gap — the scale has no honest home for two things the app actually has.**
+A popover menu needs a layer above its own in-card trigger, and the side nav and
+mobile drawer need to sit above page content without being called `overlay`,
+which means *the scrim*. So those sites keep raw `z-<number>` values with a
+comment saying why, rather than a token whose name would be false — the number is
+the least important part of the name. As of this writing that is `Sidebar`, the
+`+layout` trigger/drawer/backdrop, `LibraryCard`'s menu and its click-catcher,
+`FolderTile`'s menu and `PDFViewer`'s non-dismissable veil.
+
+Adding `nav` and `menu` layers closes it, and is deliberately not done: every
+candidate number changes stacking behaviour on routes with no coverage for it
+(the drawer and its backdrop are both 40 and 30 today, so which covers which
+depends on DOM order), so it wants a considered decision rather than a sweep.
 
 ### 1.8 Focus
 
 2px `focus-ring` outline with offset on every interactive element,
-`focus-visible` only.
+`focus-visible` only — implemented once, globally, at `app.css`'s
+`:focus-visible` rule rather than per component.
+
+Known divergence: three text inputs (`PageNavigator`, `SearchOverlay`,
+`routes/+page`) opt out with `focus:outline-none` and substitute a
+`focus:ring-2 ring-focus-ring`. They are mutually consistent, but because they
+use `:focus` rather than `:focus-visible` they also light up on mouse click. Left
+as-is so the three agree; unifying them on the global rule is a separate change.
 
 ## 2. Contrast verification (WCAG, computed)
 
