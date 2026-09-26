@@ -290,8 +290,19 @@ export function saveProgressBeacon(bookId: string, sentenceIndex: number): boole
   const url = `${API_BASE}/library/${encodeURIComponent(bookId)}/progress`
   const body = JSON.stringify({ sentence_index: sentenceIndex })
   if (typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
-    return navigator.sendBeacon(url, new Blob([body], { type: 'application/json' }))
+    try {
+      // A `true` here means the browser took ownership of the request; a `false`
+      // means it refused (queue full, or the body was rejected) and nothing was
+      // sent, so fall through to the fetch rather than losing the position.
+      if (navigator.sendBeacon(url, new Blob([body], { type: 'application/json' }))) {
+        return true
+      }
+    } catch {
+      // Some engines throw instead of returning false for an oversized body.
+    }
   }
+  // `keepalive` is what lets this outlive the document; it is deliberately not
+  // awaited, and a rejection here is unreportable by design.
   void fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

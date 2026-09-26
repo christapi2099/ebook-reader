@@ -71,6 +71,10 @@ class AudioCache(SQLModel, table=True):
     voice: str
     word_timestamps: Optional[str] = None
     created_at: datetime
+    # Storage codec of ``audio_data`` — see services/audio_cache_codec.py.
+    # Defaulted rather than nullable because every row written before this column
+    # existed holds PCM_16, so the default is simply true of them.
+    codec: str = Field(default="pcm16")
 
 class Progress(SQLModel, table=True):
     book_id: str = Field(primary_key=True, foreign_key='book.id')

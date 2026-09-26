@@ -34,6 +34,15 @@ def _migrate(engine):
         if 'word_timestamps' not in ac_cols:
             conn.execute(text("ALTER TABLE audiocache ADD COLUMN word_timestamps TEXT"))
             conn.commit()
+        # Which codec wrote `audio_data` (services/audio_cache_codec.py). Defaulted
+        # to 'pcm16' because that is what every pre-existing row holds, so old
+        # entries stay readable and the cache can be switched to Opus, and back,
+        # without a rewrite or a migration of the stored audio itself.
+        if 'codec' not in ac_cols:
+            conn.execute(text(
+                "ALTER TABLE audiocache ADD COLUMN codec TEXT DEFAULT 'pcm16'"
+            ))
+            conn.commit()
 
         # Audio cache eviction (services/audio_cache.py) deletes the oldest rows
         # first, ordered by `created_at`. The only index audio cache had was the

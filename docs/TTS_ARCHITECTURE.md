@@ -590,6 +590,7 @@ CREATE TABLE audiocache (
     voice VARCHAR NOT NULL,
     created_at DATETIME NOT NULL,
     word_timestamps TEXT,
+    codec TEXT DEFAULT 'pcm16',
     PRIMARY KEY (text_hash)
 )
 ```
@@ -604,6 +605,26 @@ CREATE TABLE audiocache (
 - Audio is headerless mono **int16 PCM at 24 kHz = 48 000 bytes per audio-second**, exactly
   (**Verified**: `SUM(LENGTH(audio_data)) = 808 521 600` bytes ÷ `SUM(duration_ms)/1000 = 16 844.197` s
   `= 48 000.0`). Every disk figure in this document follows from that constant.
+
+**`codec`** says how `audio_data` is encoded, and defaults to `'pcm16'` — which is true of every row
+that predates the column, so old rows stay readable and no stored audio needs rewriting
+(`services/audio_cache_codec.py`). `AUDIO_CACHE_CODEC=opus` stores each sentence as Ogg Opus at
+24 kbps instead, which holds roughly **15×** more audio under the same eviction cap — the 4 GB cap
+goes from about three books to about forty-five. Measured here on a 5 s sentence: 240 000 bytes of
+PCM_16 became 15 798 bytes (15.2×), and decoding one back to float32 costs **13.5 ms**, against
+0.032 ms for PCM_16. That is negligible beside the synthesis it avoids, but it is not free.
+
+The two risks the plan listed before enabling it were both checked. **Decoder delay** is handled by
+the decoder, not by hand: a 24 000-sample input encoded to Ogg Opus decoded back to exactly 24 000
+samples, so the stored `word_timestamps` stay aligned. **Decode cost** is the 13.5 ms above.
+
+It stays **off by default** because it trades encoder CPU on the synthesis path for disk, and the
+quality trade is a listening judgement: the plan records the user rating Opus 24 kbps "great" on this
+corpus, and this document does not have a better measurement than that.
+
+> The **wire format is not affected** by `codec`. `stream_job` still chunks WAV to the WebSocket
+> regardless of how the row is stored — see §5.5.
+
 
 ### 5.2 Key derivation
 
@@ -710,6 +731,27 @@ language rather than the brief's.** One detail worth flagging: with the default 
 current 771 MiB payload, eviction will not fire at all on this database for a long time — the cap is
 deliberately ~5× the observed payload so that introducing it cannot delete the user's existing cache
 on first boot.
+
+### 5.5 The wire stays WAV, whatever the cache holds
+
+`codec` compresses the bytes **at rest** and nothing else. Every binary WebSocket frame is still a
+2 400-sample WAV chunk (§7), and that is a decision rather than an omission:
+
+- **The transport is loopback.** `frontend/src/lib/api.ts` pins `API_BASE = 'http://localhost:8000'`,
+  so the audio crosses the loopback device, not a network. 384 kbps of PCM_16 is not a resource the
+  user is short of; disk is, and that is what `codec` addresses. The plan reaches the same conclusion
+  from the other direction: the Opus cache is described as decoded back to float32 "before the
+  existing WAV chunking", i.e. the chunking is meant to be untouched.
+- **The client decodes each frame with `decodeAudioData`.** Compressing the wire would mean either
+  Ogg Opus, whose browser support the plan already records as partial (a stated cost of the Opus
+  *export*), or a WebCodecs `AudioDecoder`, which is a different client architecture. A decoder that
+  refuses one frame costs the reader the whole book, so this trades a large compatibility risk for a
+  bandwidth saving that loopback does not need.
+- **Per-chunk container overhead fights the win.** Frames are 100 ms, and each would need a
+  self-contained Ogg stream with its own headers — a large fraction of 300 bytes of 24 kbps payload.
+- **`audio.ts`'s decode chain carries the seek-backward guards** (the generation counter and
+  `scheduleChunk`), and the plan puts "any change to the WebSocket protocol" out of scope. Changing
+  the frame encoding means changing the path those guards protect.
 
 ---
 
