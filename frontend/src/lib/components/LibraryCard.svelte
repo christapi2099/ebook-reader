@@ -87,6 +87,14 @@
   ondragend={handleDragEnd}
 >
   {#if onDelete || onMove}
+    <!--
+      The three raw z-values in here are local stacking inside one card — the
+      options button above the cover, a click-catcher under the menu, the menu
+      above the catcher. The named scale has no layer for any of them (a menu
+      would need a slot between `overlay` 40 and `dialog` 50, which does not
+      exist), so they keep their numbers rather than borrow a name they do not
+      mean. See the z-index bucket list in the sweep report.
+    -->
     <div class="absolute top-2 right-2 z-10" role="button" tabindex="-1" onclick={(e) => e.stopPropagation()}>
       <button
         class="w-11 h-11 rounded-full flex items-center justify-center text-fg-subtle hover:bg-surface-sunken hover:text-fg transition-colors"

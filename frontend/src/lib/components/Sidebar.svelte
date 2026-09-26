@@ -31,6 +31,8 @@
   ]
 </script>
 
+<!-- raw z-40: the scale's only name at 40 is `overlay`, which means the scrim
+     behind a dialog — a lie for the nav rail. No token fits; see the report. -->
 <aside class="fixed left-0 top-0 h-screen w-[180px] bg-surface-sunken border-r border-border flex flex-col z-40">
   <div class="p-4 border-b border-border">
     <h1 class="text-lg font-bold text-fg">EbookReader</h1>

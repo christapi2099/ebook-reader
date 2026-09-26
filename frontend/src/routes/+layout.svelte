@@ -15,6 +15,14 @@
 </svelte:head>
 
 <!-- Mobile hamburger -->
+<!--
+  These three raw z-values are one stack: trigger (50) above drawer (40) above
+  the nav backdrop (30). None of them is honestly a named layer — `overlay` is
+  the dialog scrim, and the drawer has to sit *above* the scrim, where the scale
+  has nothing until `dialog`. Tokenising the backdrop at `z-overlay` would also
+  tie it with the drawer and make which one covers which depend on DOM order.
+  They keep their numbers until the scale gains a nav/menu slot.
+-->
 <button
   class="md:hidden fixed top-3 left-3 z-50 p-3 rounded-lg bg-surface shadow-2 border border-border"
   onclick={() => (sidebarOpen = !sidebarOpen)}

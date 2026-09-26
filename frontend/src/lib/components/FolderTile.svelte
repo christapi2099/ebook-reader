@@ -127,6 +127,7 @@
     </button>
 
     {#if menuOpen}
+      <!-- raw z-20: a popover menu has no honest token — see LibraryCard. -->
       <div class="absolute right-0 top-12 z-20 min-w-[11rem] rounded-lg border border-border bg-surface-raised py-1 shadow-2" role="menu" aria-label={`Actions for folder ${folder.name}`}>
         <button
           type="button"

@@ -203,6 +203,8 @@
           onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectVoice(voice.id) } }}
         >
           {#if !voice.built_in}
+            <!-- raw z-10: raising this above its own card's cover is local
+                 stacking, not one of the named layers. -->
             <button
               class="absolute top-2 right-2 w-5 h-5 rounded-full bg-surface-sunken hover:bg-danger-soft text-fg-subtle hover:text-danger flex items-center justify-center z-10"
               onclick={(e) => { e.stopPropagation(); handleDelete(voice.id) }}

@@ -558,6 +558,8 @@
     <div class="flex h-full items-center justify-center text-danger">{error}</div>
   {/if}
   {#if buffering}
+    <!-- raw z-20: an opaque veil is not a scrim (nothing dismisses it) and not
+         a panel; the scale has no layer for it. -->
     <div class="absolute inset-0 bg-surface/50 flex items-center justify-center z-20 pointer-events-none">
       <svg class="w-6 h-6 animate-spin text-accent" fill="none" viewBox="0 0 24 24">
         <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
@@ -566,7 +568,7 @@
     </div>
   {/if}
   <div class="mx-auto flex flex-col items-center py-6" bind:this={pagesEl}></div>
-  <div class="fixed bottom-4 right-4 flex items-center gap-1 bg-surface-raised/90 backdrop-blur rounded-lg shadow-2 border border-border px-2 py-1.5 z-30">
+  <div class="fixed bottom-4 right-4 flex items-center gap-1 bg-surface-raised/90 backdrop-blur rounded-lg shadow-2 border border-border px-2 py-1.5 z-panel">
     <button
       onclick={zoomOut}
       class="p-1 rounded hover:bg-surface-sunken text-fg-muted"
