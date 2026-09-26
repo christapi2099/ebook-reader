@@ -59,7 +59,7 @@
 <div class="px-3 py-1.5 flex flex-col gap-1">
   <!-- Progress track -->
   <div
-    class="relative w-full h-1 bg-slate-200 rounded-full overflow-hidden"
+    class="relative w-full h-1 bg-surface-sunken rounded-full overflow-hidden"
     role="progressbar"
     aria-label="Reading position"
     aria-valuemin="0"
@@ -68,17 +68,17 @@
     aria-valuetext={`Sentence ${playedCount} of ${playable.length}`}
   >
     <div
-      class="absolute inset-y-0 left-0 bg-blue-500 rounded-full transition-[width] duration-500"
+      class="absolute inset-y-0 left-0 bg-accent rounded-full transition-[width] duration-500"
       style="width: {positionPercent}%"
     ></div>
     {#if buffering && isPlaying}
       <!-- Shimmer overlay while buffering -->
-      <div class="absolute inset-y-0 left-0 right-0 w-full h-full bg-gradient-to-r from-transparent via-white/40 to-transparent shimmer-shine"></div>
+      <div class="absolute inset-y-0 left-0 right-0 w-full h-full bg-gradient-to-r from-transparent via-accent-fg/40 to-transparent shimmer-shine"></div>
     {/if}
   </div>
   <!-- Time display: real elapsed always, real total only once it is fully known -->
   <div class="flex justify-end">
-    <span class="text-xs text-slate-500 tabular-nums">
+    <span class="text-xs text-fg-muted tabular-nums">
       {formatTime(elapsedSeconds)}{#if totalSeconds !== null} / {formatTime(totalSeconds)}{/if}
     </span>
   </div>

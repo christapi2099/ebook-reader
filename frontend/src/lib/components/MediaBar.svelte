@@ -84,7 +84,7 @@
     <button
       onclick={onRewind}
       {disabled}
-      class="flex items-center gap-1 px-4 py-3 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-medium transition-colors min-h-[44px] disabled:opacity-40 disabled:cursor-not-allowed"
+      class="flex items-center gap-1 px-4 py-3 rounded-full bg-surface-sunken hover:bg-accent-soft text-fg text-sm font-medium transition-colors min-h-[44px] disabled:opacity-40 disabled:cursor-not-allowed"
       aria-label={`Rewind ${STEP_SENTENCES} sentences`}
     >
       <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -96,7 +96,7 @@
 
     <button
       onclick={() => (isPlaying ? onPause() : onPlay())}
-      class="flex items-center justify-center w-12 h-12 rounded-full bg-blue-500 hover:bg-blue-600 text-white shadow-lg transition-colors"
+      class="flex items-center justify-center w-12 h-12 rounded-full bg-accent hover:bg-accent-hover text-accent-fg shadow-2 transition-colors"
       aria-label={isPlaying ? 'Pause' : 'Play'}
       data-loading={isPlaying && buffering ? 'true' : 'false'}
     >
@@ -120,7 +120,7 @@
     <button
       onclick={onForward}
       {disabled}
-      class="flex items-center gap-1 px-4 py-3 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-medium transition-colors min-h-[44px] disabled:opacity-40 disabled:cursor-not-allowed"
+      class="flex items-center gap-1 px-4 py-3 rounded-full bg-surface-sunken hover:bg-accent-soft text-fg text-sm font-medium transition-colors min-h-[44px] disabled:opacity-40 disabled:cursor-not-allowed"
       aria-label={`Forward ${STEP_SENTENCES} sentences`}
     >
       {STEP_SENTENCES}
@@ -132,7 +132,7 @@
   </div>
 
   <div
-    class="flex items-center gap-0.5 bg-slate-100 rounded-full px-1 py-1"
+    class="flex items-center gap-0.5 bg-surface-sunken rounded-full px-1 py-1"
     role="group"
     aria-label="Playback speed"
     aria-describedby={speedLocked ? 'speed-lock-reason' : undefined}
@@ -141,7 +141,7 @@
       <button
         onclick={() => onSpeedChange(s)}
         disabled={speedLocked}
-        class="px-2.5 py-1 rounded-full text-xs font-semibold transition-colors {activeSpeed === s ? 'bg-blue-500 text-white shadow-sm' : 'text-slate-600 hover:bg-slate-200'} disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+        class="px-2.5 py-1 rounded-full text-xs font-semibold transition-colors {activeSpeed === s ? 'bg-accent text-accent-fg shadow-1' : 'text-fg-muted hover:bg-accent-soft'} disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
         aria-pressed={activeSpeed === s}
       >
         {s}x

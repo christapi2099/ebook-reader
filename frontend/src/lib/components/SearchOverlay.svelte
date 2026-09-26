@@ -61,12 +61,12 @@
 </script>
 
 <div
-  class="bg-white border-b border-slate-200 shadow-sm"
+  class="bg-surface border-b border-border shadow-1"
   role="search"
   use:overlayLayer={{ onClose, modal: false, initialFocus: 'input' }}
 >
   <div class="flex items-center gap-2 px-3 py-2">
-    <svg class="w-4 h-4 text-slate-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <svg class="w-4 h-4 text-fg-subtle flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
       <circle cx="11" cy="11" r="8" stroke-width="2" />
       <path stroke-linecap="round" stroke-width="2" d="m21 21-4.3-4.3" />
     </svg>
@@ -77,14 +77,14 @@
       bind:value={query}
       oninput={handleInput}
       onkeydown={handleKeydown}
-      class="flex-1 px-2 py-1.5 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-500"
+      class="flex-1 px-2 py-1.5 text-sm border border-border rounded-lg focus:outline-none focus:ring-1 focus:ring-focus-ring"
     />
     {#if matches.length > 0}
-      <span class="text-xs text-slate-500 tabular-nums whitespace-nowrap">
+      <span class="text-xs text-fg-muted tabular-nums whitespace-nowrap">
         {currentMatch + 1} / {matches.length}
       </span>
       <button
-        class="p-1 rounded hover:bg-slate-100 text-slate-500 disabled:opacity-30 transition-colors"
+        class="p-1 rounded hover:bg-surface-sunken text-fg-muted disabled:opacity-30 transition-colors"
         disabled={matches.length <= 1}
         onclick={goPrev}
         aria-label="Previous match"
@@ -94,7 +94,7 @@
         </svg>
       </button>
       <button
-        class="p-1 rounded hover:bg-slate-100 text-slate-500 disabled:opacity-30 transition-colors"
+        class="p-1 rounded hover:bg-surface-sunken text-fg-muted disabled:opacity-30 transition-colors"
         disabled={matches.length <= 1}
         onclick={goNext}
         aria-label="Next match"
@@ -105,7 +105,7 @@
       </button>
     {/if}
     <button
-      class="p-1 rounded hover:bg-slate-100 text-slate-400 transition-colors"
+      class="p-1 rounded hover:bg-surface-sunken text-fg-subtle transition-colors"
       onclick={onClose}
       aria-label="Close search"
     >

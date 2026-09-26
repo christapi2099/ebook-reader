@@ -31,15 +31,15 @@
   ]
 </script>
 
-<aside class="fixed left-0 top-0 h-screen w-[180px] bg-slate-50 border-r border-slate-200 flex flex-col z-40">
-  <div class="p-4 border-b border-slate-200">
-    <h1 class="text-lg font-bold text-slate-800">EbookReader</h1>
+<aside class="fixed left-0 top-0 h-screen w-[180px] bg-surface-sunken border-r border-border flex flex-col z-40">
+  <div class="p-4 border-b border-border">
+    <h1 class="text-lg font-bold text-fg">EbookReader</h1>
   </div>
 
   <nav class="flex-1 py-3 space-y-0.5 px-2">
     {#each navItems as item}
       <button
-        class={`w-full flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors ${activeRoute === item.route ? 'bg-blue-50 text-blue-600' : 'text-slate-700 hover:bg-slate-100'}`}
+        class={`w-full flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors ${activeRoute === item.route ? 'bg-accent-soft text-accent' : 'text-fg hover:bg-surface-sunken'}`}
         onclick={() => onNavigate(item.route)}
       >
         <svg
@@ -58,9 +58,9 @@
     {/each}
   </nav>
 
-  <div class="p-2 border-t border-slate-200">
+  <div class="p-2 border-t border-border">
     <button
-      class="w-full flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 transition-colors"
+      class="w-full flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-fg hover:bg-surface-sunken transition-colors"
       onclick={() => onNavigate('/account')}
     >
       <svg

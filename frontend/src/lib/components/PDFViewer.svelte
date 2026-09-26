@@ -254,7 +254,7 @@
       const width  = (s.x1 - s.x0) * finalScale + PAD * 2
       const height = (s.y1 - s.y0) * finalScale + PAD * 2
       const div = document.createElement('div')
-      div.className = 'absolute cursor-pointer transition-colors hover:bg-blue-100/40'
+      div.className = 'absolute cursor-pointer transition-colors hover:bg-accent-soft'
       div.dataset.highlighted = s.index === currentIndex ? 'true' : 'false'
       div.style.left   = left + 'px'
       div.style.top    = top + 'px'
@@ -545,9 +545,9 @@
   })
 </script>
 
-<div class="relative h-full w-full overflow-auto bg-slate-100" bind:this={scrollEl}>
+<div class="relative h-full w-full overflow-auto bg-surface-sunken" bind:this={scrollEl}>
   {#if loading}
-    <div class="flex h-full items-center justify-center gap-2 text-slate-500">
+    <div class="flex h-full items-center justify-center gap-2 text-fg-muted">
       <svg class="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
         <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
         <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"></path>
@@ -555,21 +555,21 @@
       Loading…
     </div>
   {:else if error}
-    <div class="flex h-full items-center justify-center text-red-500">{error}</div>
+    <div class="flex h-full items-center justify-center text-danger">{error}</div>
   {/if}
   {#if buffering}
-    <div class="absolute inset-0 bg-white/50 flex items-center justify-center z-20 pointer-events-none">
-      <svg class="w-6 h-6 animate-spin text-blue-500" fill="none" viewBox="0 0 24 24">
+    <div class="absolute inset-0 bg-surface/50 flex items-center justify-center z-20 pointer-events-none">
+      <svg class="w-6 h-6 animate-spin text-accent" fill="none" viewBox="0 0 24 24">
         <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
         <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"></path>
       </svg>
     </div>
   {/if}
   <div class="mx-auto flex flex-col items-center py-6" bind:this={pagesEl}></div>
-  <div class="fixed bottom-4 right-4 flex items-center gap-1 bg-white/90 backdrop-blur rounded-lg shadow-lg border border-slate-200 px-2 py-1.5 z-30">
+  <div class="fixed bottom-4 right-4 flex items-center gap-1 bg-surface-raised/90 backdrop-blur rounded-lg shadow-2 border border-border px-2 py-1.5 z-30">
     <button
       onclick={zoomOut}
-      class="p-1 rounded hover:bg-slate-100 text-slate-600"
+      class="p-1 rounded hover:bg-surface-sunken text-fg-muted"
       aria-label="Zoom out"
       disabled={zoomLevel <= 0.5}
     >
@@ -577,12 +577,12 @@
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 12H4" />
       </svg>
     </button>
-    <span class="text-xs font-medium text-slate-600 min-w-[3rem] text-center select-none">
+    <span class="text-xs font-medium text-fg-muted min-w-[3rem] text-center select-none">
       {Math.round(zoomLevel * 100)}%
     </span>
     <button
       onclick={zoomIn}
-      class="p-1 rounded hover:bg-slate-100 text-slate-600"
+      class="p-1 rounded hover:bg-surface-sunken text-fg-muted"
       aria-label="Zoom in"
       disabled={zoomLevel >= 3.0}
     >
@@ -592,7 +592,7 @@
     </button>
     <button
       onclick={zoomReset}
-      class="p-1 rounded hover:bg-slate-100 text-slate-500 ml-1 text-xs font-medium"
+      class="p-1 rounded hover:bg-surface-sunken text-fg-subtle ml-1 text-xs font-medium"
       aria-label="Reset zoom"
     >
       Fit
