@@ -78,8 +78,6 @@
   const BASE_SCALE = 1.5
   const SCALE_CHANGE_THRESHOLD = 0.05
   const WORD_HIGHLIGHT_ALPHA = 0.85
-  const SEARCH_CURRENT_COLOR = 'rgba(59,130,246,0.35)'
-  const SEARCH_MATCH_COLOR = 'rgba(134,239,172,0.4)'
   const BIONIC_CANVAS_OPACITY = 0.3
 
   let containerWidth = $state(0)
@@ -232,12 +230,18 @@
     }
   }
 
+  // Colours come from the --search-* tokens in app.css, which derive from the
+  // theme's accent, so matches follow light/dark instead of a fixed blue/green.
   function applySearchHighlight(el: HTMLDivElement, isCurrent: boolean): void {
-    el.style.backgroundColor = isCurrent ? SEARCH_CURRENT_COLOR : SEARCH_MATCH_COLOR
+    el.style.backgroundColor = isCurrent ? 'var(--search-current-bg)' : 'var(--search-match-bg)'
+    el.style.outline = isCurrent
+      ? '2px solid var(--search-current-outline)'
+      : '1px solid var(--search-match-outline)'
   }
 
   function clearSearchHighlight(el: HTMLDivElement): void {
     el.style.backgroundColor = ''
+    el.style.outline = ''
   }
 
   function drawHighlights(page: number) {
