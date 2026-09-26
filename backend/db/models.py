@@ -1,6 +1,38 @@
 from datetime import datetime
 from typing import Optional
+
+from sqlalchemy import Column, String
 from sqlmodel import SQLModel, Field
+
+# Longest folder name the API accepts. The handoff says the prototype caps this,
+# but the prototype source is not in this repo, so the exact figure could not be
+# read; 60 is our choice. Defined once so the column and the validator cannot
+# drift apart, and declared generously ahead of a NOCASE unique index.
+FOLDER_NAME_MAX_LENGTH = 60
+
+
+class Folder(SQLModel, table=True):
+    """A user-created grouping of library books.
+
+    `name` is unique case-insensitively. The NOCASE collation gives SQLite that
+    guarantee for rows written by anything, including a script that bypasses the
+    API; the router also checks explicitly so it can answer 409 with a useful
+    message instead of leaking an IntegrityError.
+
+    Deleting a folder never deletes books: `Book.folder_id` is nullable and is
+    cleared instead, so a delete is safe and reversible.
+    """
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(
+        sa_column=Column(
+            String(FOLDER_NAME_MAX_LENGTH, collation="NOCASE"),
+            unique=True,
+            nullable=False,
+        )
+    )
+    created_at: datetime
+
 
 class Book(SQLModel, table=True):
     id: str = Field(primary_key=True)
@@ -13,6 +45,9 @@ class Book(SQLModel, table=True):
     created_at: datetime
     last_opened: Optional[datetime] = None
     ephemeral: bool = False
+    # NULL means "not filed"; books are never required to belong to a folder.
+    folder_id: Optional[int] = Field(default=None, foreign_key="folder.id", index=True)
+
 
 class Sentence(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)

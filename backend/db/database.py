@@ -11,6 +11,15 @@ engine = None
 
 def create_engine_and_tables(db_url: str | None = None) -> object:
     global engine
+    # Imported for the side effect of registering every table on
+    # SQLModel.metadata before create_all() runs. Metadata is only populated when
+    # the model module has been imported, so a caller that gets here first would
+    # otherwise build a database with no tables and then die in _migrate() on
+    # "no such table: audiocache" — a startup crash. Imported inside the function
+    # rather than at module scope so the call-time convention in CLAUDE.md holds
+    # and no import cycle can form if db.models ever imports this module.
+    import db.models  # noqa: F401  (registers tables on SQLModel.metadata)
+
     url = db_url or f"sqlite:///{_DEFAULT_DB}"
     engine = create_engine(url)
     SQLModel.metadata.create_all(engine)
@@ -38,6 +47,25 @@ def _migrate(engine):
         if 'highlight_enabled' not in us_cols:
             conn.execute(text("ALTER TABLE usersettings ADD COLUMN highlight_enabled INTEGER DEFAULT 1"))
             conn.commit()
+
+        # Folders (handoff task 1). create_all() creates the new `folder` table on
+        # both fresh and existing databases, but it never adds a column to a table
+        # that already exists, so `book.folder_id` has to be added here. Without
+        # this, every Book query against an existing database — the user's is
+        # 800 MB and predates folders — fails with "no such column:
+        # book.folder_id". The index is created unconditionally under IF NOT
+        # EXISTS: on a fresh database create_all has already made it and this is a
+        # no-op, which keeps the migration idempotent and stops it rewriting the
+        # database file on every boot.
+        book_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(book)"))}
+        if 'folder_id' not in book_cols:
+            conn.execute(text(
+                "ALTER TABLE book ADD COLUMN folder_id INTEGER REFERENCES folder(id)"
+            ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_book_folder_id ON book(folder_id)"
+        ))
+        conn.commit()
 
 
 def get_session():
