@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlmodel import Session, select
+from starlette.concurrency import run_in_threadpool
 
 import db.database as _db
 from db.models import Book, MP3Export, Sentence
@@ -25,8 +26,13 @@ def set_kokoro(kokoro):
     _kokoro = kokoro
 
 
-async def _run_export(export_id: int, book_id: str, voice: str, speed: float):
-    """Background task: synthesize all sentences, write MP3, update DB."""
+def _run_export_blocking(export_id: int, book_id: str, voice: str, speed: float) -> None:
+    """Synthesize every sentence, write the MP3, update the DB.
+
+    Deliberately synchronous: SQLite access, Kokoro inference and soundfile are
+    all blocking calls. This is only ever reached through _run_export(), which
+    offloads it to a worker thread so the event loop keeps serving requests.
+    """
     with Session(_db.engine) as session:
         export = session.get(MP3Export, export_id)
         if not export:
@@ -82,6 +88,19 @@ async def _run_export(export_id: int, book_id: str, voice: str, speed: float):
                 ex.status = "error"
                 ex.error_message = str(e)
                 session.commit()
+
+
+async def _run_export(export_id: int, book_id: str, voice: str, speed: float) -> None:
+    """Run the export on a worker thread so the event loop is never blocked.
+
+    This used to be `async def` with zero await points, so a single export
+    (minutes of synthesis for a real book) froze every other request and the TTS
+    WebSocket for its whole duration. The synthesis logic itself is unchanged;
+    only the thread it runs on moved. The bookkeeping pop stays on the event
+    loop thread, where the task registry is mutated everywhere else.
+    """
+    try:
+        await run_in_threadpool(_run_export_blocking, export_id, book_id, voice, speed)
     finally:
         _export_tasks.pop(export_id, None)
 
