@@ -15,6 +15,8 @@ export interface Sentence {
   y1: number
   filtered: boolean
   words?: WordBbox[]
+  chapter: number
+  chapter_title?: string
 }
 
 export interface Book {
@@ -274,6 +276,10 @@ export class TTSSocket {
 
   seek(toIndex: number, voice = 'af_heart', speed = 1.0, sessionId = 0): void {
     this._send({ action: 'seek', to_index: toIndex, voice, speed, session_id: sessionId })
+  }
+
+  prefetchSpeed(fromIndex: number, voice = 'af_heart', speed = 1.0): void {
+    this._send({ action: 'prefetch_speed', from_index: fromIndex, voice, speed })
   }
 
   pause(): void {

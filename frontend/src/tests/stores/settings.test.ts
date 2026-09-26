@@ -2,15 +2,18 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { settingsStore, type SettingsState } from '$lib/stores/settings'
 import { get } from 'svelte/store'
 
+// Mirrors the store's DEFAULTS. Updated for the design-system revamp:
+// default highlight is now Honey #FCD34D and a `theme` setting was added.
 const DEFAULTS: SettingsState = {
   voice: 'af_heart',
-  highlightColor: '#fef08a',
+  highlightColor: '#FCD34D',
   autoscroll: true,
   hotkeysEnabled: true,
   highlightEnabled: true,
   bionicMode: false,
   bionicFixation: 1,
   bionicBoldRatio: 0.5,
+  theme: 'system',
 }
 
 describe('settingsStore', () => {

@@ -61,6 +61,7 @@ function createAudioStore() {
 
   let lastScheduledIndex = -1
   let speedChangeTimer: ReturnType<typeof setTimeout> | null = null
+  let prefetchSpeedTimer: ReturnType<typeof setTimeout> | null = null
   let pendingSpeed = 0
 
   let rafId: number | null = null
@@ -200,6 +201,7 @@ function createAudioStore() {
     generation++
     cancelled = true
     if (speedChangeTimer) { clearTimeout(speedChangeTimer); speedChangeTimer = null }
+    if (prefetchSpeedTimer) { clearTimeout(prefetchSpeedTimer); prefetchSpeedTimer = null }
     pendingSpeed = 0
     stopRaf()
     for (const { node } of activeNodes) {
@@ -299,7 +301,19 @@ function createAudioStore() {
     setSpeed(newSpeed: number) {
       const state = get({ subscribe })
       update(s => ({ ...s, speed: newSpeed }))
-      if (!state.isPlaying || !socket) return
+      if (!socket) return
+      // Debounced cache warm-up at new speed (100ms) — prevents rapid task
+      // cancellations when user drags a speed slider quickly.
+      if (prefetchSpeedTimer) clearTimeout(prefetchSpeedTimer)
+      prefetchSpeedTimer = setTimeout(() => {
+        prefetchSpeedTimer = null
+        if (!socket) return
+        const warmIdx = lastScheduledIndex >= 0
+          ? Math.max(lastScheduledIndex, get({ subscribe }).currentIndex)
+          : get({ subscribe }).currentIndex
+        socket.prefetchSpeed(warmIdx, get({ subscribe }).voice, newSpeed)
+      }, 100)
+      if (!state.isPlaying) return
       pendingSpeed = newSpeed
       update(s => ({ ...s, buffering: true }))
       if (speedChangeTimer) clearTimeout(speedChangeTimer)

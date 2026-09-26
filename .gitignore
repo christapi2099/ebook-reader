@@ -27,6 +27,12 @@ Thumbs.db
 .pytest_cache/
 htmlcov/
 .coverage
+test-results/
+playwright-report/
+blob-report/
+
+# Code intelligence / local tooling
+.codegraph/
 
 # Claude memory / scratch
 .memory/

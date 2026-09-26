@@ -14,6 +14,8 @@ class SentenceRecord:
     y1: float = 0.0
     filtered: bool = False
     words: list = field(default_factory=list)
+    chapter: int = 0
+    chapter_title: str | None = None
 
 
 class BaseEngine:

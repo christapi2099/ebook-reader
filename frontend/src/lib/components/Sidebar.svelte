@@ -6,7 +6,7 @@
     {
       name: 'Text Reader',
       route: '/',
-      icon: '<path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v4M8 23h8"/>',  // Speaker/headphone icon
+      icon: '<path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>',
     },
     {
       name: 'Library',
@@ -23,6 +23,11 @@
       route: '/mp3',
       icon: '<path d="M9 18V5l12-2v13M9 9l12-2M9 13l12-2"/>',
     },
+    {
+      name: 'Upload',
+      route: '/upload',
+      icon: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M16 8l-4-4-4 4M12 4v12"/>',
+    },
   ]
 </script>
 
@@ -34,12 +39,7 @@
   <nav class="flex-1 py-3 space-y-0.5 px-2">
     {#each navItems as item}
       <button
-        class={[
-          'w-full flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors',
-          activeRoute === item.route
-            ? 'bg-blue-50 text-blue-600'
-            : 'text-slate-700 hover:bg-slate-100',
-        ].join(' ')}
+        class={`w-full flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors ${activeRoute === item.route ? 'bg-blue-50 text-blue-600' : 'text-slate-700 hover:bg-slate-100'}`}
         onclick={() => onNavigate(item.route)}
       >
         <svg

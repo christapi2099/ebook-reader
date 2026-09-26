@@ -1,7 +1,10 @@
 import asyncio
+import io
 import json
 from typing import Any
 
+import numpy as np
+import soundfile as sf
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from sqlmodel import Session, select
 
@@ -114,9 +117,26 @@ async def tts_websocket(websocket: WebSocket, book_id: str):
                     "word_timestamps": word_timestamps,
                     "session_id": session_id,
                 }))
+
+                # Inject 500ms silence between chapters
+                current_chapter = sentence_data[job.sentence_index].get("chapter", 0)
+                next_idx = job.sentence_index + 1
+                if next_idx in sentence_data:
+                    next_chapter = sentence_data[next_idx].get("chapter", 0)
+                    if next_chapter != current_chapter:
+                        silence = np.zeros(12000, dtype=np.float32)  # 500ms @ 24000
+                        buf = io.BytesIO()
+                        sf.write(buf, silence, 24000, format="WAV", subtype="PCM_16")
+                        await websocket.send_bytes(buf.getvalue())
         except (asyncio.CancelledError, WebSocketDisconnect):
-            # Normal exit: cancelled by router (new session) or client disconnected.
             return
+        except Exception as exc:
+            import logging
+            logging.exception("TTS consumer error: %s", exc)
+            try:
+                await websocket.send_text(json.dumps({"type": "error", "message": str(exc), "session_id": session_id}))
+            except Exception:
+                pass
 
     async def _cancel_and_clear() -> None:
         """Cancel the active producer/consumer, AWAIT their exit, then reset
@@ -185,7 +205,27 @@ async def tts_websocket(websocket: WebSocket, book_id: str):
                 # Pre-warm cache for the next 25 sentences after the current position.
                 prefetch_cancel.clear()
                 prefetch_task = asyncio.create_task(
-                    engine_tts.prefetch(sentence_data, from_index + 1, 25, voice, speed, prefetch_cancel)
+                    engine_tts.prefetch(sentence_data, from_index + 1, 50, voice, speed, prefetch_cancel)
+                )
+
+            elif action == "prefetch_speed":
+                # Warm cache at a new speed without interrupting playback.
+                # Triggered immediately when user changes speed (before debounce fires).
+                pf_voice = str(msg.get("voice", "af_heart"))
+                pf_speed = float(msg.get("speed", 1.0))
+                pf_from = int(msg.get("from_index", 0))
+                if pf_speed <= 0:
+                    continue
+                prefetch_cancel.set()
+                if prefetch_task and not prefetch_task.done():
+                    prefetch_task.cancel()
+                    try:
+                        await prefetch_task
+                    except BaseException:
+                        pass
+                prefetch_cancel.clear()
+                prefetch_task = asyncio.create_task(
+                    engine_tts.prefetch(sentence_data, pf_from, 50, pf_voice, pf_speed, prefetch_cancel)
                 )
 
             elif action == "pause":

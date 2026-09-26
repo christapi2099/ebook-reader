@@ -22,7 +22,7 @@ class EPUBEngine(BaseEngine):
         sentences = []
         global_index = 0
 
-        for item in items:
+        for chapter_num, item in enumerate(items):
             content = item.get_content()
             soup = BeautifulSoup(content, features='xml')
             paragraphs = soup.find_all('p')
@@ -30,6 +30,9 @@ class EPUBEngine(BaseEngine):
 
             if not chapter_text.strip():
                 continue
+
+            raw_name = item.get_name() or f"Chapter {chapter_num + 1}"
+            chapter_title = raw_name.rsplit("/", 1)[-1].rsplit(".", 1)[0]
 
             doc = self.nlp(chapter_text)
             for sent in doc.sents:
@@ -45,6 +48,8 @@ class EPUBEngine(BaseEngine):
                         y0=0.0,
                         x1=0.0,
                         y1=0.0,
+                        chapter=chapter_num + 1,
+                        chapter_title=chapter_title,
                     ))
                     global_index += 1
 

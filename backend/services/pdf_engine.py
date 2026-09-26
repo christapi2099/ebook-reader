@@ -1,6 +1,6 @@
 import fitz
 from dataclasses import dataclass
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 import os
 
 from services.base_engine import BaseEngine, SentenceRecord as BaseSentenceRecord
@@ -28,6 +28,9 @@ class PDFEngine(BaseEngine):
         doc = fitz.open(pdf_path)
         all_sentences = []
         global_index = 0
+
+        # Build chapter boundaries from TOC
+        chapters = self._build_chapters(doc)
 
         for page_num, page in enumerate(doc):
             words = page.get_text("words")
@@ -90,6 +93,8 @@ class PDFEngine(BaseEngine):
 
                     x0_min, y0_min, x1_max, y1_max = sentence_bbox(sent_words, (block_x0, block_y0, block_x1, block_y1))
 
+                    chapter_idx, chapter_title = self._page_chapter(chapters, page_num)
+
                     all_sentences.append(BaseSentenceRecord(
                         index=global_index,
                         text=sent_text,
@@ -99,10 +104,33 @@ class PDFEngine(BaseEngine):
                         x1=x1_max,
                         y1=y1_max,
                         words=[{'x0': float(w[0]), 'y0': float(w[1]), 'x1': float(w[2]), 'y1': float(w[3])} for w in sent_words],
+                        chapter=chapter_idx,
+                        chapter_title=chapter_title,
                     ))
                     global_index += 1
         doc.close()
         return all_sentences
+
+    def _build_chapters(self, doc) -> List[Tuple[str, int]]:
+        toc = doc.get_toc()
+        if toc:
+            chapters: List[Tuple[str, int]] = []
+            for level, title, page_1based in toc:
+                if level == 1:
+                    chapters.append((title, page_1based - 1))
+            if chapters:
+                return chapters
+        return []
+
+    def _page_chapter(self, chapters: List[Tuple[str, int]], page: int) -> Tuple[int, Optional[str]]:
+        SENTINEL_PAGE = 1_000_000
+        if not chapters:
+            return (0, None)
+        for i, (title, start_page) in enumerate(chapters):
+            next_start = chapters[i + 1][1] if i + 1 < len(chapters) else SENTINEL_PAGE
+            if start_page <= page < next_start:
+                return (i + 1, title)
+        return (0, None)
 
     def page_count(self, pdf_path: str) -> int:
         doc = fitz.open(pdf_path)

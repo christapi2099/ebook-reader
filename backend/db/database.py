@@ -29,7 +29,10 @@ def _migrate(engine):
         sent_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(sentence)"))}
         if 'words' not in sent_cols:
             conn.execute(text("ALTER TABLE sentence ADD COLUMN words TEXT"))
-            conn.commit()
+        if 'chapter' not in sent_cols:
+            conn.execute(text("ALTER TABLE sentence ADD COLUMN chapter INTEGER DEFAULT 0"))
+            conn.execute(text("ALTER TABLE sentence ADD COLUMN chapter_title TEXT DEFAULT NULL"))
+        conn.commit()
 
         us_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(usersettings)"))}
         if 'highlight_enabled' not in us_cols:

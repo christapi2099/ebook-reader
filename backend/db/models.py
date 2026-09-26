@@ -26,6 +26,8 @@ class Sentence(SQLModel, table=True):
     y1: float
     filtered: bool = False
     words: Optional[str] = Field(default=None)
+    chapter: int = 0
+    chapter_title: Optional[str] = None
 
 class AudioCache(SQLModel, table=True):
     text_hash: str = Field(primary_key=True)

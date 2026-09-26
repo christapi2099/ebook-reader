@@ -11,6 +11,7 @@ from db.models import Book, Sentence
 from services.epub_engine import EPUBEngine
 from services.pdf_engine import PDFEngine
 from services.text_engine import TextEngine
+from services.text_cleaner import normalize_text
 from services.text_filter import TextFilter
 
 router = APIRouter(prefix="/documents")
@@ -46,7 +47,7 @@ async def upload_document(
         page_count = engine.page_count(str(file_path))
         sentence_objs = [
             Sentence(
-                book_id=book_id, index=s.index, text=s.text,
+                book_id=book_id, index=s.index, text=normalize_text(s.text),
                 page=s.page, x0=s.x0, y0=s.y0, x1=s.x1, y1=s.y1,
                 filtered=tf.should_filter(s.text),
                 words=json.dumps(s.words),
@@ -59,7 +60,7 @@ async def upload_document(
         page_count = max(1, len(raw) // 10)
         sentence_objs = [
             Sentence(
-                book_id=book_id, index=s.index, text=s.text,
+                book_id=book_id, index=s.index, text=normalize_text(s.text),
                 page=0, x0=0.0, y0=0.0, x1=0.0, y1=0.0,
                 filtered=tf.should_filter(s.text),
             )
@@ -94,7 +95,8 @@ def get_sentences(book_id: str, session: Session = Depends(get_session)):
     return [
         {"index": s.index, "text": s.text, "page": s.page,
          "x0": s.x0, "y0": s.y0, "x1": s.x1, "y1": s.y1, "filtered": s.filtered,
-         "words": json.loads(s.words) if s.words else []}
+         "words": json.loads(s.words) if s.words else [],
+         "chapter": s.chapter, "chapter_title": s.chapter_title}
         for s in rows
     ]
 
@@ -126,7 +128,7 @@ def create_text_book(text_data: dict, session: Session = Depends(get_session)):
     tf = TextFilter()
     sentence_objs = [
         Sentence(
-            book_id=book_id, index=s.index, text=s.text,
+            book_id=book_id, index=s.index, text=normalize_text(s.text),
             page=0, x0=0.0, y0=0.0, x1=0.0, y1=0.0,
             filtered=tf.should_filter(s.text),
         )
