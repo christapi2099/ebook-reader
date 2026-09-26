@@ -89,16 +89,16 @@
 
 <div class="p-4 md:p-6">
   <div class="flex items-center justify-between mb-6">
-    <h1 class="text-xl md:text-2xl font-bold text-slate-800">MP3 Exports</h1>
+    <h1 class="text-xl md:text-2xl font-bold text-fg">MP3 Exports</h1>
     <Button size="sm" onclick={() => (showDialog = true)}>+ New Export</Button>
   </div>
 
   {#if error}
-    <div class="mb-4 p-3 bg-red-50 text-red-600 rounded-lg text-sm">{error}</div>
+    <div class="mb-4 p-3 bg-danger-soft text-danger rounded-lg text-sm">{error}</div>
   {/if}
 
   {#if loading}
-    <div class="flex items-center gap-2 text-slate-500">
+    <div class="flex items-center gap-2 text-fg-muted">
       <svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
         <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
         <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"></path>
@@ -106,7 +106,7 @@
       Loading exports…
     </div>
   {:else if exports.length === 0}
-    <div class="flex flex-col items-center justify-center py-20 text-slate-400">
+    <div class="flex flex-col items-center justify-center py-20 text-fg-subtle">
       <svg class="w-16 h-16 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 19V6l12-3v13M9 9l12-2M9 13l12-2" />
       </svg>
@@ -117,34 +117,34 @@
   {:else}
     <div class="space-y-2">
       {#each exports as exp (exp.id)}
-        <div class="flex items-center justify-between p-3 bg-white border border-slate-200 rounded-lg">
+        <div class="flex items-center justify-between p-3 bg-surface border border-border rounded-lg">
           <div class="flex-1 min-w-0">
-            <p class="font-medium text-slate-800 text-sm truncate">{exp.book_title}</p>
-            <p class="text-xs text-slate-500">{exp.voice} · {exp.speed}x · {formatDate(exp.created_at)}</p>
+            <p class="font-medium text-fg text-sm truncate">{exp.book_title}</p>
+            <p class="text-xs text-fg-muted">{exp.voice} · {exp.speed}x · {formatDate(exp.created_at)}</p>
           </div>
           <div class="flex items-center gap-3 ml-3">
             {#if exp.status === 'done'}
-              <span class="text-xs text-green-600 font-medium">{formatSize(exp.file_size)}</span>
+              <span class="text-xs text-success font-medium">{formatSize(exp.file_size)}</span>
               <a
                 href={`${API_BASE}/mp3/downloads/${exp.id}`}
-                class="px-3 py-1 text-xs font-medium bg-blue-50 text-blue-600 rounded-lg hover:bg-blue-100 transition-colors"
+                class="px-3 py-1 text-xs font-medium bg-accent-soft text-accent rounded-lg hover:bg-accent/20 transition-colors"
                 download
               >
                 Download
               </a>
             {:else if exp.status === 'processing' || exp.status === 'pending'}
               <div class="flex items-center gap-2">
-                <svg class="w-3.5 h-3.5 animate-spin text-blue-500" fill="none" viewBox="0 0 24 24">
+                <svg class="w-3.5 h-3.5 animate-spin text-accent" fill="none" viewBox="0 0 24 24">
                   <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
                   <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"></path>
                 </svg>
-                <span class="text-xs text-blue-600">{exp.progress}%</span>
+                <span class="text-xs text-accent">{exp.progress}%</span>
               </div>
             {:else if exp.status === 'error'}
-              <span class="text-xs text-red-500" title={exp.error_message ?? ''}>Error</span>
+              <span class="text-xs text-danger" title={exp.error_message ?? ''}>Error</span>
             {/if}
             <button
-              class="p-1 rounded hover:bg-slate-100 text-slate-400 hover:text-red-500 transition-colors"
+              class="p-1 rounded hover:bg-surface-sunken text-fg-subtle hover:text-danger transition-colors"
               onclick={() => handleDeleteExport(exp.id)}
             >
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">

@@ -13,7 +13,7 @@
   }
 </script>
 
-<div class="flex h-full items-center justify-center text-slate-400 text-sm">
+<div class="flex h-full items-center justify-center text-fg-subtle text-sm">
   Select a file to upload
 </div>
 

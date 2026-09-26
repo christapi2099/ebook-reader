@@ -283,14 +283,14 @@
 <div class="p-4 md:p-6">
   <div class="mb-6 flex items-start justify-between gap-4">
     <div>
-      <h1 class="text-xl md:text-2xl font-bold text-slate-800">Library</h1>
+      <h1 class="text-xl md:text-2xl font-bold text-fg">Library</h1>
       {#if currentFolder}
         <nav class="mt-2" aria-label="Breadcrumb">
           <ol class="flex items-center gap-2 text-sm">
             <li>
               <button
                 type="button"
-                class="min-h-11 rounded-md px-2 -mx-2 text-slate-600 hover:bg-slate-100 hover:text-slate-800"
+                class="min-h-11 rounded-md px-2 -mx-2 text-fg-muted hover:bg-surface-sunken hover:text-fg"
                 onclick={() => (openFolderId = null)}
                 ondragover={(e) => e.preventDefault()}
                 ondrop={handleDropOnAllBooks}
@@ -298,8 +298,8 @@
                 All books
               </button>
             </li>
-            <li aria-hidden="true" class="text-slate-400">/</li>
-            <li aria-current="page" class="font-semibold text-slate-800">{currentFolder.name}</li>
+            <li aria-hidden="true" class="text-fg-subtle">/</li>
+            <li aria-current="page" class="font-semibold text-fg">{currentFolder.name}</li>
           </ol>
         </nav>
       {/if}
@@ -324,24 +324,19 @@
   {/if}
 
   {#if !currentFolder && foldersError && !error}
-    <div class="mb-6 flex flex-col items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-4">
-      <p class="text-sm font-medium text-red-600">{foldersError}</p>
-      <button
-        class="min-h-11 rounded-lg bg-white px-4 text-sm text-slate-700 hover:bg-slate-100"
-        onclick={fetchLibrary}
-      >
-        Retry
-      </button>
+    <div class="mb-6 flex flex-col items-start gap-2 rounded-lg border border-danger bg-danger-soft p-4">
+      <p class="text-sm font-medium text-danger">{foldersError}</p>
+      <Button variant="secondary" onclick={fetchLibrary}>Retry</Button>
     </div>
   {/if}
 
   {#if !currentFolder && folders.length > 0}
     <section class="mb-6" aria-labelledby="folders-heading">
-      <h2 id="folders-heading" class="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">
+      <h2 id="folders-heading" class="mb-3 text-sm font-semibold uppercase tracking-wide text-fg-muted">
         Folders
       </h2>
       {#if draggingBookId}
-        <p class="mb-2 text-sm text-slate-500" data-drop-hint="true">
+        <p class="mb-2 text-sm text-fg-muted" data-drop-hint="true">
           Drop the book onto a folder to file it.
         </p>
       {/if}
@@ -360,14 +355,14 @@
   {/if}
 
   {#if currentFolder}
-    <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">
+    <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-fg-muted">
       {currentFolder.name}
     </h2>
   {/if}
 
   {#if currentFolder && !loading && !error && visibleBooks.length === 0}
     <div class="flex flex-col items-center justify-center py-20 text-center">
-      <svg class="mb-4 h-16 w-16 text-slate-300" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+      <svg class="mb-4 h-16 w-16 text-fg-subtle" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
         <path
           stroke-linecap="round"
           stroke-linejoin="round"
@@ -375,8 +370,8 @@
           d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z"
         />
       </svg>
-      <p class="text-lg font-medium text-slate-500">This folder is empty</p>
-      <p class="mt-1 text-sm text-slate-400">
+      <p class="text-lg font-medium text-fg-muted">This folder is empty</p>
+      <p class="mt-1 text-sm text-fg-subtle">
         Drag a book onto a folder tile, or use “Move to folder” on any book.
       </p>
       <Button class="mt-4" onclick={() => (openFolderId = null)}>Back to all books</Button>

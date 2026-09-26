@@ -16,11 +16,11 @@
 
 <!-- Mobile hamburger -->
 <button
-  class="md:hidden fixed top-3 left-3 z-50 p-3 rounded-lg bg-white shadow-md border border-slate-200"
+  class="md:hidden fixed top-3 left-3 z-50 p-3 rounded-lg bg-surface shadow-2 border border-border"
   onclick={() => (sidebarOpen = !sidebarOpen)}
   aria-label="Toggle menu"
 >
-  <svg class="w-5 h-5 text-slate-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+  <svg class="w-5 h-5 text-fg" fill="none" stroke="currentColor" viewBox="0 0 24 24">
     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
   </svg>
 </button>
@@ -28,7 +28,7 @@
 <!-- Mobile overlay -->
 {#if sidebarOpen}
   <div
-    class="md:hidden fixed inset-0 bg-black/40 z-30"
+    class="md:hidden fixed inset-0 bg-overlay z-30"
     onclick={() => (sidebarOpen = false)}
     role="presentation"
   ></div>
@@ -47,7 +47,7 @@
     />
   </div>
 
-  <main class="md:ml-[180px] flex-1 overflow-auto bg-white pt-12 md:pt-0">
+  <main class="md:ml-[180px] flex-1 overflow-auto bg-surface pt-12 md:pt-0">
     {@render children()}
   </main>
 </div>
