@@ -630,9 +630,24 @@ def mock_engines(fake_sentences: list[SentenceRecord]) -> Iterator[SimpleNamespa
 # --------------------------------------------------------------------------- #
 
 @pytest.fixture
-def db_engine():
-    """A fresh in-memory database with every table, isolated per test."""
-    return memory_engine()
+def db_engine(tmp_path):
+    """A fresh database with every table, isolated per test.
+
+    **File-backed, not ``:memory:``, and that is load-bearing.** An in-memory
+    SQLite database can only be shared between threads through a single
+    connection (``memory_engine``'s ``StaticPool``), and this suite genuinely has
+    concurrent sessions on it: FastAPI runs synchronous endpoints on a worker
+    thread while the export path runs its body on another. Two sessions
+    interleaving ``BEGIN``/``COMMIT``/``ROLLBACK`` on one connection is not safe,
+    and it produced a rare, load-dependent corruption — a committed ``Book`` row
+    was intermittently invisible to a reader (surfacing as a book title of
+    "Unknown") and a status response arrived with no ``status`` key at all.
+
+    A file gives every session its own connection, which is the case SQLite's
+    locking is actually designed for. ``memory_engine`` is kept for the
+    single-threaded callers that only ever use one session.
+    """
+    return build_engine(f"sqlite:///{tmp_path / 'test.db'}")
 
 
 @pytest.fixture

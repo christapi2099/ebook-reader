@@ -132,6 +132,17 @@ def seeded(engine, monkeypatch, tmp_path):
 
     yield export_id
 
+    # Drain before dropping the registry. ``clear()`` on its own does not stop a
+    # running export, it only hides it: the task keeps writing, and the next test
+    # file's own drain then sees an empty registry and proceeds. Fail loudly
+    # instead, so a leak names the test that caused it rather than surfacing as a
+    # corrupted assertion one file later.
+    _drain_exports()
+    still_running = [t for t in mp3_router._export_tasks.values() if not t.done()]
+    assert not still_running, (
+        f"{len(still_running)} export task(s) outlived their test; call "
+        "_drain_exports() inside the TestClient context before it closes"
+    )
     mp3_router._export_tasks.clear()
 
 
@@ -592,6 +603,14 @@ def test_post_export_returns_before_the_export_finishes(seeded, monkeypatch):
         # And the background task still finishes.
         final = _await_status(client, export_id)
         assert final == "done", f"export never completed, last status={final!r}"
+
+        # Terminal *status* is not the same as a finished *task*: the worker
+        # commits "done" and only then unwinds. Leaving at that point closes the
+        # TestClient on a worker still mid-transaction, and because the in-memory
+        # database is one shared connection, the abandoned session can roll back
+        # the next test file's inserts -- measured as a vanished Book row and
+        # therefore a book title of "Unknown". Wait for the task, not the status.
+        _drain_exports()
 
     assert gated.texts == [f"Sentence number {i}." for i in range(SENTENCE_COUNT)]
 

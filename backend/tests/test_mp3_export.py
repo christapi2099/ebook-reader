@@ -32,21 +32,28 @@ EXPORT_TIMEOUT = 30.0
 REQUESTED_FORMAT = "wav"
 
 
-@pytest.fixture(autouse=True)
-def _drain_export_tasks():
-    """Let every export this test started finish before the test ends.
+def _drain_export_tasks(timeout: float = EXPORT_TIMEOUT) -> None:
+    """Wait for every export task this test started to stop touching the database.
 
     ``_run_export`` offloads the work to a worker thread and the export path reads
-    ``db.database.engine`` at call time. A thread that outlives its test therefore
-    wakes up *after* the isolation guard has restored that global, opens the next
-    test's database -- where export id 1 is a different row -- and marks it
-    ``error``. That is a genuine cross-test interference, so each test waits here.
+    ``db.database.engine`` at call time. That engine is a *single* shared
+    in-memory connection here, so a worker holding a session on it races every
+    request the test itself makes: under CPU load this intermittently made an
+    already-committed ``Book`` row invisible to the reader, which surfaced as a
+    book title of "Unknown". A task that outlives its test is worse still — it
+    wakes up after the isolation guard has restored that global, opens the next
+    test's database, where export id 1 is a different row, and marks it ``error``.
     """
-    yield
-    deadline = time.monotonic() + EXPORT_TIMEOUT
+    deadline = time.monotonic() + timeout
     while mp3_router._export_tasks and time.monotonic() < deadline:
         time.sleep(0.02)
     assert not mp3_router._export_tasks, "an export task did not finish in time"
+
+
+@pytest.fixture(autouse=True)
+def _drain_export_tasks_after_each_test():
+    yield
+    _drain_export_tasks()
 
 
 def _upload(client, content=b"fakepdf"):
@@ -148,6 +155,17 @@ class TestListExports:
     def test_list_includes_book_title_and_status(self, client):
         bid = _upload(client)
         export_id = _export_id(client, bid)
+
+        # Let the export this POST started finish before listing it. Both the list
+        # endpoint and the worker use db.database.engine, which is one shared
+        # in-memory connection, so listing while the worker holds a session on it
+        # races -- under load this intermittently reported book_title "Unknown"
+        # for a Book row that had already been committed. This test is about the
+        # listing's contents, not its behaviour during a running export;
+        # test_export_progress_is_reported_while_running covers that case and
+        # deliberately asserts only that the status is a state the client
+        # understands, rather than a specific one.
+        _drain_export_tasks()
 
         rows = client.get("/mp3/exports").json()
         assert [row["id"] for row in rows] == [export_id]
