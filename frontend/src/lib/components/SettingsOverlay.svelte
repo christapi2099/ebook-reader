@@ -306,7 +306,7 @@
         </div>
       {/if}
 
-      <div class="rounded-lg border border-border p-3">
+      <section class="rounded-lg border border-border p-3" aria-labelledby="engine-section-title">
         <h3 id="engine-section-title" class="text-sm font-medium text-fg">Processing Engine</h3>
         <p class="mb-2 text-xs text-fg-muted">
           Which synthesizer reads your books. Switching takes a while — a model load,
@@ -316,8 +316,8 @@
         {#if engineLoading}
           <p class="text-xs text-fg-muted" role="status">Reading the engine state…</p>
         {:else if engineError}
-          <div class="rounded-lg border border-danger bg-danger-soft p-3" role="alert">
-            <p class="text-xs text-fg">{engineError}</p>
+          <div class="rounded-lg border border-danger bg-danger-soft p-3">
+            <p class="text-xs text-fg" role="alert">{engineError}</p>
             <button
               type="button"
               class="mt-1 min-h-11 text-xs font-medium text-accent underline underline-offset-2"
@@ -400,7 +400,7 @@
             <p class="mt-2 text-xs text-fg-muted">{capabilities.remote.error}</p>
           {/if}
         {/if}
-      </div>
+      </section>
 
       <div class="space-y-1 rounded-lg bg-surface-sunken p-3 text-xs text-fg-muted">
         <p class="mb-1 font-medium text-fg">Hotkey Reference</p>
