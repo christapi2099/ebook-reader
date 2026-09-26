@@ -3,6 +3,7 @@
   import * as pdfjsLib from 'pdfjs-dist'
   import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
   import type { Sentence, WordBbox } from '$lib/api'
+  import { getPdfUrl } from '$lib/api'
   import { bionifyTextToSegments, bionifyWord } from '$lib/utils/bionic-reading'
 
   pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl
@@ -129,8 +130,7 @@
     loading = true
     error = ''
     try {
-      const url = `http://localhost:8000/uploads/${bookId}.pdf`
-      pdfDoc = await pdfjsLib.getDocument(url).promise
+      pdfDoc = await pdfjsLib.getDocument(getPdfUrl(bookId)).promise
       pageCount = pdfDoc.numPages
       loading = false
       renderAllPages()

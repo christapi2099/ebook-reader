@@ -8,6 +8,18 @@ export interface AudioState {
   currentWordIndex: number
   voice: string
   buffering: boolean
+  /**
+   * Real seconds of audio already played at the current position: the summed
+   * backend-reported duration of every earlier sentence plus the elapsed part of
+   * the sentence playing now. Derived from real clocks only — never estimated.
+   */
+  elapsedSeconds: number
+  /**
+   * Real per-sentence durations in seconds, keyed by sentence index, exactly as
+   * the backend reported them in `sentence_end.duration_ms`. Sentences the
+   * backend has not synthesised yet are absent rather than guessed at.
+   */
+  sentenceDurations: Record<number, number>
 }
 
 function createAudioStore() {
@@ -18,6 +30,8 @@ function createAudioStore() {
     currentWordIndex: -1,
     voice: 'af_heart',
     buffering: false,
+    elapsedSeconds: 0,
+    sentenceDurations: {},
   })
 
   let ctx: AudioContext | null = null
@@ -56,6 +70,13 @@ function createAudioStore() {
   let receivingSentenceIndex = -1
   let wordTimings: Map<number, WordTimestamp[]> = new Map()
 
+  // Real per-sentence durations reported by the backend. These describe the book
+  // at the current speed, not the playback session, so they survive pause and
+  // seek — but they are discarded when the speed changes, because Kokoro's
+  // native `speed` parameter changes the rendered duration of every sentence.
+  let sentenceDurations: Map<number, number> = new Map()
+  let elapsedSeconds = 0
+
   const SPEED_CHANGE_DEBOUNCE_MS = 200
   const SENTENCE_TIMING_OFFSET_S = 0.016
 
@@ -69,6 +90,44 @@ function createAudioStore() {
   function getCtx(): AudioContext {
     if (!ctx || ctx.state === 'closed') ctx = new AudioContext()
     return ctx
+  }
+
+  function snapshotDurations(): Record<number, number> {
+    const out: Record<number, number> = {}
+    for (const [index, seconds] of sentenceDurations) out[index] = seconds
+    return out
+  }
+
+  /**
+   * Real elapsed audio at `index`: the summed backend-reported duration of every
+   * sentence before it, plus the part of `index` that has actually been played
+   * according to the AudioContext clock. Sentences whose duration has not been
+   * reported yet contribute 0 — unknown, never estimated.
+   */
+  function computeElapsedSeconds(index: number): number {
+    let elapsed = 0
+    for (const [i, duration] of sentenceDurations) {
+      if (i < index) elapsed += duration
+    }
+    const ac = ctx
+    const startedAt = sentenceTimings.get(index)
+    const duration = sentenceDurations.get(index)
+    if (ac && startedAt !== undefined && duration !== undefined) {
+      elapsed += Math.min(Math.max(ac.currentTime - startedAt, 0), duration)
+    }
+    return elapsed
+  }
+
+  /**
+   * Publish elapsed audio for the sentence now playing. Called from the rAF tick,
+   * so a paused player stops advancing and a seek recomputes from the new
+   * position instead of interpolating from a stale value.
+   */
+  function publishElapsedSeconds(index: number): void {
+    const next = computeElapsedSeconds(index)
+    if (Math.abs(next - elapsedSeconds) < 0.1) return
+    elapsedSeconds = next
+    update(s => ({ ...s, elapsedSeconds }))
   }
 
   function startRaf() {
@@ -124,6 +183,8 @@ function createAudioStore() {
           return next
         })
       }
+
+      publishElapsedSeconds(latestReady >= 0 ? latestReady : s.currentIndex)
 
       rafId = requestAnimationFrame(tick)
     }
@@ -231,6 +292,11 @@ function createAudioStore() {
     subscribe,
 
     init(bid: string) {
+      // Durations describe a book at a speed, so a new book starts from nothing.
+      sentenceDurations = new Map()
+      elapsedSeconds = 0
+      update(s => ({ ...s, elapsedSeconds: 0, sentenceDurations: {} }))
+
       socket = new TTSSocket(bid)
 
       socket.onAudioChunk = (bytes: ArrayBuffer) => {
@@ -249,10 +315,16 @@ function createAudioStore() {
         receivingSentenceIndex = index
       }
 
-      socket.onSentenceEnd = (_index: number, _durationMs: number, sid: number, wordTimestamps?: WordTimestamp[]) => {
+      socket.onSentenceEnd = (index: number, durationMs: number, sid: number, wordTimestamps?: WordTimestamp[]) => {
         if (sid !== sessionId) return
+        // Real rendered length of this sentence at the current speed. This is the
+        // only source of duration in the app — nothing extrapolates from it.
+        if (Number.isFinite(durationMs) && durationMs > 0) {
+          sentenceDurations.set(index, durationMs / 1000)
+          update(s => ({ ...s, sentenceDurations: snapshotDurations() }))
+        }
         if (wordTimestamps) {
-          wordTimings.set(_index, wordTimestamps)
+          wordTimings.set(index, wordTimestamps)
         }
       }
 
@@ -301,6 +373,14 @@ function createAudioStore() {
     setSpeed(newSpeed: number) {
       const state = get({ subscribe })
       update(s => ({ ...s, speed: newSpeed }))
+      // Kokoro renders speed natively, so every measured duration describes the
+      // previous speed only. Drop them rather than reuse numbers that no longer
+      // describe what will be played.
+      if (newSpeed !== state.speed) {
+        sentenceDurations = new Map()
+        elapsedSeconds = 0
+        update(s => ({ ...s, elapsedSeconds: 0, sentenceDurations: {} }))
+      }
       if (!socket) return
       // Debounced cache warm-up at new speed (100ms) — prevents rapid task
       // cancellations when user drags a speed slider quickly.
@@ -334,7 +414,18 @@ function createAudioStore() {
       socket = null
       ctx?.close()
       ctx = null
-      set({ isPlaying: false, speed: 1.0, currentIndex: 0, currentWordIndex: -1, voice: 'af_heart', buffering: false })
+      sentenceDurations = new Map()
+      elapsedSeconds = 0
+      set({
+        isPlaying: false,
+        speed: 1.0,
+        currentIndex: 0,
+        currentWordIndex: -1,
+        voice: 'af_heart',
+        buffering: false,
+        elapsedSeconds: 0,
+        sentenceDurations: {},
+      })
     },
   }
 }

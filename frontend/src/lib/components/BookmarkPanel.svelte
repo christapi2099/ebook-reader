@@ -1,6 +1,7 @@
 <script lang="ts">
   import { createBookmark, deleteBookmark, getBookmarks } from '$lib/api'
   import type { Bookmark } from '$lib/api'
+  import { overlayLayer } from '$lib/actions/overlay-layer'
 
   let {
     bookId,
@@ -63,21 +64,32 @@
   fetchBookmarks()
 </script>
 
-<div class="fixed inset-0 bg-black/50 z-50 flex" onclick={onClose}>
-  <div class="ml-auto w-80 max-w-[85vw] h-full bg-white shadow-xl flex flex-col" onclick={(e) => e.stopPropagation()}>
+<div
+  class="fixed inset-0 bg-black/50 z-50 flex"
+  role="dialog"
+  aria-modal="true"
+  aria-labelledby="bookmarks-panel-title"
+  tabindex="-1"
+  use:overlayLayer={{ onClose, closeOnBackdrop: true }}
+>
+  <div class="ml-auto w-80 max-w-[85vw] h-full bg-white shadow-xl flex flex-col">
     <div class="flex items-center justify-between p-4 border-b border-slate-200">
-      <h2 class="font-bold text-slate-800">Bookmarks</h2>
+      <h2 id="bookmarks-panel-title" class="font-bold text-slate-800">Bookmarks</h2>
       <div class="flex items-center gap-2">
         <button
           class="p-1.5 rounded hover:bg-blue-50 text-blue-600 transition-colors"
           onclick={addBookmark}
-          title="Add bookmark at current position"
+          aria-label="Add bookmark at current position"
         >
           <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 21l-7-4-7 4V5a2 2 0 012-2h10a2 2 0 012 2v16z" />
           </svg>
         </button>
-        <button class="p-1.5 rounded hover:bg-slate-100 text-slate-400 transition-colors" onclick={onClose}>
+        <button
+          class="p-1.5 rounded hover:bg-slate-100 text-slate-400 transition-colors"
+          onclick={onClose}
+          aria-label="Close bookmarks"
+        >
           <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
           </svg>
@@ -119,6 +131,7 @@
               <button
                 class="p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-red-50 text-slate-400 hover:text-red-500 transition-all flex-shrink-0"
                 onclick={(e) => { e.stopPropagation(); removeBookmark(bm.id) }}
+                aria-label="Delete bookmark"
               >
                 <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />

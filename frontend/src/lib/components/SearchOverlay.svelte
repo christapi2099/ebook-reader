@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Sentence } from '$lib/api'
+  import { overlayLayer } from '$lib/actions/overlay-layer'
 
   let {
     sentences,
@@ -55,11 +56,15 @@
       if (e.shiftKey) goPrev()
       else goNext()
     }
-    if (e.key === 'Escape') onClose()
+    // Escape is handled by the overlay stack, which routes it to the topmost layer.
   }
 </script>
 
-<div class="bg-white border-b border-slate-200 shadow-sm">
+<div
+  class="bg-white border-b border-slate-200 shadow-sm"
+  role="search"
+  use:overlayLayer={{ onClose, modal: false, initialFocus: 'input' }}
+>
   <div class="flex items-center gap-2 px-3 py-2">
     <svg class="w-4 h-4 text-slate-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
       <circle cx="11" cy="11" r="8" stroke-width="2" />
@@ -68,6 +73,7 @@
     <input
       type="text"
       placeholder="Search in book…"
+      aria-label="Search in book"
       bind:value={query}
       oninput={handleInput}
       onkeydown={handleKeydown}
@@ -98,7 +104,11 @@
         </svg>
       </button>
     {/if}
-    <button class="p-1 rounded hover:bg-slate-100 text-slate-400 transition-colors" onclick={onClose}>
+    <button
+      class="p-1 rounded hover:bg-slate-100 text-slate-400 transition-colors"
+      onclick={onClose}
+      aria-label="Close search"
+    >
       <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
       </svg>

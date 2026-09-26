@@ -52,6 +52,15 @@ export async function getSentences(bookId: string): Promise<Sentence[]> {
   return fetchApi<Sentence[]>(`/documents/${bookId}/sentences`)
 }
 
+/**
+ * Absolute URL of a book's uploaded PDF. PDF.js fetches this itself via
+ * `getDocument(url)`, so only the URL is built here — `api.ts` remains the one
+ * place that knows the backend origin.
+ */
+export function getPdfUrl(bookId: string): string {
+  return `${API_BASE}/uploads/${encodeURIComponent(bookId)}.pdf`
+}
+
 export async function getLibrary(): Promise<Book[]> {
   return fetchApi<Book[]>('/library')
 }

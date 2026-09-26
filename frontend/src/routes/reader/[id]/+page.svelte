@@ -70,7 +70,8 @@ onMount(async () => {
     'B': () => handleAddBookmark(),
     'f': () => { searchOpen = true },
     'F': () => { searchOpen = true },
-    'Escape': () => { settingsOpen = false; searchOpen = false; bookmarksOpen = false },
+    // Escape is deliberately absent: the overlay stack routes it to the topmost
+    // open layer only, so it must not be handled here as a blanket "close all".
   }
   registerHotkeys(hotkeyMap)
 })
@@ -222,8 +223,9 @@ function handleBackToLibrary() {
     <AudioProgressBar
       sentences={reader.sentences}
       currentIndex={audio.currentIndex}
+      elapsedSeconds={audio.elapsedSeconds}
+      sentenceDurations={audio.sentenceDurations}
       isPlaying={audio.isPlaying}
-      speed={reader.speed}
       buffering={audio.buffering}
     />
   </div>

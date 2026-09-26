@@ -1,6 +1,7 @@
 <script lang="ts">
   import { settingsStore, type SettingsState } from '$lib/stores/settings'
   import { get } from 'svelte/store'
+  import { overlayLayer } from '$lib/actions/overlay-layer'
 
   let { onClose }: { onClose: () => void } = $props()
 
@@ -55,11 +56,22 @@
   }
 </script>
 
-  <div class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center" role="button" tabindex="-1" onclick={onClose} onkeydown={(e) => { if (e.key === 'Escape') onClose() }}>
-    <div class="bg-white rounded-xl p-6 max-w-sm w-full shadow-xl mx-4" onclick={(e) => e.stopPropagation()}>
+  <div
+    class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="settings-dialog-title"
+    tabindex="-1"
+    use:overlayLayer={{ onClose, closeOnBackdrop: true }}
+  >
+    <div class="bg-white rounded-xl p-6 max-w-sm w-full shadow-xl mx-4">
     <div class="flex items-center justify-between mb-4">
-      <h2 class="text-lg font-bold text-slate-800">Settings</h2>
-      <button class="text-slate-400 hover:text-slate-700 transition-colors" onclick={onClose}>
+      <h2 id="settings-dialog-title" class="text-lg font-bold text-slate-800">Settings</h2>
+      <button
+        class="text-slate-400 hover:text-slate-700 transition-colors"
+        onclick={onClose}
+        aria-label="Close settings"
+      >
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
         </svg>

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { uploadDocument } from '$lib/api'
+  import { overlayLayer } from '$lib/actions/overlay-layer'
 
   let { open, onClose, onUploaded }: {
     open: boolean
@@ -35,17 +36,24 @@
 </script>
 
 {#if open}
-  <div class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center">
+  <div
+    class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="upload-dialog-title"
+    tabindex="-1"
+    use:overlayLayer={{ onClose }}
+  >
     <div class="bg-white rounded-xl p-6 max-w-md max-h-[85vh] overflow-y-auto w-full shadow-xl relative mx-4">
       <button
         class="absolute top-3 right-3 text-slate-400 hover:text-slate-700 text-xl leading-none"
         onclick={onClose}
-        aria-label="Close"
+        aria-label="Close upload dialog"
       >
         ×
       </button>
 
-      <h2 class="text-xl font-bold text-slate-800 mb-4">Upload Ebook</h2>
+      <h2 id="upload-dialog-title" class="text-xl font-bold text-slate-800 mb-4">Upload Ebook</h2>
 
       <label
         class="flex flex-col items-center justify-center border-2 border-dashed border-slate-300 rounded-lg p-8 text-center cursor-pointer hover:border-blue-400 transition-colors"
