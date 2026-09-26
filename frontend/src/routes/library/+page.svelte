@@ -1,6 +1,5 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte'
-  import { get } from 'svelte/store'
   import { goto } from '$app/navigation'
   import {
     createFolder,
@@ -8,8 +7,6 @@
     deleteFolder,
     getFolders,
     getLibrary,
-    getProgress,
-    getSentences,
     renameFolder,
     setBookFolder,
     type Book,
@@ -17,7 +14,6 @@
   } from '$lib/api'
   import { toDetailMessage } from '$lib/utils/errors'
   import type { StoredProgress } from '$lib/utils/reading-progress'
-  import readerStore from '$lib/stores/reader'
   import BookGrid from '$lib/components/BookGrid.svelte'
   import FolderTile from '$lib/components/FolderTile.svelte'
   import FolderNameDialog from '$lib/components/FolderNameDialog.svelte'
@@ -33,9 +29,6 @@
   let loading = $state(true)
   let error = $state<string | null>(null)
   let foldersError = $state<string | null>(null)
-
-  /** Discriminates progress loads, so a slow one cannot overwrite a newer one. */
-  let progressRun = 0
 
   /** `null` is the "All books" view; otherwise the folder being browsed. */
   let openFolderId = $state<number | null>(null)
@@ -79,38 +72,26 @@
   /**
    * Read every visible book's position.
    *
-   * `GET /library/{book_id}/progress` is the only place a position lives, and it
-   * returns the sentence index without a total, so the total comes from
-   * `GET /documents/{book_id}/sentences` — asked for only on books that have
-   * actually been started, and skipped when the reader store already holds that
-   * book's sentences from this session. A book whose total cannot be read gets
-   * no bar: an honest gap beats a guessed percentage.
+   * Both halves arrive with the books themselves: `sentence_index` is the
+   * position and `sentence_count` the total, both on `GET /library`. This used to
+   * cost a `GET /library/{id}/progress` per book plus a
+   * `GET /documents/{id}/sentences` per *started* book — the latter returning
+   * every sentence with word bounding boxes, to read a single integer. It now
+   * costs no extra requests at all, so it is synchronous.
+   *
+   * `sentence_index` is `null` for a book that was never started and `0` for one
+   * parked on its first sentence; neither yields a bar, and neither does a book
+   * with no known total. An honest gap beats a guessed percentage.
    */
-  async function loadProgress(forBooks: Book[]) {
-    const run = ++progressRun
-    const loaded = get(readerStore)
-
-    const results = await Promise.allSettled(
-      forBooks.map(async (book): Promise<[string, StoredProgress]> => {
-        const sentenceIndex = await getProgress(book.id)
-        if (sentenceIndex <= 0) return [book.id, { sentenceIndex, totalSentences: null }]
-
-        const totalSentences =
-          loaded.bookId === book.id && loaded.sentences.length > 0
-            ? loaded.sentences.length
-            : (await getSentences(book.id)).length
-
-        return [book.id, { sentenceIndex, totalSentences }]
-      }),
-    )
-
-    if (run !== progressRun) return
-
+  function loadProgress(forBooks: Book[]) {
     const next: Record<string, StoredProgress> = {}
-    for (const result of results) {
-      if (result.status !== 'fulfilled') continue
-      const [bookId, entry] = result.value
-      next[bookId] = entry
+    for (const book of forBooks) {
+      const sentenceIndex = book.sentence_index ?? 0
+      const total = book.sentence_count ?? 0
+      next[book.id] = {
+        sentenceIndex,
+        totalSentences: sentenceIndex > 0 && total > 0 ? total : null,
+      }
     }
     progress = next
   }
