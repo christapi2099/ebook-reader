@@ -232,16 +232,13 @@
 
   // Colours come from the --search-* tokens in app.css, which derive from the
   // theme's accent, so matches follow light/dark instead of a fixed blue/green.
+  // Fill only, no outline: outlines were replaced by fills on purpose (305610e).
   function applySearchHighlight(el: HTMLDivElement, isCurrent: boolean): void {
     el.style.backgroundColor = isCurrent ? 'var(--search-current-bg)' : 'var(--search-match-bg)'
-    el.style.outline = isCurrent
-      ? '2px solid var(--search-current-outline)'
-      : '1px solid var(--search-match-outline)'
   }
 
   function clearSearchHighlight(el: HTMLDivElement): void {
     el.style.backgroundColor = ''
-    el.style.outline = ''
   }
 
   function drawHighlights(page: number) {

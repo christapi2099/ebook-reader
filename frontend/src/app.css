@@ -107,9 +107,7 @@
    use time, so these are defined once. */
 :root {
   --search-match-bg: color-mix(in oklab, var(--accent) 16%, transparent);
-  --search-match-outline: color-mix(in oklab, var(--accent) 40%, transparent);
   --search-current-bg: color-mix(in oklab, var(--accent) 32%, transparent);
-  --search-current-outline: var(--accent);
 }
 
 @theme inline {

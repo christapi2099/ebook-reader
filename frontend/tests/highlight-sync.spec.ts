@@ -586,22 +586,30 @@ test.describe('Search highlight styling', () => {
   test('search_matches_use_fill_not_outline', async ({ page }) => {
     await page.waitForSelector('[data-overlay]', { timeout: 10000 })
     await searchBtn(page).click()
-    await searchInput(page).fill('Sentence 0')
-    const bg = await page.evaluate(() => {
-      const el = document.querySelector('[data-index="0"]') as HTMLElement
-      return el?.style.backgroundColor || ''
+    // Sentence 1, not 0: sentence 0 carries the playback highlight on load, and
+    // the search fill deliberately stays off a playing sentence, so asserting on
+    // it would read the playback colour and prove nothing about search.
+    await searchInput(page).fill('Sentence 1')
+    const style = await page.evaluate(() => {
+      const el = document.querySelector('[data-index="1"]') as HTMLElement
+      return {
+        highlighted: el.getAttribute('data-highlighted'),
+        bg: el.style.backgroundColor,
+        outline: el.style.outline,
+        computedBg: getComputedStyle(el).backgroundColor,
+      }
     })
-    const outline = await page.evaluate(() => {
-      const el = document.querySelector('[data-index="0"]') as HTMLElement
-      return el?.style.outline || ''
-    })
-    expect(bg).not.toBe('')
-    expect(outline === '' || outline === 'none').toBe(true)
+    expect(style.highlighted).not.toBe('true')
+    expect(style.bg).toContain('--search-current-bg')
+    expect(style.outline === '' || style.outline === 'none').toBe(true)
+    // The inline style names a token; an undefined token would compute to
+    // transparent and the match would silently vanish.
+    expect(style.computedBg).not.toBe('rgba(0, 0, 0, 0)')
   })
 
-  test('search_current_match_is_blue_others_are_green', async ({ page }) => {
+  test('search_current_match_uses_current_token_others_match_token', async ({ page }) => {
     await page.waitForSelector('[data-overlay]', { timeout: 10000 })
-    // Advance playback to sentence 2 then pause — leaves sentences 0 & 1 free for search colors
+    // Advance playback to sentence 2 then pause — leaves sentences 0 & 1 free for search fills
     await playBtn(page).click()
     await driver.sendSentenceStart(IDX.first, SID.first)
     await driver.sendAudioChunk(MOCK_AUDIO_CHUNK)
@@ -616,18 +624,18 @@ test.describe('Search highlight styling', () => {
     // sentence 2 is now data-highlighted; sentences 0 & 1 are free
     await searchBtn(page).click()
     await searchInput(page).fill('Sentence')
-    // sentence 0 = first result = current search match → blue
+    // sentence 0 = first result = current search match → --search-current-bg
     const currentBg = await page.evaluate(() => {
       const el = document.querySelector('[data-index="0"]') as HTMLElement
       return el?.style.backgroundColor || ''
     })
-    expect(currentBg).toContain('59, 130, 246')
-    // sentence 1 = second result = non-current → green
+    expect(currentBg).toContain('--search-current-bg')
+    // sentence 1 = second result = non-current → --search-match-bg
     const nonCurrentBg = await page.evaluate(() => {
       const el = document.querySelector('[data-index="1"]') as HTMLElement
       return el?.style.backgroundColor || ''
     })
-    expect(nonCurrentBg).toContain('134, 239, 172')
+    expect(nonCurrentBg).toContain('--search-match-bg')
     // advance current match from sentence 0 → sentence 1
     await nextMatchBtn(page).click()
     const currentAfterNext = await page.evaluate(() => {
@@ -638,8 +646,8 @@ test.describe('Search highlight styling', () => {
       const el = document.querySelector('[data-index="1"]') as HTMLElement
       return el?.style.backgroundColor || ''
     })
-    expect(currentAfterNext).toContain('134, 239, 172')
-    expect(nextAsCurrent).toContain('59, 130, 246')
+    expect(currentAfterNext).toContain('--search-match-bg')
+    expect(nextAsCurrent).toContain('--search-current-bg')
   })
 
   test('search_fill_clears_when_search_closed', async ({ page }) => {
@@ -671,8 +679,8 @@ test.describe('Search highlight styling', () => {
       const el = document.querySelector('[data-index="0"]') as HTMLElement
       return el?.style.backgroundColor || ''
     })
-    expect(playbackBg).not.toContain('59, 130, 246')
-    expect(playbackBg).not.toContain('134, 239, 172')
+    expect(playbackBg).not.toContain('--search-current-bg')
+    expect(playbackBg).not.toContain('--search-match-bg')
     await driver.sendSentenceStart(IDX.second, SID.first)
     await driver.sendAudioChunk(MOCK_AUDIO_CHUNK)
     await page.clock.runFor(TICK.sentence)
@@ -685,7 +693,7 @@ test.describe('Search highlight styling', () => {
       const el = document.querySelector('[data-index="1"]') as HTMLElement
       return el?.style.backgroundColor || ''
     })
-    expect(playbackOnOneBg).not.toContain('59, 130, 246')
-    expect(playbackOnOneBg).not.toContain('134, 239, 172')
+    expect(playbackOnOneBg).not.toContain('--search-current-bg')
+    expect(playbackOnOneBg).not.toContain('--search-match-bg')
   })
 })
