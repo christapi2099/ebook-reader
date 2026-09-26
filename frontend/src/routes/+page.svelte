@@ -10,6 +10,7 @@
   import UploadDialog from '$lib/components/UploadDialog.svelte'
   import SettingsOverlay from '$lib/components/SettingsOverlay.svelte'
   import { get } from 'svelte/store'
+  import Button from '$lib/ui/Button.svelte'
 
   let textarea = $state('')
   let isSubmitting = $state(false)
@@ -119,16 +120,12 @@
         <!-- Header with upload button -->
         <div class="flex items-center justify-between mb-4">
           <h1 class="text-2xl font-bold text-slate-800">Text Reader</h1>
-          <button
-            onclick={() => uploadOpen = true}
-            class="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 flex items-center gap-2"
-            aria-label="Upload PDF/EPUB"
-          >
+          <Button onclick={() => uploadOpen = true} aria-label="Upload PDF/EPUB">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/>
             </svg>
             Upload
-          </button>
+          </Button>
         </div>
 
         <!-- Text area -->

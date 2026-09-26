@@ -3,6 +3,7 @@
   import { getExports, exportMP3, deleteExport, getVoices, API_BASE } from '$lib/api'
   import type { Book, Voice, ExportItem } from '$lib/api'
   import { getLibrary } from '$lib/api'
+  import Button from '$lib/ui/Button.svelte'
 
   let exports = $state<ExportItem[]>([])
   let books = $state<Book[]>([])
@@ -89,12 +90,7 @@
 <div class="p-4 md:p-6">
   <div class="flex items-center justify-between mb-6">
     <h1 class="text-xl md:text-2xl font-bold text-slate-800">MP3 Exports</h1>
-    <button
-      class="px-3 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 font-medium transition-colors text-sm"
-      onclick={() => (showDialog = true)}
-    >
-      + New Export
-    </button>
+    <Button size="sm" onclick={() => (showDialog = true)}>+ New Export</Button>
   </div>
 
   {#if error}
@@ -116,12 +112,7 @@
       </svg>
       <p class="text-lg font-medium">No exports yet</p>
       <p class="text-sm mt-1">Export a book as MP3 to listen offline</p>
-      <button
-        class="mt-4 px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 font-medium transition-colors"
-        onclick={() => (showDialog = true)}
-      >
-        Export a Book
-      </button>
+      <Button class="mt-4" onclick={() => (showDialog = true)}>Export a Book</Button>
     </div>
   {:else}
     <div class="space-y-2">
@@ -190,32 +181,34 @@
       <label id="speed-label" for="speed-group" class="block text-sm font-medium text-slate-700 mb-1">Speed</label>
       <div id="speed-group" class="flex gap-1 mb-4" role="radiogroup" aria-labelledby="speed-label">
         {#each speeds as s}
-          <button
-            class="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors {selectedSpeed === s ? 'bg-blue-500 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}"
+          <Button
+            size="sm"
+            variant={selectedSpeed === s ? 'primary' : 'ghost'}
             onclick={() => (selectedSpeed = s)}
             role="radio"
             aria-checked={selectedSpeed === s}
             aria-label={`${s}x speed`}
           >
             {s}x
-          </button>
+          </Button>
         {/each}
       </div>
 
       <div class="flex gap-2">
-        <button
-          class="flex-1 px-4 py-2 bg-slate-100 text-slate-700 rounded-lg hover:bg-slate-200 font-medium transition-colors text-sm"
+        <Button
+          variant="secondary"
+          class="flex-1"
           onclick={() => (showDialog = false)}
         >
           Cancel
-        </button>
-        <button
-          class="flex-1 px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 font-medium transition-colors text-sm disabled:opacity-50"
+        </Button>
+        <Button
+          class="flex-1"
           disabled={!selectedBookId || exporting}
           onclick={handleExport}
         >
           {exporting ? 'Exporting…' : 'Export'}
-        </button>
+        </Button>
       </div>
     </div>
   </div>

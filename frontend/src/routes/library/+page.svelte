@@ -15,6 +15,7 @@
   import { toDetailMessage } from '$lib/utils/errors'
   import type { StoredProgress } from '$lib/utils/reading-progress'
   import BookGrid from '$lib/components/BookGrid.svelte'
+  import Button from '$lib/ui/Button.svelte'
   import FolderTile from '$lib/components/FolderTile.svelte'
   import FolderNameDialog from '$lib/components/FolderNameDialog.svelte'
   import MoveToFolderDialog from '$lib/components/MoveToFolderDialog.svelte'
@@ -305,13 +306,9 @@
     </div>
 
     {#if !currentFolder}
-      <button
-        type="button"
-        class="min-h-11 shrink-0 rounded-lg bg-blue-500 px-4 text-sm font-medium text-white hover:bg-blue-600"
-        onclick={() => (nameDialog = { folder: null })}
-      >
+      <Button class="shrink-0" onclick={() => (nameDialog = { folder: null })}>
         New folder
-      </button>
+      </Button>
     {/if}
   </div>
 
@@ -382,13 +379,7 @@
       <p class="mt-1 text-sm text-slate-400">
         Drag a book onto a folder tile, or use “Move to folder” on any book.
       </p>
-      <button
-        type="button"
-        class="mt-4 min-h-11 rounded-lg bg-blue-500 px-4 text-sm font-medium text-white hover:bg-blue-600"
-        onclick={() => (openFolderId = null)}
-      >
-        Back to all books
-      </button>
+      <Button class="mt-4" onclick={() => (openFolderId = null)}>Back to all books</Button>
     </div>
   {:else}
     <BookGrid

@@ -5,6 +5,7 @@
   import type { Voice } from '$lib/api'
   import { settingsStore } from '$lib/stores/settings'
   import VoicePreviewDock from '$lib/components/VoicePreviewDock.svelte'
+  import Button from '$lib/ui/Button.svelte'
 
   /** `loading` until the real audio element is ready to play. */
   type PreviewStatus = 'loading' | 'playing' | 'paused'
@@ -176,12 +177,7 @@
   <div class="flex-1 p-4 md:p-6">
     <div class="flex items-center justify-between mb-6">
       <h1 class="text-xl md:text-2xl font-bold text-slate-800">Voices</h1>
-      <button
-        class="px-3 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 font-medium transition-colors text-sm"
-        onclick={handleUpload}
-      >
-        + Upload Voice
-      </button>
+      <Button size="sm" onclick={handleUpload}>+ Upload Voice</Button>
     </div>
 
   {#if error}
