@@ -32,16 +32,31 @@ for PORT in $BACKEND_PORT $FRONTEND_PORT; do
   fi
 done
 
-VENV="$REPO_DIR/backend/venv"
-if [ ! -f "$VENV/bin/python" ]; then
-    echo "Error: backend venv not found at $VENV"
-    echo "Create it with: cd backend && python3 -m venv venv && pip install -r requirements.txt"
-    exit 1
+# Backend environment, in order of preference:
+#   1. uv            -> `uv run` syncs backend/.venv from backend/uv.lock, then runs
+#   2. backend/.venv -> uv-managed env without uv on PATH
+#   3. backend/venv  -> legacy hand-made venv, kept working for un-migrated checkouts
+UV_BIN="$(command -v uv || true)"
+if [ -z "$UV_BIN" ] && [ -x "$HOME/.local/bin/uv" ]; then
+    UV_BIN="$HOME/.local/bin/uv"
 fi
 
-echo "Starting backend on http://localhost:$BACKEND_PORT ($(${VENV}/bin/python --version))"
 cd "$REPO_DIR/backend"
-"$VENV/bin/uvicorn" main:app --reload --host 0.0.0.0 --port "$BACKEND_PORT" &
+if [ -n "$UV_BIN" ]; then
+    echo "Starting backend on http://localhost:$BACKEND_PORT (uv run; syncing .venv from uv.lock)"
+    "$UV_BIN" run uvicorn main:app --reload --host 0.0.0.0 --port "$BACKEND_PORT" &
+elif [ -x "$REPO_DIR/backend/.venv/bin/uvicorn" ]; then
+    echo "Starting backend on http://localhost:$BACKEND_PORT (.venv; uv not found on PATH)"
+    "$REPO_DIR/backend/.venv/bin/uvicorn" main:app --reload --host 0.0.0.0 --port "$BACKEND_PORT" &
+elif [ -x "$REPO_DIR/backend/venv/bin/uvicorn" ]; then
+    LEGACY_VENV="$REPO_DIR/backend/venv"
+    echo "Starting backend on http://localhost:$BACKEND_PORT (legacy env: $(${LEGACY_VENV}/bin/python --version))"
+    "$LEGACY_VENV/bin/uvicorn" main:app --reload --host 0.0.0.0 --port "$BACKEND_PORT" &
+else
+    echo "Error: no backend environment found (looked for uv, backend/.venv, backend/venv)"
+    echo "Install uv (https://docs.astral.sh/uv/) then run: cd backend && uv sync"
+    exit 1
+fi
 BACKEND_PID=$!
 
 echo "Starting frontend on http://localhost:$FRONTEND_PORT"

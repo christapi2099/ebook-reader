@@ -1,3 +1,79 @@
+# Dependency management for the backend is done with uv.
+#   uv sync                 # create/refresh backend/.venv from uv.lock
+#   uv run <cmd>            # run a command inside that environment
+#   uv add <pkg>            # add a runtime dependency
+#   uv add --dev <pkg>      # add a development/test dependency
+# See backend/UV_MIGRATION.md for the migration notes.
+#
+# This project is a flat application (no importable package), so uv installs the
+# dependencies but never builds/installs the project itself.
+
+[project]
+name = "ebook-reader-backend"
+version = "0.1.0"
+description = "Local TTS ebook reader backend (FastAPI + Kokoro TTS + SQLModel)"
+# The working environment (backend/venv) and backend/Dockerfile both run
+# CPython 3.12; CLAUDE.md's "Python 3.11" note was stale.
+requires-python = ">=3.12,<3.13"
+
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]",
+    "sqlmodel",
+    "pymupdf",
+    "ebooklib",
+    "beautifulsoup4",
+    "spacy",
+    "easyocr",
+    "python-multipart",
+    "soundfile",
+    "numpy",
+    # CUDA-enabled PyTorch. The requirement is intentionally unchanged from the
+    # previous requirements.txt: the default index (PyPI) resolves torch to the
+    # current CUDA build (2.14.0+cu130), which is what backend/venv has. The
+    # pytorch cu124 index below is kept as a supplemental index only.
+    "torch>=2.4.0",
+    "torchvision",
+    "kokoro>=0.9.2",
+    # spaCy English pipeline used by services/base_engine.py (spacy.load(
+    # "en_core_web_sm")). It was present in backend/venv but missing from the old
+    # requirements.txt, so it is declared here to make `uv sync` self-sufficient.
+    "en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
+]
+
+[dependency-groups]
+# These were previously mixed into requirements.txt alongside the runtime deps.
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
+    # Required by starlette/fastapi TestClient, used only by backend/tests/.
+    "httpx",
+]
+
+[tool.uv]
+# Flat application: do not build or install the project itself.
+package = false
+# Match pip's `--extra-index-url` semantics: consider every index and take the
+# best (highest) version. uv's default "first-index" strategy instead takes the
+# first index that happens to carry a package, which resolved torch DOWN to
+# 2.6.0+cu124 and pulled obsolete transitive deps (certifi 2022.12.7, idna 3.4)
+# from the pytorch index. "unsafe-best-match" reproduces the previous pip
+# resolution instead, keeping the CUDA build unchanged.
+index-strategy = "unsafe-best-match"
+
+# Mirrors the old requirements.txt line:
+#   --extra-index-url https://download.pytorch.org/whl/cu124
+# Keep it supplemental (not `default`, not `explicit`) so the default index is
+# still consulted, exactly as pip's --extra-index-url did.
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+
+# ---------------------------------------------------------------------------
+# Test/coverage configuration is owned by another change in flight; do not edit
+# this block here (backend/pytest.ini is its replacement).
+# ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

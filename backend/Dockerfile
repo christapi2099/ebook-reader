@@ -9,6 +9,9 @@ RUN apt-get update && apt-get install -y \
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
 
 WORKDIR /app
+# requirements.txt is generated from uv.lock (see UV_MIGRATION.md); it stays here
+# so this pip-based build keeps working unchanged. The uv-native equivalent is
+# `uv sync --frozen --no-dev` (follow-up, not switched yet).
 COPY requirements.txt .
 RUN pip install --no-cache-dir --user -r requirements.txt && \
     python3 -m spacy download en_core_web_sm

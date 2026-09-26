@@ -4,8 +4,8 @@ Local TTS reader: FastAPI + Kokoro TTS (backend) / Svelte 5 + PDF.js (frontend).
 
 ## Run
 ```bash
-# Backend (Python 3.11, port 8000)
-cd backend && source venv/bin/activate && uvicorn main:app --reload
+# Backend (Python 3.12, port 8000) — uv manages backend/.venv from backend/uv.lock
+cd backend && uv sync && uv run uvicorn main:app --reload
 
 # Frontend (port 5173)
 cd frontend && npm run dev
@@ -27,7 +27,7 @@ cd frontend && npm run dev
 - Kokoro yields 3-tuples `(graphemes, phonemes, audio_ndarray)` — use `result[-1]`, sample_rate=24000
 - AudioCache key = `SHA256(text:voice:speed)` — speed is part of key
 - Use `import db.database as _db` + `_db.engine` at call time (not import-time)
-- `source backend/venv/bin/activate` before running Python
+- Run Python through uv: `cd backend && uv run <cmd>` (env is `backend/.venv`, locked by `backend/uv.lock`). Re-run `uv sync` after pulling; add deps with `uv add` / `uv add --dev` (never hand-edit `requirements.txt` — it is generated from the lock)
 
 **Frontend — Svelte 5 (compiler-enforced, violations = build errors)**
 - `$props()` not `export let` · `$state()` not reactive `let` · `$derived()` not `$:`
