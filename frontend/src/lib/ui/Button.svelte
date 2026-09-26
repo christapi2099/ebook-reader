@@ -26,6 +26,14 @@
    * There is no call site for it — the frontend contains no `<a>` element at
    * all — so it is deliberately not implemented rather than carried as an
    * untested second code path.
+   *
+   * Known limitation: the radius is part of the base classes and a caller
+   * cannot override it. Tailwind emits `.rounded-lg` after `.rounded-full`
+   * (byte 16006 against 15965 in the built stylesheet), so `<Button
+   * class="rounded-full">` silently renders a rounded square. Controls that must
+   * be pills — MediaBar's play button and speed chips, the Read Aloud CTA — are
+   * therefore still plain tokenised `<button>`s. A `shape` prop is the way to
+   * bring them in; a `class` override is not.
    */
   type Variant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'icon'
   type Size = 'sm' | 'md' | 'lg'
