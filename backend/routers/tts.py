@@ -1,6 +1,8 @@
 import asyncio
 import io
 import json
+import logging
+import threading
 from typing import Any
 
 import numpy as np
@@ -13,6 +15,8 @@ from services import engine_manager
 from services.sentence_source import load_sentences
 from services.tts_engine import SAMPLE_RATE, TTSEngine, SynthJob, normalize_speed
 
+logger = logging.getLogger(__name__)
+
 
 def _requested_speed(msg: dict) -> float:
     """Validate and normalise the `speed` field of an inbound message.
@@ -23,6 +27,36 @@ def _requested_speed(msg: dict) -> float:
     rather than letting a bad value reach Kokoro.
     """
     return normalize_speed(msg.get("speed", 1.0))
+
+
+def _start_warmup(engine: Any) -> None:
+    """Ask the remote GPU to start, without waiting for it.
+
+    Called once per connection, on the first play/seek, because that is the
+    moment the reader has declared it is about to want audio: the container, its
+    image and its weights can come up while the first sentence is being prepared
+    instead of after. ``warmup()`` only *spawns* the call — it does not wait for
+    the GPU — so this returns in the time of one Modal API round trip, and it is
+    put on a daemon thread anyway so even that round trip never adds a turn of
+    latency to the play request, and never occupies the one synthesis worker
+    (``tts_engine._synthesis_pool``, ``max_workers=1``) that the audio needs.
+
+    Every failure is swallowed on purpose. ``warmup()`` legitimately raises when
+    the live transport has no spawn callable, and a warm-up is an optimisation:
+    it must never break playback, and a cold container is still a working one.
+    """
+    warmup = getattr(engine, "warmup", None)
+    if not callable(warmup):
+        return
+
+    def run() -> None:
+        try:
+            warmup()
+        except Exception:
+            logger.warning("[kokoro] Modal warm-up spawn failed", exc_info=True)
+
+    threading.Thread(target=run, name="kokoro-warmup-spawn", daemon=True).start()
+
 
 router = APIRouter()
 
@@ -55,6 +89,10 @@ async def tts_websocket(websocket: WebSocket, book_id: str):
     # Last `engine_status` phase sent for the current session, so the reader is
     # told about a cold GPU once and not on every sentence.
     reported_engine_phase: str | None = None
+    # Whether this connection has already asked the remote GPU to start. One spawn
+    # per connection: a warm-up costs GPU seconds, and every later play/seek on
+    # the same connection would otherwise ask for another one.
+    warmup_started = False
 
     async def _report_engine_phase(session_id: int, force: bool = False) -> None:
         """Tell the client which GPU phase it is waiting on, if any.
@@ -195,8 +233,7 @@ async def tts_websocket(websocket: WebSocket, book_id: str):
         except (asyncio.CancelledError, WebSocketDisconnect):
             return
         except Exception as exc:
-            import logging
-            logging.exception("TTS consumer error: %s", exc)
+            logger.exception("TTS consumer error: %s", exc)
             try:
                 await websocket.send_text(json.dumps({"type": "error", "message": str(exc), "session_id": session_id}))
             except Exception:
@@ -279,6 +316,16 @@ async def tts_websocket(websocket: WebSocket, book_id: str):
                 live = engine_manager.manager.current()
                 if live is not None:
                     engine_tts.kokoro = live
+                # A book has just been opened, which is the one moment a warm-up is
+                # worth paying for: ask the remote GPU to start now, so the first
+                # sentence does not pay the cold start. `warmup_started` makes this
+                # once per connection — a reader that plays, seeks and seeks again
+                # must not spawn three times — and the `active()` check makes it a
+                # no-op on the local backend, where there is no GPU to start and no
+                # GPU time to pay for.
+                if not warmup_started and engine_manager.manager.active() == engine_manager.MODAL:
+                    warmup_started = True
+                    _start_warmup(live)
                 reported_engine_phase = None
                 await _report_engine_phase(session_id, force=True)
                 producer_task = asyncio.create_task(_producer(from_index, voice, speed))

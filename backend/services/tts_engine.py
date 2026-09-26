@@ -16,10 +16,10 @@ from sqlmodel import Session
 
 import db.database as _db
 from db.models import AudioCache
+from services import audio_cache_codec
 
 logger = logging.getLogger(__name__)
 
-INT16_MAX = 32767
 SAMPLE_RATE = 24000
 
 # Speeds are normalised to this many decimals before being hashed into a cache
@@ -78,6 +78,16 @@ def normalize_speed(raw: Any) -> float:
 # speed for free, since a higher speed renders a shorter sentence.
 PREFETCH_TARGET_AUDIO_SECONDS = 60.0
 
+# Sentences covered by one ``synthesize_many`` round trip on the remote backend.
+# The deployed Modal app takes a list of texts, so "batching" means one request
+# for several sentences instead of one request each: measured, 3 sentences in a
+# single batch took 1.09 s against 0.50 s for one call, so the same audio costs
+# the shared synthesis worker *less* time, not more. The cap is what keeps a
+# batch from holding that one worker for a whole chapter at a stretch; the
+# audio-time budget below usually stops it sooner, and the stand-down gate stops
+# it entirely while the user is waiting for a sentence of their own.
+PREFETCH_BATCH_MAX = 8
+
 _g2p = None
 
 
@@ -128,6 +138,26 @@ _synthesis_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="kokoro-s
 _playback_waiting = 0
 
 _SYNTHESIS_EXHAUSTED = object()
+
+
+def _cached_audio(row: AudioCache) -> np.ndarray | None:
+    """One cache row's audio as float32 mono, or ``None`` if it cannot be read.
+
+    The codec is read off the row rather than assumed, so rows written under the
+    other codec — including every row that predates the column — stay readable.
+    A row that cannot be decoded returns ``None`` instead of raising, and every
+    caller treats that as a cache miss and synthesises the sentence again: a
+    corrupt or half-written entry should cost one re-synthesis, not the request
+    that happened to read it.
+    """
+    try:
+        return audio_cache_codec.decode(row.audio_data, row.codec)
+    except Exception:
+        logger.warning(
+            "Could not decode cached audio %s (codec=%r); re-synthesising",
+            row.text_hash, getattr(row, "codec", None), exc_info=True,
+        )
+        return None
 
 
 def _next_chunk(iterator: Any) -> Any:
@@ -183,6 +213,42 @@ def synthesize_serialized(
     concurrently against the same CPU cores and CUDA context.
     """
     return _synthesis_pool.submit(engine.synthesize_cached, text, voice, speed).result()
+
+
+def _batch_client(engine: "TTSEngine") -> Any | None:
+    """The engine to batch prefetch against, or ``None`` for the serial path.
+
+    Two clauses, and both matter. The manager is the authority on *which* engine
+    is live — the resolved remote transport is its answer, read from one place
+    instead of guessed per sentence — and the object the batch is issued to is
+    the one the rest of the session synthesises with (``engine.kokoro``), so a
+    batch can never mix engines with the audio being streamed.
+
+    A local backend returns ``None`` here and takes the unchanged serial path: a
+    local ``synthesize_many`` would render the same sentences serially anyway, so
+    a batch would only add a code path — and this must not change local
+    behaviour by a single byte.
+    """
+    from services import engine_manager
+
+    if engine_manager.manager.active() != engine_manager.MODAL:
+        return None
+    kokoro = engine.kokoro
+    if not callable(getattr(kokoro, "synthesize_many", None)):
+        return None
+    return kokoro
+
+
+def _seconds_per_sentence(measured: list[float], fallback: float) -> float:
+    """Mean duration of the sentences measured so far, or ``fallback``.
+
+    Needed to decide how many not-yet-synthesised sentences fit in one batch
+    under the audio-time budget before any of them has been rendered. With
+    nothing measured yet the fallback is the whole budget, which makes the first
+    window a single sentence — exactly the serial path's own first step — and the
+    estimate only improves from there.
+    """
+    return sum(measured) / len(measured) if measured else fallback
 
 
 @dataclass
@@ -244,6 +310,21 @@ class TTSEngine:
         """
         return 1.0 if self._speed_kwarg_supported is False else requested
 
+    def _resolve_speed_support(self) -> bool:
+        """Whether the injected engine accepts ``speed=``, probed once.
+
+        The answer is a property of the callable, not of a sentence, so it is
+        discovered on the first synthesis and reused for the life of the engine.
+        """
+        if self._speed_kwarg_supported is None:
+            self._speed_kwarg_supported = _accepts_speed(self.kokoro)
+            if not self._speed_kwarg_supported:
+                logger.warning(
+                    "Injected Kokoro callable takes no speed= keyword; "
+                    "synthesising at 1.0x and labelling the audio as such"
+                )
+        return self._speed_kwarg_supported
+
     def _call_kokoro(self, text: str, voice: str, speed: float) -> tuple[list, float]:
         """Synthesize `text`, returning ``(results, effective_speed)``.
 
@@ -255,17 +336,23 @@ class TTSEngine:
         under the 1.5x key, permanently, so every later 1.5x request replayed the
         wrong rate straight out of the cache.
         """
-        if self._speed_kwarg_supported is None:
-            self._speed_kwarg_supported = _accepts_speed(self.kokoro)
-            if not self._speed_kwarg_supported:
-                logger.warning(
-                    "Injected Kokoro callable takes no speed= keyword; "
-                    "synthesising at 1.0x and labelling the audio as such"
-                )
-
-        if not self._speed_kwarg_supported:
+        if not self._resolve_speed_support():
             return self.kokoro(text, voice=voice), 1.0
         return self.kokoro(text, voice=voice, speed=speed), speed
+
+    def _call_kokoro_many(
+        self, texts: list[str], voice: str, speed: float
+    ) -> tuple[list[list], float]:
+        """Synthesize several sentences in one remote round trip.
+
+        The batch twin of ``_call_kokoro``, with the same speed handling, so a
+        cache row written from either path is keyed on the rate the audio was
+        really produced at. Blocking, so callers keep it on the shared synthesis
+        worker.
+        """
+        if not self._resolve_speed_support():
+            return self.kokoro.synthesize_many(texts, voice=voice), 1.0
+        return self.kokoro.synthesize_many(texts, voice=voice, speed=speed), speed
 
     def _collect_result(
         self,
@@ -322,11 +409,15 @@ class TTSEngine:
     ) -> tuple[np.ndarray, int]:
         full_audio = np.concatenate(audio_parts)
         duration_ms = self._audio_duration_ms(audio_parts)
-        pcm = (full_audio * INT16_MAX).clip(-INT16_MAX, INT16_MAX).astype(np.int16).tobytes()
+        # The one place a cache row is written. The codec is resolved here and
+        # recorded on the row, so reads do not have to guess and the setting can
+        # be changed — or reverted — without rewriting stored audio.
+        blob, codec = audio_cache_codec.encode(full_audio)
 
         entry = AudioCache(
             text_hash=cache_key,
-            audio_data=pcm,
+            audio_data=blob,
+            codec=codec,
             duration_ms=duration_ms,
             voice=voice,
             word_timestamps=json.dumps(word_timestamps) if word_timestamps else None,
@@ -337,6 +428,35 @@ class TTSEngine:
                 session.add(entry)
                 session.commit()
         return full_audio, duration_ms
+
+    def _store_group(
+        self, group: list, text: str, voice: str, effective_speed: float
+    ) -> float | None:
+        """Cache one sentence's chunk group under its own key.
+
+        Returns the audio duration in seconds, or ``None`` when the group carried
+        no audio. Batching is a transport detail and nothing more: every sentence
+        still lands under ``_cache_key(text, voice, effective_speed)``, exactly
+        where the serial path would have put it, so a later playback is a cache
+        hit and not a second synthesis.
+        """
+        audio_parts: list[np.ndarray] = []
+        word_timestamps: list[dict] = []
+        audio_offset = 0.0
+        for result in group:
+            _, audio_offset = self._collect_result(
+                result, audio_parts, word_timestamps, audio_offset,
+            )
+        if not audio_parts:
+            return None
+
+        _, duration_ms = self._write_cache_entry(
+            audio_parts,
+            word_timestamps,
+            self._cache_key(text, voice, effective_speed),
+            voice,
+        )
+        return duration_ms / 1000.0
 
     def synthesize_cached(
         self, text: str, voice: str, speed: float
@@ -358,8 +478,10 @@ class TTSEngine:
         with Session(_db.engine) as session:
             cached = session.get(AudioCache, cache_key)
         if cached is not None:
-            audio = np.frombuffer(cached.audio_data, dtype=np.int16).astype(np.float32) / INT16_MAX
-            return audio, effective_speed
+            audio = _cached_audio(cached)
+            if audio is not None:
+                return audio, effective_speed
+            # Undecodable entry — treat it as a miss and render it again.
 
         if self.kokoro is None:
             return None, effective_speed
@@ -400,25 +522,32 @@ class TTSEngine:
             cached = session.get(AudioCache, cache_key)
 
         if cached is not None:
-            word_ts = json.loads(cached.word_timestamps) if cached.word_timestamps else None
-            if word_ts is None:
-                word_ts = self._proportional_timestamps(job.text, cached.duration_ms)
-            self._sentence_meta[job.sentence_index] = {
-                "word_timestamps": word_ts,
-                "duration_ms": cached.duration_ms,
-                "requested_speed": job.speed,
-                "effective_speed": effective_speed,
-            }
-            audio_data = np.frombuffer(cached.audio_data, dtype=np.int16).astype(np.float32) / INT16_MAX
-            chunk_samples = SAMPLE_RATE // 10
-            for start in range(0, len(audio_data), chunk_samples):
-                if job.sentence_index in self.cancelled:
-                    return
-                chunk = audio_data[start:start + chunk_samples]
-                buf = io.BytesIO()
-                sf.write(buf, chunk, SAMPLE_RATE, format="WAV", subtype="PCM_16")
-                yield buf.getvalue()
-            return
+            audio_data = _cached_audio(cached)
+            if audio_data is not None:
+                word_ts = json.loads(cached.word_timestamps) if cached.word_timestamps else None
+                if word_ts is None:
+                    word_ts = self._proportional_timestamps(job.text, cached.duration_ms)
+                self._sentence_meta[job.sentence_index] = {
+                    "word_timestamps": word_ts,
+                    "duration_ms": cached.duration_ms,
+                    "requested_speed": job.speed,
+                    "effective_speed": effective_speed,
+                }
+                # The wire format is WAV whatever the row holds: the client
+                # decodes every frame with `decodeAudioData`, so the storage codec
+                # must not leak into the transport. Decoded back to float32 here,
+                # then rechunked exactly as before.
+                chunk_samples = SAMPLE_RATE // 10
+                for start in range(0, len(audio_data), chunk_samples):
+                    if job.sentence_index in self.cancelled:
+                        return
+                    chunk = audio_data[start:start + chunk_samples]
+                    buf = io.BytesIO()
+                    sf.write(buf, chunk, SAMPLE_RATE, format="WAV", subtype="PCM_16")
+                    yield buf.getvalue()
+                return
+            # Undecodable entry: fall through and synthesise it again rather than
+            # streaming noise or failing the session. `_cached_audio` logged why.
 
         # This call may be the one that discovers the installed Kokoro cannot
         # honour `speed`, so it hands back the rate it actually used. It goes to
@@ -504,8 +633,19 @@ class TTSEngine:
         keep up anyway (it is slower than real time), so its work during playback
         buys nothing while costing latency. It therefore warms ahead when the user
         is not waiting, and yields when they are.
+
+        On the remote backend those same bounds are applied to a whole window at
+        once, which is sent as a single ``synthesize_many`` round trip instead of
+        one call per sentence (``_prefetch_remote``). A local backend takes the
+        serial path below, unchanged: it has nothing to gain from a batch.
         """
         if self.kokoro is None or target_audio_seconds <= 0:
+            return
+
+        if _batch_client(self) is not None:
+            await self._prefetch_remote(
+                sentences, from_index, count, voice, speed, cancel, target_audio_seconds,
+            )
             return
 
         loop = asyncio.get_running_loop()
@@ -566,4 +706,136 @@ class TTSEngine:
             except Exception:
                 logger.warning("Prefetch failed for sentence %s", idx, exc_info=True)
             synthesized += 1
+            await asyncio.sleep(0)
+
+    async def _prefetch_remote(
+        self,
+        sentences: dict[int, dict],
+        from_index: int,
+        count: int,
+        voice: str,
+        speed: float,
+        cancel: asyncio.Event,
+        target_audio_seconds: float,
+    ) -> None:
+        """Prefetch the remote backend one ``synthesize_many`` batch at a time.
+
+        Reached only when ``_batch_client`` says the live transport is remote, so
+        the local serial path above is untouched. The bounds are the same ones and
+        they are applied to the window as a whole: `count` is the hard cap,
+        `target_audio_seconds` is the audio-time budget, and the one shared
+        synthesis worker is released between windows. A window holds that worker
+        for a single round trip covering at most ``PREFETCH_BATCH_MAX`` sentences,
+        which is measurably shorter than the same sentences one call at a time
+        (3 in 1.09 s against 0.50 s for one), so batching shortens the window it
+        holds the worker rather than lengthening it.
+        """
+        loop = asyncio.get_running_loop()
+        order = [idx for idx in sorted(sentences) if idx >= from_index]
+        measured_seconds: list[float] = []
+        synthesized = 0
+        buffered_seconds = 0.0
+        position = 0
+
+        while position < len(order):
+            if cancel.is_set() or synthesized >= count:
+                return
+            if buffered_seconds >= target_audio_seconds:
+                return
+
+            # The same stand-down as the serial path: the one synthesis worker is
+            # shared with live playback, and a batch queued ahead of a sentence
+            # the user is waiting for is heard as a stall.
+            while _playback_waiting and not cancel.is_set():
+                await asyncio.sleep(0.05)
+            if cancel.is_set():
+                return
+
+            # Resolved before anything is keyed: the cache key has to name the
+            # rate the engine will really render at, and resolving it here means
+            # the value used for the cache lookup, the batch request and the write
+            # cannot disagree.
+            self._resolve_speed_support()
+            effective_speed = self._effective_speed(speed)
+
+            window: list[tuple[int, str]] = []
+            while position < len(order) and len(window) < PREFETCH_BATCH_MAX:
+                idx = order[position]
+                sentence = sentences[idx]
+                if sentence["filtered"]:
+                    position += 1
+                    continue
+                if synthesized >= count or buffered_seconds >= target_audio_seconds:
+                    # Stop here but do NOT consume the sentence: the bounds are
+                    # re-checked at the top of the next window, and a candidate
+                    # dropped on the way out would never be prefetched at all.
+                    break
+
+                cache_key = self._cache_key(sentence["text"], voice, effective_speed)
+                with Session(_db.engine) as session:
+                    already = session.get(AudioCache, cache_key)
+                if already is not None:
+                    position += 1
+                    seconds = already.duration_ms / 1000.0
+                    buffered_seconds += seconds
+                    measured_seconds.append(seconds)
+                    synthesized += 1
+                    continue
+
+                if synthesized + len(window) >= count:
+                    break
+                # The budget has to be checked before the request, not after: once
+                # the batch has been sent, the GPU time is already paid for. The
+                # sentences already measured in this run are the estimate of what
+                # one more costs; with nothing measured yet the whole budget is
+                # the estimate, so the first window is a single sentence.
+                projected = buffered_seconds + _seconds_per_sentence(
+                    measured_seconds, target_audio_seconds
+                ) * (len(window) + 1)
+                if window and projected > target_audio_seconds:
+                    break
+                window.append((idx, sentence["text"]))
+                position += 1
+
+            if not window:
+                await asyncio.sleep(0)
+                continue
+
+            try:
+                groups, effective_speed = await loop.run_in_executor(
+                    _synthesis_pool,
+                    self._call_kokoro_many,
+                    [text for _, text in window],
+                    voice,
+                    speed,
+                )
+            except Exception:
+                # A failed round trip leaves those sentences uncached and says so
+                # once, rather than aborting the burst or, worse, touching live
+                # playback. The next window continues from where this one stopped.
+                logger.warning(
+                    "Remote prefetch batch failed for sentences %s",
+                    [idx for idx, _ in window],
+                    exc_info=True,
+                )
+                synthesized += len(window)
+                await asyncio.sleep(0)
+                continue
+
+            # One returned group per input, in order (`synthesize_many` raises
+            # rather than returning a short list), each written under its own
+            # sentence key so the cache contract is exactly the serial path's.
+            for (idx, text), group in zip(window, groups):
+                try:
+                    seconds = self._store_group(group, text, voice, effective_speed)
+                except Exception:
+                    logger.warning(
+                        "Remote prefetch failed to cache sentence %s", idx, exc_info=True,
+                    )
+                    continue
+                if seconds is None:
+                    continue
+                buffered_seconds += seconds
+                measured_seconds.append(seconds)
+            synthesized += len(window)
             await asyncio.sleep(0)
