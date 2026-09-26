@@ -59,6 +59,34 @@ from typing import Any
 
 import modal
 
+
+def _positive_int(var: str, default: int) -> int:
+    """A positive whole number from the environment, or ``default``.
+
+    Deliberately local rather than ``services.env_config``: this is the file
+    ``modal deploy`` uploads as the entrypoint of an image whose dependencies all
+    come from ``pip_install``, and it imported nothing from this repository
+    before. Depending on a sibling package would put the GPU deployment at the
+    mercy of how Modal mounts local source — unverifiable from here, and a failed
+    import there costs a paid app that will not start.
+
+    Absent, unparsable, zero and negative all fall back: a bare
+    ``int(os.environ[...])`` stopped the deployment from importing on one typo.
+    """
+    text = (os.environ.get(var) or "").strip()
+    if not text:
+        return default
+    try:
+        value = int(float(text))
+    except (OverflowError, ValueError):
+        print(f"[kokoro-modal] Invalid {var}={text!r}; using the default {default}")
+        return default
+    if value <= 0:
+        print(f"[kokoro-modal] {var}={text!r} is not positive; using the default {default}")
+        return default
+    return value
+
+
 APP_NAME = os.environ.get("MODAL_KOKORO_APP_NAME", "kokoro-tts")
 FUNCTION_NAME = os.environ.get("MODAL_KOKORO_FUNCTION_NAME", "synthesize")
 EXPORT_FUNCTION_NAME = os.environ.get("MODAL_KOKORO_EXPORT_FUNCTION_NAME", "synthesize_batch")
@@ -70,14 +98,14 @@ GPU_FALLBACK = tuple(
     for name in os.environ.get("MODAL_KOKORO_GPU", "L4,A10,T4").split(",")
     if name.strip()
 )
-IDLE_SECONDS = int(os.environ.get("MODAL_KOKORO_IDLE_SECONDS", "60"))
+IDLE_SECONDS = _positive_int("MODAL_KOKORO_IDLE_SECONDS", 60)
 # Bulk export is compute-bound, not idle-bound, so it optimises the other way
 # round from interactive reading: the cheapest GPU per synthesized hour, more
 # containers at once, and an almost immediate scale-down.
 EXPORT_GPU = os.environ.get("MODAL_KOKORO_EXPORT_GPU", "L4")
-EXPORT_MAX_CONTAINERS = int(os.environ.get("MODAL_KOKORO_EXPORT_MAX_CONTAINERS", "6"))
-EXPORT_IDLE_SECONDS = int(os.environ.get("MODAL_KOKORO_EXPORT_IDLE_SECONDS", "5"))
-EXPORT_TIMEOUT_SECONDS = int(os.environ.get("MODAL_KOKORO_EXPORT_TIMEOUT_SECONDS", "1800"))
+EXPORT_MAX_CONTAINERS = _positive_int("MODAL_KOKORO_EXPORT_MAX_CONTAINERS", 6)
+EXPORT_IDLE_SECONDS = _positive_int("MODAL_KOKORO_EXPORT_IDLE_SECONDS", 5)
+EXPORT_TIMEOUT_SECONDS = _positive_int("MODAL_KOKORO_EXPORT_TIMEOUT_SECONDS", 1800)
 # Alpha Modal feature: off unless explicitly asked for, so the snapshot-free
 # path is the supported and always-working one.
 GPU_SNAPSHOT = os.environ.get("MODAL_KOKORO_GPU_SNAPSHOT", "0").strip().lower() in (
@@ -86,7 +114,7 @@ GPU_SNAPSHOT = os.environ.get("MODAL_KOKORO_GPU_SNAPSHOT", "0").strip().lower() 
     "yes",
     "on",
 )
-MAX_CONCURRENT_INPUTS = int(os.environ.get("MODAL_KOKORO_MAX_INPUTS", "4"))
+MAX_CONCURRENT_INPUTS = _positive_int("MODAL_KOKORO_MAX_INPUTS", 4)
 
 SAMPLE_RATE = 24000
 MODEL_REPO = "hexgrad/Kokoro-82M"

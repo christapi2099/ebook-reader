@@ -15,6 +15,8 @@ option combination works the same way:
 ``opus``
     The smallest option by a wide margin (24 kbps is Xiph's recommended mono
     audiobook setting) at the cost of partial macOS Safari support on download.
+    Encoded with constrained VBR, because libopus's default unconstrained VBR
+    ignores the requested ``-b:a`` by more than 50% on real content.
 ``wav``
     Lossless 16-bit PCM, written by soundfile, no ffmpeg involved.
 
@@ -347,7 +349,13 @@ def ffmpeg_args(
     if fmt == "opus":
         args = ["-c:a", "libopus"]
         if bitrate_kbps:
-            args += ["-b:a", f"{bitrate_kbps}k"]
+            # libopus defaults to *unconstrained* VBR, which overshoots an
+            # explicit -b:a badly on real content: a requested 24 kbps measured
+            # 37 kbps over 30 s and 120 s alike (1.54x), so the advertised
+            # "smallest option" was neither small nor the bitrate the user
+            # picked. Constrained VBR holds the rate at the request (1.04x)
+            # while still spending bits where they help.
+            args += ["-b:a", f"{bitrate_kbps}k", "-vbr", "constrained"]
         return args + ["-f", "ogg"]
 
     raise ValueError(f"No ffmpeg arguments for {fmt!r}")

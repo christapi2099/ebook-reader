@@ -31,7 +31,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from services import kokoro_runtime, modal_remote
+from services import env_config, kokoro_runtime, modal_remote
 
 logger = logging.getLogger(__name__)
 
@@ -82,8 +82,14 @@ def phase_failure_message(phase: str | None, reason: object) -> str:
 
 # How long the background warm-up watcher keeps reporting before giving up and
 # marking the engine ready anyway (a warm-up that never returns must not leave
-# the UI spinning for ever).
-WARMUP_WATCH_SECONDS = float(os.environ.get("KOKORO_WARMUP_WATCH_SECONDS", "180"))
+# the UI spinning for ever). Read through env_config, not float(): this runs at
+# import time, so an unparsable value used to stop the app from importing at all.
+# Zero is treated as a typo — a zero window would mark the engine ready
+# immediately, which is the one outcome this bound exists to prevent.
+DEFAULT_WARMUP_WATCH_SECONDS = 180.0
+WARMUP_WATCH_SECONDS = env_config.positive_seconds(
+    "KOKORO_WARMUP_WATCH_SECONDS", DEFAULT_WARMUP_WATCH_SECONDS
+)
 WARMUP_POLL_SECONDS = 1.0
 
 # Reachability budget for GET /api/system/engine, which the Settings panel polls.

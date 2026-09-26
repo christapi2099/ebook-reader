@@ -28,6 +28,8 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 
 import numpy as np
 
+from services import env_config
+
 logger = logging.getLogger(__name__)
 
 SAMPLE_RATE = 24000
@@ -46,7 +48,13 @@ WARMUP_TEXT = "Warm-up."
 # How long a Modal container stays alive after its last call; matches
 # MODAL_KOKORO_IDLE_SECONDS on the deployment. Within this window a container is
 # assumed warm, so the reader does not announce a warm-up that is not happening.
-WARM_WINDOW_SECONDS = float(os.environ.get("MODAL_KOKORO_IDLE_SECONDS", "60"))
+# Read through env_config, not float(): this runs at import time, so an
+# unparsable value used to stop the app from importing at all. Zero is a typo —
+# it would mean "no container is ever warm", announcing a warm-up on every play.
+DEFAULT_WARM_WINDOW_SECONDS = 60.0
+WARM_WINDOW_SECONDS = env_config.positive_seconds(
+    "MODAL_KOKORO_IDLE_SECONDS", DEFAULT_WARM_WINDOW_SECONDS
+)
 
 # A first call has to cold-start a GPU container (image pull + 327 MB model
 # load), which is legitimately slow; a warm call answers in well under a second.

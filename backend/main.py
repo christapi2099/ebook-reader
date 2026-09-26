@@ -45,32 +45,16 @@ def _load_env_file() -> None:
         logger.info("[config] no %s found; using the process environment only", env_path.name)
 
 
-def _init_local_kokoro() -> tuple[Any | None, str | None, str | None]:
-    """Build the in-process Kokoro pipeline on the device torch reports.
-
-    Kept as the single place the *device* is decided for the startup path; the
-    actual build lives in ``engine_manager.build_local`` so the runtime switch in
-    Settings can ask for an explicit device instead of taking pot luck.
-    Returns ``(pipeline, device, error)``.
-    """
-    # The manager owns the "is there a GPU" answer, so asking the same probe it
-    # uses keeps the startup device and the Settings selector from disagreeing.
-    torch_info = kokoro_runtime.probe_local_torch()
-    device = "cuda" if torch_info["cuda_available"] else "cpu"
-    pipeline, error = engine_manager.build_local(device)
-    if pipeline is None:
-        return None, None, error
-    return pipeline, device, None
-
-
 def _init_kokoro() -> Any | None:
     """Choose the Kokoro backend at startup.
 
     Thin wrapper over :mod:`services.engine_manager`, which owns the choice from
-    here on. Order: the engine persisted in Settings, then ``KOKORO_BACKEND``
-    (``local`` → GPU if this machine has one, else CPU; ``remote`` → Modal;
-    ``auto`` → Modal only when a probe says it answers), then local. Every
-    failure path falls back so the reader keeps working without a network.
+    here on — including the device, which it picks from the same probe the
+    Settings selector consults. Order: the engine persisted in Settings, then
+    ``KOKORO_BACKEND`` (``local`` → GPU if this machine has one, else CPU;
+    ``remote`` → Modal; ``auto`` → Modal only when a probe says it answers), then
+    local. Every failure path falls back so the reader keeps working without a
+    network.
     """
     return engine_manager.manager.startup(os.environ.get("KOKORO_BACKEND"))
 

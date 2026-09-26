@@ -3,7 +3,7 @@ import json
 import logging
 import threading
 import zipfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,6 +16,7 @@ from starlette.concurrency import run_in_threadpool
 
 import db.database as _db
 from db.models import Book, MP3Export
+from routers.deps import require_book
 from services import engine_manager, export_batches, export_encoding, modal_remote
 from services.export_batches import ExportBatch
 from services.sentence_source import load_sentences
@@ -547,9 +548,7 @@ async def create_export(body: ExportRequest):
     )
 
     with Session(_db.engine) as session:
-        book = session.get(Book, body.book_id)
-        if not book:
-            raise HTTPException(status_code=404, detail="Book not found")
+        book = require_book(session, body.book_id)
         export = MP3Export(
             book_id=body.book_id,
             voice=body.voice,

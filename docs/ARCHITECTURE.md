@@ -84,11 +84,12 @@ This document describes the tree at:
 > re-read the affected files at the end rather than leaving stale text, so the sections below describe
 > the **working tree**, not the commit. The uncommitted additions I incorporated are:
 >
-> * `backend/services/engine_manager.py` (**new, 553 lines**) — a runtime-swappable Kokoro engine
+> * `backend/services/engine_manager.py` (**new, now 563 lines**) — a runtime-swappable Kokoro engine
 >   manager (`cpu` / `gpu` / `modal`), replacing the "decide once at startup" wiring. It added
->   `GET`/`POST /api/system/engine`, and **its own tests are currently red** (§8.4, §10 R10).
+>   `GET`/`POST /api/system/engine`. Its own tests went red at the snapshot (§8.4, §10 R10) and are
+>   **green as of `e464a71`** — see the superseded note at §8.4.
 > * `backend/services/sentence_source.py` (**new, 49 lines**) — the shared sentence loader.
-> * `backend/tests/conftest.py` grew from 12 to **610 lines** with an autouse isolation guard (§8.4).
+> * `backend/tests/conftest.py` grew from 12 to **728 lines** with autouse isolation guards (§8.4).
 > * New model columns: `UserSettings.tts_engine`; `MP3Export.phase`, `batches_done`, `batches_total`,
 >   `format`, `bitrate_kbps`, `options`; plus 7 new `_migrate` steps (`db/database.py` 95 → 119 lines).
 > * The **MP3 export path was reworked**: `services/export_batches.py` and
@@ -182,11 +183,11 @@ flowchart TB
 | Browser → FastAPI over HTTP and WebSocket, both at `http://localhost:8000` | `frontend/src/lib/api.ts:45` `export const API_BASE = 'http://localhost:8000'`; the WS URL is `${API_BASE.replace(/^http/, 'ws')}/ws/tts/${bookId}` at `api.ts:316` |
 | The frontend never talks to SQLite, to the filesystem, or to Kokoro | the backend is the only process with those handles; `frontend/package.json` has no DB or TTS dependency |
 | FastAPI → SQLite | `backend/db/database.py:12-27` builds one engine; every router gets sessions through `Depends(get_session)` (`database.py:93`) or opens `Session(_db.engine)` directly |
-| FastAPI → Kokoro, **in-process** | `backend/main.py:48-60` decides the device and delegates the build to `engine_manager.build_local`; `main.py:75-87` (`_apply_kokoro`) hands the resulting object to three routers |
+| FastAPI → Kokoro, **in-process** | `backend/services/engine_manager.py:399` (`_build`) maps the chosen engine onto an explicit `build_local(device)`; `main.py:62-71` (`_apply_kokoro`) hands the resulting object to three routers |
 | Uploaded books → `uploads/` on the backend's CWD | `backend/routers/documents.py:18` `UPLOAD_DIR = Path("uploads")`, written at `:39-40` |
 | Uploaded voices → `voices/` | `backend/routers/voices.py:8` `VOICES_DIR = Path("voices")`, written at `:111-112` |
 | Exported MP3s → `exports/` | `backend/routers/mp3.py:22` `EXPORTS_DIR = Path("exports")`, written at `:86-89` |
-| `uploads/` is also served statically to the browser | `backend/main.py:134` `app.mount("/uploads", StaticFiles(directory="uploads"))`; the client builds that URL in `api.ts:92-93` |
+| `uploads/` is also served statically to the browser | `backend/main.py:121` `app.mount("/uploads", StaticFiles(directory="uploads"))`; the client builds that URL in `api.ts:92-93` |
 | The client renders PDFs itself with PDF.js, fetching the raw file from `/uploads/` | `frontend/src/lib/components/PDFViewer.svelte:133` `pdfjsLib.getDocument(getPdfUrl(bookId))` |
 | Audio flows browser-ward as **binary WAV frames** on the same WebSocket as the JSON control messages | server sends bytes at `routers/tts.py:154`; client tags them via `activeSessionId` (`stores/audio.ts:302-308`) |
 
@@ -234,22 +235,21 @@ Two consequences, both **Verified**:
 
 | Lines | What happens |
 |---|---|
-| `main.py:31-45` | `_load_env_file()` — loads `backend/.env` via `python-dotenv` if installed, `override=False` so real environment variables win. Missing file or missing package is not an error. |
-| `main.py:48-60` | `_init_local_kokoro()` — decides the **device** for the startup path (`"cuda" if engine_manager._cuda_available() else "cpu"`) and delegates the build to `engine_manager.build_local(device)`. Returns `(pipeline, device, error)`; the error string is retained so the capability endpoint can explain a `null` pipeline. |
-| `main.py:63-72` | `_init_kokoro()` — a thin wrapper returning `engine_manager.manager.startup(os.environ.get("KOKORO_BACKEND"))`. The precedence is: the engine persisted in `UserSettings.tts_engine`, then `KOKORO_BACKEND` (`local` → GPU if present else CPU; `remote` → Modal; `auto` → Modal only when a probe answers), then local. Every failure path falls back. |
-| `main.py:75-87` | `_apply_kokoro(kokoro)` — pushes the live engine into all three routers, and is **registered** with the engine manager (`engine_manager.register_applier(_apply_kokoro)` at `:87`) so a runtime engine switch in Settings reaches the WebSocket, voice-preview and export paths through one function. |
-| `main.py:96-111` | `lifespan` — `create_engine_and_tables()`, `mkdir uploads`, `_apply_kokoro(_init_kokoro())`, then `await audio_cache.sweep_once(engine)` and a periodic eviction sweep stopped on shutdown. |
-| `main.py:114-122` | `app = FastAPI(lifespan=lifespan)` plus `CORSMiddleware` with `allow_origins=["*"]`, all methods and headers. |
-| `main.py:124-132` | Nine routers included. `documents`, `library`, `user`, `tts`, `voices`, `mp3`, `bookmarks`, `folders`, `system`. |
-| `main.py:134` | `app.mount("/uploads", StaticFiles(directory="uploads"))`. |
-| `main.py:137-148` | `GET /health` returning `status`, `backend`, `device`, `synthesis_available`. |
+| `main.py:28-45` | `_load_env_file()` — loads `backend/.env` via `python-dotenv` if installed, `override=False` so real environment variables win. Missing file or missing package is not an error. |
+| `main.py:48-59` | `_init_kokoro()` — a thin wrapper returning `engine_manager.manager.startup(os.environ.get("KOKORO_BACKEND"))`. The precedence is: the engine persisted in `UserSettings.tts_engine`, then `KOKORO_BACKEND` (`local` → GPU if present else CPU; `remote` → Modal; `auto` → Modal only when a probe answers), then local. Every failure path falls back. **`main` does not decide the device.** `EngineManager._build` (`services/engine_manager.py:399`) maps `cpu`/`gpu` onto the explicit `build_local(device)` call and `_env_candidates` (`:485`) prefers `gpu` when the injected torch probe reports CUDA, so the startup device and the Settings selector read the *same* probe (`_local_availability`, `:309`) and cannot disagree. A separate `main._init_local_kokoro()` used to duplicate that decision against the now-deleted module-level `_cuda_available()`; it had no callers and was removed. |
+| `main.py:62-71` | `_apply_kokoro(kokoro)` — pushes the live engine into all three routers, and is **registered** with the engine manager (`engine_manager.register_applier(_apply_kokoro)` at `:74`) so a runtime engine switch in Settings reaches the WebSocket, voice-preview and export paths through one function. |
+| `main.py:80-96` | `lifespan` — `create_engine_and_tables()`, `mkdir uploads`, `_apply_kokoro(_init_kokoro())`, then `await audio_cache.sweep_once(engine)` and a periodic eviction sweep stopped on shutdown. |
+| `main.py:101-109` | `app = FastAPI(lifespan=lifespan)` plus `CORSMiddleware` with `allow_origins=["*"]`, all methods and headers. |
+| `main.py:111-119` | Nine routers included. `documents`, `library`, `user`, `tts`, `voices`, `mp3`, `bookmarks`, `folders`, `system`. |
+| `main.py:121` | `app.mount("/uploads", StaticFiles(directory="uploads"))`. |
+| `main.py:123-135` | `GET /health` returning `status`, `backend`, `device`, `synthesis_available`. |
 
 **How the TTS engine is initialised and injected — Verified.** There is no dependency-injection
 framework. The design is a **module-level mutable global per router plus a `set_kokoro()` function**,
 with `services/engine_manager.py` as the single owner of *which* engine object is live:
 
 ```python
-# main.py:75-87
+# main.py:62-74
 def _apply_kokoro(kokoro: Any) -> None:
     tts_router.set_kokoro(kokoro)      # routers/tts.py:32
     voices_router.set_kokoro(kokoro)   # routers/voices.py:75
@@ -267,7 +267,7 @@ Two consequences worth naming:
 1. The pipeline is **not** discoverable through FastAPI's dependency graph. `main.py` is where the
    three wiring points live, and a new router that needs Kokoro must be added to `_apply_kokoro`
    there. That is the single easiest thing to forget when adding an endpoint.
-2. `EngineManager` (`services/engine_manager.py`, uncommitted at the snapshot) makes the choice
+2. `EngineManager` (`services/engine_manager.py`) makes the choice
    **runtime-swappable** for the first time: it builds the requested engine first and swaps it in only
    on success, so a failed switch leaves the previous engine running. Its docstring states the reason:
    before it, the only way to change engines was to edit `KOKORO_BACKEND` and restart. It owns no
@@ -276,7 +276,7 @@ Two consequences worth naming:
    is now recorded on `KokoroRuntime` and reported by `GET /api/system/capabilities`.
 
 **Consequence of the failure mode — Verified.** The local build path catches `Exception` broadly (in
-`services/engine_manager.py:151`, `build_local`, which `_init_local_kokoro` delegates to), logs the
+`services/engine_manager.py:133`, `build_local`, which `EngineManager._build` calls), logs the
 traceback, and returns `None`. `lifespan` does not raise. The application
 therefore starts and serves the whole HTTP surface with no TTS engine at all; only synthesis-dependent
 routes fail, and they fail late (`/voices/preview/...` returns 503 at `routers/voices.py:137-138`;
@@ -331,8 +331,8 @@ the writing session as `/mp3/formats` and the two `/api/system/engine` routes la
 | GET | `/api/system/capabilities` | Live device/torch/remote probe | `routers/system.py:24-26` → `services/kokoro_runtime.capabilities()`. |
 | GET | `/api/system/engine` | Which engine is live, which the user picked, what is available | `routers/system.py:34-37` → `engine_manager.manager.state()`. A second `GET` also reports switch progress, because switching is slow. |
 | POST | `/api/system/engine` | Switch the live synthesis engine without a restart | `routers/system.py:40-60`. Runs `manager.switch` on a worker thread (`:54-56`) so one click cannot freeze playback. 400 unknown id, 409 when the probe says the machine cannot run it, 503 when the build failed — and in every failure case the previously live engine keeps running. |
-| GET | `/health` | Liveness + active backend | `main.py:137-148`. |
-| GET | `/uploads/{filename}` | Static file serving | `main.py:134`. Unauthenticated, and the filename in `documents.py:39` is a content hash, so it is not guessable in practice. |
+| GET | `/health` | Liveness + active backend | `main.py:124-135`. |
+| GET | `/uploads/{filename}` | Static file serving | `main.py:121`. Unauthenticated, and the filename in `documents.py:39` is a content hash, so it is not guessable in practice. |
 
 **There are no `response_model` declarations anywhere in the backend** — **Verified**:
 `grep -rn "response_model" backend/main.py backend/routers/*.py backend/db/*.py backend/services/*.py`
@@ -370,10 +370,10 @@ own dicts inline, and `Book` is shaped three different ways across the API surfa
 | `services/tts_engine.py` | 569 | `TTSEngine`, `SynthJob`, `AudioCache` read/write, the single-worker synthesis pool, prefetch. **Details belong to [`TTS_ARCHITECTURE.md`](TTS_ARCHITECTURE.md).** |
 | `services/audio_cache.py` | 421 | Bounded FIFO eviction for `AudioCache`, plus a stats helper reporting retained audio against the cap and the database's own page counts. |
 | `services/kokoro_runtime.py` | 156 | `KokoroRuntime` startup state plus `probe_local_torch()` and `capabilities()`. |
-| `services/engine_manager.py` | 553 | **Uncommitted at the snapshot.** The single owner of *which* Kokoro object is live, and the only place that can change it at runtime. Exposes `EngineManager` with `startup()`, `switch()` and phase reporting; three engines (`cpu`/`gpu`/`modal`) all funnelling into the same `TTSEngine` contract via `build_local`/`build_remote`; `register_applier` for the router wiring; and a shared `PHASE_*` vocabulary (`idle`, `uploading`, `starting`, `warming_up`, `processing`, `encoding`, `ready`, `complete`, `error`) used by the export status endpoint and the reader WebSocket so the UI renders one indicator. |
-| `services/modal_remote.py` | 879 | A locally-importable client that is call-compatible with `KPipeline`. |
-| `services/export_batches.py` | 103 | **Uncommitted.** Plans the sentence batches a Modal export fans out over, grouped by chapter (the unit a reader recognises and the dialog can report progress in), splitting any chapter longer than `DEFAULT_MAX_SENTENCES = 150`. Its docstring records the constraint that forces batching: `KModel.forward_with_tokens` handles batch size 1 only, so the way to use more than one GPU is to send *more text per call* — one batch is one Modal container. |
-| `services/export_encoding.py` | 437 | **Uncommitted.** Turns one assembled float32 track into a downloadable file in four formats (`mp3` via LAME at an explicit bitrate, `m4b` AAC with chapter markers, `opus`, `wav`), with `FORMATS` as the single source of truth that `/mp3/formats` serves. Its docstring records why ffmpeg is involved for three of the four: soundfile cannot write AAC/M4B or attach chapters. |
+| `services/engine_manager.py` | 563 | The single owner of *which* Kokoro object is live, and the only place that can change it at runtime. Exposes `EngineManager` with `startup()`, `switch()`, `availability(engine_id)` and phase reporting; three engines (`cpu`/`gpu`/`modal`) all funnelling into the same `TTSEngine` contract via `build_local`/`build_remote`; `register_applier` for the router wiring; and a shared `PHASE_*` vocabulary (`idle`, `uploading`, `starting`, `warming_up`, `processing`, `encoding`, `ready`, `complete`, `error`) used by the export status endpoint and the reader WebSocket so the UI renders one indicator. Since `e464a71` availability is **per-engine** — `availability('cpu'\|'gpu')` reads only the torch probe and `availability('modal')` only the remote probe — and both probes are constructor-injectable (`torch_probe`, `remote_probe`), so asking whether the CPU can run never touches the network. |
+| `services/modal_remote.py` | 882 | A locally-importable client that is call-compatible with `KPipeline`. `ModalKokoroClient` also takes an injectable `batch_mapper` (`:569`), and `synthesize_batches` (`:669`) prefers an explicit `mapper`, then `self.batch_mapper`, then the SDK mapper. |
+| `services/export_batches.py` | 103 | Plans the sentence batches a Modal export fans out over, grouped by chapter (the unit a reader recognises and the dialog can report progress in), splitting any chapter longer than `DEFAULT_MAX_SENTENCES = 150`. Its docstring records the constraint that forces batching: `KModel.forward_with_tokens` handles batch size 1 only, so the way to use more than one GPU is to send *more text per call* — one batch is one Modal container. |
+| `services/export_encoding.py` | 445 | Turns one assembled float32 track into a downloadable file in four formats (`mp3` via LAME at an explicit bitrate, `m4b` AAC with chapter markers, `opus`, `wav`), with `FORMATS` as the single source of truth that `/mp3/formats` serves. Its docstring records why ffmpeg is involved for three of the four: soundfile cannot write AAC/M4B or attach chapters. |
 | `services/sentence_source.py` | 49 | Exposes `load_sentences(book_id)`, the one query both synthesis paths use. See §3.5. |
 
 `services/__init__.py` is empty, so `import services` pulls in nothing.
@@ -400,7 +400,7 @@ Two things and nothing else:
 `engine` is `None` at import time (`database.py:9`) and is assigned inside `create_engine_and_tables`.
 Anything that reads `_db.engine` before `create_engine_and_tables()` has run gets `None` and fails
 with a confusing `AttributeError`/`TypeError` rather than a clear "database not initialised" error.
-`Inferred`: the lifespan ordering at `main.py:95` is what makes this safe in the real app.
+`Inferred`: the lifespan ordering at `main.py:82` is what makes this safe in the real app.
 
 There is one engine and therefore one SQLite connection pool for the whole process. SQLite's default
 journal mode is used (no WAL is enabled anywhere — **Verified**, no `pragma journal_mode` in the
@@ -1309,23 +1309,36 @@ the snapshot) now owns the pytest configuration, replacing the `[tool.pytest.ini
 14 failed, 603 passed, 1 xfailed, 4 warnings in 96.17s (0:01:36)
 ```
 
+> **SUPERSEDED as of `e464a71` — every failure below is now green.** Re-measured on the same tree:
+> `cd backend && uv run pytest tests/` → **`687 passed, 1 xfailed`** in ~120 s, 0 failed. The two rows
+> that the `EngineManager` refactor caused are fixed in that commit: `test_system_capabilities.py`
+> was rewritten to drive `engine_manager.manager.startup()` instead of the deleted
+> `main._init_remote_kokoro`, and `test_engine_manager.py` now injects a fake `torch_probe` /
+> `remote_probe`, so the GPU-preference cases no longer depend on this sandbox's missing
+> `/dev/nvidia*`. The historical measurement is kept because it is the evidence for §10 R9.
+>
+> One flake remains and is known: `test_post_export_returns_before_the_export_finishes` is
+> timing-sensitive under load. It is being fixed separately and is not a `main.py` or
+> `engine_manager.py` defect.
+
 The failure set is **not stable between runs**. Three consecutive full runs produced 4, 5 and 14
 failures, and the identity of the failing tests changed each time. Everything I could pin down:
 
 | Failing test | Reproducible alone? | Cause |
 |---|---|---|
-| `test_system_capabilities.py::TestBackendSelection` (4 tests) | **Yes** — deterministic | `AttributeError: module 'main' has no attribute '_init_remote_kokoro'`. The test monkeypatches a `main`-level symbol that the `EngineManager` refactor **deleted**; remote-backend choice now lives in `services/engine_manager.py`. The test was not updated with the code. |
-| `test_engine_manager.py` (10 tests, incl. `TestBuildLocal`, `TestSwitch`, `TestStartup`) | **No** — `41 passed` when the file runs alone | Cross-test pollution / ordering. Passes in isolation, fails in the full run. |
+| `test_system_capabilities.py::TestBackendSelection` (5 tests) | **Yes** — deterministic | `AttributeError: module 'main' has no attribute '_init_remote_kokoro'`. The test monkeypatched a `main`-level symbol that the `EngineManager` refactor **deleted**; remote-backend choice now lives in `services/engine_manager.py`. **Fixed in `e464a71`** — the class is now `test_init_kokoro_*` and asserts the wiring into `manager.startup()`; the 5 tests in it pass. |
+| `test_engine_manager.py` (10 tests, incl. `TestOptions`, `TestSwitch`, `TestStartup`) | **No** — `41 passed` when the file runs alone | Cross-test pollution / ordering. Passes in isolation, fails in the full run. **Fixed in `e464a71`**: the file now injects both probes (`torch_probe`/`remote_probe`) instead of reading the real torch, so its 41 tests pass in the full run too. |
 | `test_mp3_export_nonblocking.py::TestExportSpeedValidation::test_out_of_band_speeds_are_clamped_not_rejected` | No — appeared in some runs only | Same pattern; flaky under full-suite ordering. |
 | `test_ws_mimo.py` (4), `test_websocket_integration.py`, `test_word_timestamps.py` | No — appeared in one earlier run only | Same pattern. |
 
-**So the honest statement is: the backend gate is red, and 4 of the 14 failures are a real,
-deterministic API-drift bug in the newest subsystem while the other 10 are order-dependence that
-disappears when their file runs alone.** The brief I was given said "pytest is effectively green:
-559 passed, 1 xfailed, 0 failed". That was true of an earlier tree; it is not true of this one.
+**So the honest statement at the snapshot was: the backend gate is red, and 4 of the 14 failures are
+a real, deterministic API-drift bug in the newest subsystem while the other 10 are order-dependence
+that disappears when their file runs alone.** The brief I was given said "pytest is effectively green:
+559 passed, 1 xfailed, 0 failed". That was true of an earlier tree; it was not true of that one, and it
+is true again now (687 passed, 1 xfailed).
 
 **Isolation is now genuinely fixed, though — Measured, and this reverses my earlier finding.**
-`backend/tests/conftest.py` grew from 12 to **610 lines** and now installs an **autouse** guard
+`backend/tests/conftest.py` grew from 12 to **728 lines** and now installs **autouse** guards
 (`isolate_from_real_resources`) that, for *every* test:
 
 * replaces `db.database.engine` with a throwaway in-memory engine and repoints
@@ -1432,7 +1445,7 @@ Support files and other gates, all **Verified**:
   `[tool.pytest.ini_options]` block in `backend/pyproject.toml` — that block now carries the comment
   "Test/coverage configuration is owned by another change in flight; do not edit this block here
   (`backend/pytest.ini` is its replacement)". The two would conflict if both were present.
-* `backend/tests/conftest.py` (610 lines) is the shared fixture and isolation layer. Read its docstring
+* `backend/tests/conftest.py` (728 lines) is the shared fixture and isolation layer. Read its docstring
   before writing a test: it explains the three ways the suite used to reach real data, and it supplies
   the fakes (`fake_kokoro`, `FakeG2P`, `mock_engines`, `seed_book`, `client`, `ws_read`) that make a
   hermetic test cheap to write.
@@ -1791,10 +1804,10 @@ evidence and the current state for each.
   `AUDIO_CACHE_MAX_MB`), `DEFAULT_SWEEP_INTERVAL_SECONDS = 900.0` (`:97`,
   `AUDIO_CACHE_SWEEP_INTERVAL_SECONDS`), `evict_to_cap(engine, max_bytes)` (`:221`) deleting
   `ORDER BY created_at ASC, text_hash ASC` (`:115`), and `sweep_once` / `start_periodic_sweep` /
-  `stop_periodic_sweep` (`:326`, `:394`, `:413`). `main.py:104-105` runs one sweep at startup and a
+  `stop_periodic_sweep` (`:326`, `:394`, `:413`). `main.py:91-92` runs one sweep at startup and a
   periodic task for the life of the process — deliberately in the lifespan rather than the write path,
   so *every* writer is covered instead of only the flows someone remembered, which the comment at
-  `main.py:97-103` states. `database.py:46-50` adds an index on `audiocache(created_at)` so the sweep's
+  `main.py:85-90` states. `database.py:46-50` adds an index on `audiocache(created_at)` so the sweep's
   `ORDER BY` is not a full scan of 800 MB.
 * **Residual.** The default 4 GB cap is **above** the user's current 802 MB, so on this machine
   nothing will be evicted yet. `4 GB` is also a large default for a local app on a laptop. The
@@ -1882,7 +1895,7 @@ This was a cluster of related gaps rather than one bug. Current state of each:
 
 | Gap | State |
 |---|---|
-| No `AudioCache` cap or eviction | **Fixed** — `services/audio_cache.py`, wired at `main.py:104-105` (R1) |
+| No `AudioCache` cap or eviction | **Fixed** — `services/audio_cache.py`, wired at `main.py:91-92` (R1) |
 | No index for the eviction `ORDER BY` | **Fixed** — `ix_audiocache_created_at`, `database.py:46-50` |
 | No `VACUUM` after deleting hundreds of MB | **Partly.** The numbers now exist internally — `services/audio_cache.py:195-220` computes `db_bytes` and `freelist_bytes` from SQLite's own page counters for its stats payload and log line. But nothing vacuums, and no endpoint exposes the numbers to a user. Deleted pages are reused, so the file stops growing but never shrinks; "802 MB" therefore overstates the live data and nothing tells the user by how much. |
 | Uploaded source files never deleted | **Open.** `DELETE /library/{book_id}` (`library.py:93-108`) removes the row and its children but leaves `uploads/{book_id}.{ext}` on disk. Uploads currently total 4.3 MB, so impact is low today; at scale it grows with every book ever uploaded and deleted. |
@@ -1954,10 +1967,19 @@ catalogue.
 This is the risk that most undermines everything else in this document, because it is the reason a
 reader cannot simply trust a green gate.
 
-**Measured.** Three consecutive full pytest runs on the same tree produced **4, then 5, then 14
-failures**, with the failing test identities changing each time. Ten of the fourteen
-(`test_engine_manager.py`) **pass when their file runs alone** (`41 passed`) and fail in the full run.
-The frontend unit gate is separately red for a stale assertion (§8.3).
+**Measured at the snapshot.** Three consecutive full pytest runs on the same tree produced **4, then 5,
+then 14 failures**, with the failing test identities changing each time. Ten of the fourteen
+(`test_engine_manager.py`) **passed when their file ran alone** (`41 passed`) and failed in the full
+run. The frontend unit gate was separately red for a stale assertion (§8.3).
+
+> **Re-measured as of `e464a71`: the backend suite is green — `687 passed, 1 xfailed`, 0 failed, in
+> ~120 s.** The ten `test_engine_manager.py` failures were not ordering after all: the file read the
+> *real* `torch.cuda.is_available()` and this sandbox hides `/dev/nvidia*`, so its GPU-preference cases
+> failed for a reason that had nothing to do with ordering. Injecting a fake `torch_probe` fixed them
+> (see §8.4 and §10 R10). The hermeticity risk this section raises is therefore *not* currently
+> observable, but the mitigation it asks for — derive expectations from the source of truth — is still
+> the right rule, and the `test_post_export_returns_before_the_export_finishes` timing flake is a live,
+> unrelated example.
 
 **Verified — what is already fixed.** `backend/tests/conftest.py` now carries an `autouse` guard
 (`isolate_from_real_resources`) that redirects the engine, `_DEFAULT_DB`, `uploads/`, `voices/`,
@@ -1978,7 +2000,7 @@ suite in place without touching `backend/ebook_reader.db`.
   **Cited and unverified**, and note that the same class of breakage did occur in a different form.
 * **`GPU`-dependent tests are unverifiable here.** The sandbox hides `/dev/nvidia*`, so
   `torch.cuda.is_available()` is `False` and any test asserting GPU selection can only be verified on
-  the host. The ten `test_engine_manager.py` failures include `TestBuildLocal` and `TestStartup` cases
+  the host. The ten `test_engine_manager.py` failures include `TestOptions` and `TestStartup` cases
   about GPU preference; I could not distinguish "these fail because of environment" from "these fail
   because of ordering".
 
@@ -1986,14 +2008,23 @@ suite in place without touching `backend/ebook_reader.db`.
 **Concurrent fix:** partly — another agent owns the hermeticity work, and it landed the autouse guard
 during this session.
 
-### R10 · Refactors are outrunning their tests — **Severity: Medium (open)**
+### R10 · Refactors are outrunning their tests — **Severity: Medium, RESOLVED for the backend in `e464a71`**
 
-**Measured.** The `EngineManager` refactor moved remote-backend selection out of `main.py`. Four tests
-in `test_system_capabilities.py` still monkeypatch `main._init_remote_kokoro`, a symbol the refactor
-**deleted**, and therefore fail deterministically with
+> **Status changed.** The backend half of this risk is closed: both files below were updated in
+> `e464a71` and the full suite is green (`687 passed, 1 xfailed`). The *pattern* it names is still
+> worth keeping, and the frontend half is unchanged.
+
+**Measured at the snapshot.** The `EngineManager` refactor moved remote-backend selection out of
+`main.py`. Four tests in `test_system_capabilities.py` still monkeypatched `main._init_remote_kokoro`,
+a symbol the refactor **deleted**, and therefore failed deterministically with
 `AttributeError: module 'main' has no attribute '_init_remote_kokoro'`. The engine-selection tests
-(`test_engine_manager.py`, `test_system_capabilities.py`) are the newest files in the suite and are
-where 14 of 14 current failures live.
+(`test_engine_manager.py`, `test_system_capabilities.py`) were the newest files in the suite and were
+where 14 of 14 then-current failures lived.
+
+**Fixed in `e464a71`.** `test_system_capabilities.py` now drives `engine_manager.manager.startup()`
+through `_REAL_INIT_KOKORO` and names no deleted symbol; `test_engine_manager.py` injects `torch_probe`
+and `remote_probe` instead of delegating to the real torch. Worth noting for the next refactor of this
+kind: the *engine* tests were fine — it was the test that restated a `main`-level symbol that broke.
 
 The frontend shows the same pattern in a different form: `stores/settings.ts` gained
 `bionicMinWordLength` and `bionicSkipCommonWords`, and `settings.test.ts` — which keeps its own copy of
@@ -2022,7 +2053,7 @@ Stated as required, so that a reader knows these were tested rather than assumed
   the fixes by reading the code and, for R2, by the regression tests. **For R3 I did not re-measure**, so
   I claim only that the blocking call has moved off the loop thread.
 * **`AudioCache` unbounded growth (R1)** is no longer true as stated — the cap and sweep exist and are
-  wired into the lifespan. I verified that by reading `main.py:104-105` and `services/audio_cache.py`,
+  wired into the lifespan. I verified that by reading `main.py:91-92` and `services/audio_cache.py`,
   not by observing an eviction on a live process.
 * **The earlier 620 s hang** the brief mentions is real but intermittent, not deterministic: I
   reproduced it twice on one snapshot (killed at 620 s and 520 s, the first stalling after 201 tests)
@@ -2038,18 +2069,25 @@ Stated as required, so that a reader knows these were tested rather than assumed
   could reach it. What I *did* reproduce is non-determinism of comparable severity — 4, 5 and 14
   failures across three runs of the same tree (§8.4, §10 R9). So: the *symptom class* is confirmed, the
   *stated cause* is not, and I report it as an open risk rather than a solved one.
-* **The ten `test_engine_manager.py` failures are also GPU-adjacent and therefore partly unverifiable.**
-  `TestBuildLocal` and `TestStartup` include cases asserting GPU preference, and this sandbox reports
+* **The ten `test_engine_manager.py` failures were GPU-adjacent after all — and that turned out to be
+  the whole cause, not a caveat on it.** `TestOptions` and `TestStartup` included cases asserting GPU
+  preference, and this sandbox reports
   `torch.cuda.is_available() == False` because `/dev/nvidia*` is absent. I could not separate "fails
   because the environment has no GPU" from "fails because of cross-test ordering" for those cases
-  specifically; the file as a whole passes in isolation, which points at ordering, but that is
-  **Inferred** for the GPU cases rather than measured.
+  specifically; the file as a whole passes in isolation, which pointed at ordering. **That inference was
+  wrong, and `e464a71` settled it:** the file was reading the real torch, so those cases failed
+  *because the environment has no GPU* — the same reason in isolation and in the full run, once the
+  probes were injected. No cross-test ordering was involved.
 * **GPU/CUDA conclusions are sandbox-limited.** This sandbox exposes no `/dev/nvidia*` and no `/dev/dri`,
   `torch.cuda.is_available()` reads `False` here, and `nvidia-smi` cannot reach the driver. The host has
   an **NVIDIA T600 Laptop GPU (4 GB, Turing, cc 7.5)** with driver 580.178.04 and the `nvidia`,
   `nvidia_uvm` and `nvidia_drm` modules loaded. **Nothing in this document claims the backend chose CPU
-  on the host** — `device = "cuda" if engine_manager._cuda_available() else "cpu"` (`main.py:56`)
-  resolves to `"cpu"` *inside this sandbox only*, and `GET /api/system/capabilities` is the endpoint
+  on the host** — the engine manager picks the device from the torch probe it shares with the
+  Settings selector (`services/engine_manager.py:485` `_env_candidates` → `:309`
+  `_local_availability` → `kokoro_runtime.probe_local_torch`); the former
+  `device = "cuda" if engine_manager._cuda_available() else "cpu"` in `main.py` is gone, along with
+  `_cuda_available` itself. That probe resolves to `"cpu"` *inside this sandbox only*, and
+  `GET /api/system/capabilities` is the endpoint
   that reports what actually happened (`services/kokoro_runtime.py:probe_local_torch`). Any GPU-path
   statement elsewhere is labelled as sandbox-limited. `implementation-handoff.md` §9.3 records the same
   restriction, and `docs/research/kokoro-82m-t600-4gb-research.md` plus
@@ -2069,13 +2107,13 @@ patterns (a shared serializer, a Pydantic request body, a `session.get` existenc
 upsert).
 
 1. **If an existing router owns the resource**, add the handler there and register nothing: routers are
-   included once in `main.py:124-132` and FastAPI picks up new `@router.<method>` declarations
+   included once in `main.py:111-119` and FastAPI picks up new `@router.<method>` declarations
    automatically.
 2. **If it is a new resource**, create `backend/routers/<name>.py` modelled on `routers/folders.py`
    (newest, cleanest, and the only one with a full create/rename/delete set), then add to `main.py`:
    ```python
    from routers import <name> as <name>_router    # main.py:11-19 area
-   app.include_router(<name>_router.router)       # main.py:124-132
+   app.include_router(<name>_router.router)       # main.py:111-119
    ```
 3. **Declare a request model** with Pydantic, as `library.py:13-20` (`ProgressUpdate`,
    `FolderAssignment`) and `folders.py:24-29` do. Do not take a bare `dict` — `documents.py:105` does,
@@ -2086,7 +2124,7 @@ upsert).
    `services/tts_engine.py:12-13` are the pattern.
 5. **Return a `dict`** (that is the house style — there are no `response_model`s anywhere, §3.2), and
    add the matching TypeScript function to `frontend/src/lib/api.ts`.
-6. **If it needs Kokoro**, you must extend `set_kokoro()` in `main.py:75-87` for your router. That
+6. **If it needs Kokoro**, extend `_apply_kokoro()` (`main.py:62-71`) to call your router's new `set_kokoro()` — that is the function registered with the engine manager at `main.py:74`. That
    wiring is not automatic and is the single easiest thing to forget.
 7. **Always add a test.** `backend/tests/test_folders.py` is the best model: it redirects
    `db.database.engine` to a `StaticPool` in-memory SQLite via monkeypatch, builds a `FastAPI()` with
