@@ -35,6 +35,15 @@ SAMPLE_RATE = 24000
 # rate reported back can never disagree.
 SPEED_PRECISION = 2
 
+# How much audio prefetch tries to keep warm ahead of the playhead, in seconds.
+# The bound used to be a sentence COUNT (50), which says nothing about how much
+# audio the user actually has buffered: at 1.0x on this corpus 50 sentences is
+# roughly 185 s of audio and takes about 478 s to generate on CPU (RTF 1.77), so
+# a burst could never finish before being cancelled and merely monopolised the
+# synthesis worker. A time budget is the unit that matters, and it adapts to
+# speed for free, since a higher speed renders a shorter sentence.
+PREFETCH_TARGET_AUDIO_SECONDS = 60.0
+
 _g2p = None
 
 
@@ -364,8 +373,16 @@ class TTSEngine:
         voice: str,
         speed: float,
         cancel: asyncio.Event,
+        target_audio_seconds: float = PREFETCH_TARGET_AUDIO_SECONDS,
     ) -> None:
-        """Pre-synthesize up to `count` sentences into AudioCache starting at `from_index`.
+        """Warm the cache ahead of `from_index` for up to `count` sentences.
+
+        Two bounds apply. `target_audio_seconds` is the one that matters: it
+        bounds the batch by how much *listening time* is buffered rather than by
+        how many sentences were touched, so a burst stops as soon as the user has
+        enough audio ahead of them and the worker is released. `count` remains as
+        a hard safety cap. Audio that is already cached counts towards the budget,
+        so a warm run returns almost immediately.
 
         Prefetch shares the one synthesis worker with live playback, so it stands
         down whenever a sentence the user is waiting for needs that worker.
@@ -375,15 +392,18 @@ class TTSEngine:
         buys nothing while costing latency. It therefore warms ahead when the user
         is not waiting, and yields when they are.
         """
-        if self.kokoro is None:
+        if self.kokoro is None or target_audio_seconds <= 0:
             return
 
         loop = asyncio.get_running_loop()
         synthesized = 0
+        buffered_seconds = 0.0
         for idx in sorted(sentences.keys()):
             if idx < from_index:
                 continue
             if cancel.is_set() or synthesized >= count:
+                return
+            if buffered_seconds >= target_audio_seconds:
                 return
             s = sentences[idx]
             if s["filtered"]:
@@ -399,6 +419,7 @@ class TTSEngine:
             with Session(_db.engine) as session:
                 already = session.get(AudioCache, cache_key)
             if already is not None:
+                buffered_seconds += already.duration_ms / 1000.0
                 synthesized += 1
                 await asyncio.sleep(0)
                 continue
@@ -422,12 +443,13 @@ class TTSEngine:
                         result, audio_parts, word_timestamps, audio_offset,
                     )
                 if audio_parts:
-                    self._write_cache_entry(
+                    _, duration_ms = self._write_cache_entry(
                         audio_parts,
                         word_timestamps,
                         self._cache_key(s["text"], voice, effective_speed),
                         voice,
                     )
+                    buffered_seconds += duration_ms / 1000.0
             except Exception:
                 logger.warning("Prefetch failed for sentence %s", idx, exc_info=True)
             synthesized += 1

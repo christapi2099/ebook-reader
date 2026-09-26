@@ -13,6 +13,7 @@ under e.g. the 1.5x key, so every later request at 1.5x replayed the wrong rate.
 import asyncio
 import contextlib
 import hashlib
+import itertools
 import time
 
 import numpy as np
@@ -347,3 +348,133 @@ class TestSynthesisDoesNotBlockTheEventLoop:
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
                 engine_module._playback_wait_end()
+
+
+class TestPrefetchAudioBudget:
+    """Prefetch is bounded by listening time, not by how many sentences it touched.
+
+    The old bound was `count=50` sentences, which is silent about how much audio
+    the user actually has buffered — 50 sentences is roughly 185 s of audio on
+    this corpus and needs about 478 s to generate on CPU, so a burst could never
+    finish before cancellation and just held the synthesis worker.
+    """
+
+    @staticmethod
+    def _kokoro(samples_per_sentence: int = 2400, speed_scaled: bool = False):
+        """A Kokoro stub that records its calls. 2400 samples == 0.1 s of audio."""
+        calls: list[str] = []
+
+        def kokoro(text, voice=None, speed=1.0):
+            calls.append(text)
+            count = samples_per_sentence
+            if speed_scaled:
+                count = max(1, int(samples_per_sentence / speed))
+            return [(None, None, np.full(count, 0.5, dtype=np.float32))]
+
+        return kokoro, calls
+
+    _seq = itertools.count()
+
+    @classmethod
+    def _sentences(cls, n: int = 20) -> dict:
+        """Sentences whose text is unique per call.
+
+        The in-memory engine is session-scoped, so a text reused across two tests
+        is a cache hit in the second one and the synthesis count silently comes
+        out short. Unique text per call keeps each test's cache isolated.
+        """
+        tag = next(cls._seq)
+        return {i: {"text": f"Budget {tag} sentence {i}.", "filtered": False} for i in range(n)}
+
+    @pytest.mark.asyncio
+    async def test_stops_once_the_audio_budget_is_buffered(self, test_engine):
+        kokoro, calls = self._kokoro(samples_per_sentence=2400)  # 0.1 s each
+        engine = TTSEngine(kokoro)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("services.tts_engine._db.engine", test_engine)
+            await engine.prefetch(
+                self._sentences(), from_index=0, count=20, voice="af_heart", speed=1.0,
+                cancel=asyncio.Event(), target_audio_seconds=0.25,
+            )
+
+        assert len(calls) == 3, (
+            f"synthesised {len(calls)} sentences for a 0.25s budget of 0.1s each; "
+            "the batch should stop as soon as the budget is met"
+        )
+
+    @pytest.mark.asyncio
+    async def test_sentence_count_remains_a_hard_cap(self, test_engine):
+        """A generous budget must not remove the safety cap."""
+        kokoro, calls = self._kokoro(samples_per_sentence=240)  # 0.01 s each
+        engine = TTSEngine(kokoro)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("services.tts_engine._db.engine", test_engine)
+            await engine.prefetch(
+                self._sentences(), from_index=0, count=5, voice="af_heart", speed=1.0,
+                cancel=asyncio.Event(), target_audio_seconds=600.0,
+            )
+
+        assert len(calls) == 5
+
+    @pytest.mark.asyncio
+    async def test_a_faster_speed_covers_more_sentences_for_the_same_budget(self, test_engine):
+        """A time budget adapts to speed; a sentence count cannot."""
+        counts: dict[float, int] = {}
+        sentences = self._sentences()
+        for speed in (1.0, 2.0):
+            kokoro, calls = self._kokoro(samples_per_sentence=2400, speed_scaled=True)
+            engine = TTSEngine(kokoro)
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr("services.tts_engine._db.engine", test_engine)
+                await engine.prefetch(
+                    sentences, from_index=0, count=20, voice="af_heart",
+                    speed=speed, cancel=asyncio.Event(), target_audio_seconds=0.25,
+                )
+            counts[speed] = len(calls)
+
+        assert counts[2.0] > counts[1.0], (
+            f"the same audio budget should reach further at 2x, got {counts}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_cached_audio_counts_towards_the_budget_without_resynthesising(
+        self, test_engine
+    ):
+        sentences = self._sentences(4)
+        seed_kokoro, _ = self._kokoro(samples_per_sentence=2400)  # 0.1 s each
+        seeder = TTSEngine(seed_kokoro)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("services.tts_engine._db.engine", test_engine)
+            # Warm all four (0.4 s of audio) with a budget large enough to do it.
+            await seeder.prefetch(
+                sentences, from_index=0, count=4, voice="af_heart", speed=1.0,
+                cancel=asyncio.Event(), target_audio_seconds=600.0,
+            )
+
+            kokoro, calls = self._kokoro(samples_per_sentence=2400)
+            engine = TTSEngine(kokoro)
+            await engine.prefetch(
+                sentences, from_index=0, count=4, voice="af_heart", speed=1.0,
+                cancel=asyncio.Event(), target_audio_seconds=0.25,
+            )
+
+        assert calls == [], (
+            "already-buffered audio must satisfy the budget rather than be regenerated"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_zero_budget_disables_prefetch(self, test_engine):
+        kokoro, calls = self._kokoro()
+        engine = TTSEngine(kokoro)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("services.tts_engine._db.engine", test_engine)
+            await engine.prefetch(
+                self._sentences(), from_index=0, count=20, voice="af_heart", speed=1.0,
+                cancel=asyncio.Event(), target_audio_seconds=0,
+            )
+
+        assert calls == []
