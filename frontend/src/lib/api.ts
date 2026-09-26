@@ -206,11 +206,33 @@ export async function deleteBook(bookId: string): Promise<void> {
   await fetchApi<void>(`/library/${bookId}`, { method: 'DELETE' })
 }
 
-export async function exportMP3(bookId: string, voice: string, speed: number): Promise<{ export_id: number }> {
+export async function exportMP3(
+  bookId: string,
+  voice: string,
+  speed: number,
+  format?: string,
+): Promise<{ export_id: number }> {
   return fetchApi<{ export_id: number }>('/mp3/export', {
     method: 'POST',
-    body: JSON.stringify({ book_id: bookId, voice, speed }),
+    body: JSON.stringify({ book_id: bookId, voice, speed, ...(format ? { format } : {}) }),
   })
+}
+
+export interface ExportFormat {
+  id: string
+  label: string
+  extension: string
+  content_type: string
+  bitrates: number[]
+  default_bitrate: number
+  supports_metadata: boolean
+  available: boolean
+  reason: string | null
+}
+
+/** Served by the backend's own encoder table, so the dialog only ever offers a format the server can actually produce. */
+export async function getExportFormats(): Promise<ExportFormat[]> {
+  return fetchApi<ExportFormat[]>('/mp3/formats')
 }
 
 export interface ExportStatus {
@@ -231,6 +253,8 @@ export interface ExportItem {
   file_size: number | null
   error_message: string | null
   created_at: string
+  format: string
+  phase: string | null
 }
 
 export async function getExports(): Promise<ExportItem[]> {

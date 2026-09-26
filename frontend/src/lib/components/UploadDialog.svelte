@@ -1,5 +1,6 @@
 <script lang="ts">
   import { uploadDocument } from '$lib/api'
+  import { toDetailMessage } from '$lib/utils/errors'
   import Dialog from '$lib/ui/Dialog.svelte'
   import Button from '$lib/ui/Button.svelte'
 
@@ -9,14 +10,41 @@
     onUploaded: (bookId: string, title: string) => void
   } = $props()
 
+  const ACCEPTED_EXTENSIONS = ['pdf', 'epub']
+
   let file = $state<File | null>(null)
   let loading = $state(false)
   let errorMsg = $state('')
 
+  /**
+   * The one thing that can be checked before a round trip: the extension the
+   * backend itself accepts (`routers/documents.py` rejects anything but pdf/epub
+   * with a plain 400). Everything past that — DRM, missing text layers, size —
+   * has no real check on either side, so it is not simulated here; the actual
+   * failure surfaces from the upload response instead.
+   */
+  function validateFile(candidate: File): string | null {
+    const ext = candidate.name.split('.').pop()?.toLowerCase()
+    if (!ext || !ACCEPTED_EXTENSIONS.includes(ext)) {
+      return 'Unsupported file type. Use PDF or EPUB.'
+    }
+    return null
+  }
+
   function handleFileChange(e: Event) {
     const input = e.target as HTMLInputElement
-    file = input.files?.[0] ?? null
+    const picked = input.files?.[0] ?? null
     errorMsg = ''
+    if (picked) {
+      const validationError = validateFile(picked)
+      if (validationError) {
+        file = null
+        errorMsg = validationError
+        input.value = ''
+        return
+      }
+    }
+    file = picked
   }
 
   async function handleUpload() {
@@ -28,8 +56,8 @@
       onUploaded(data.book_id, file.name)
       onClose()
       file = null
-    } catch (err: any) {
-      errorMsg = err?.message ?? 'Upload failed'
+    } catch (err) {
+      errorMsg = toDetailMessage(err)
     } finally {
       loading = false
     }
@@ -59,6 +87,9 @@
         <span class="text-sm text-fg-muted">
           {file ? file.name : 'Click or drag PDF / EPUB here'}
         </span>
+        {#if file}
+          <span class="mt-1 text-xs text-fg-subtle">{(file.size / (1024 * 1024)).toFixed(1)} MB · {file.name.split('.').pop()?.toUpperCase()}</span>
+        {/if}
         <input
           type="file"
           accept=".pdf,.epub"
@@ -67,8 +98,29 @@
         />
       </label>
 
+      {#if loading}
+        <div class="mt-3 flex items-center gap-2 text-sm text-fg-muted" role="status">
+          <svg class="h-4 w-4 flex-shrink-0 animate-spin text-accent" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"></path>
+          </svg>
+          Uploading and extracting text — this can take a moment for a long book.
+        </div>
+      {/if}
+
       {#if errorMsg}
-        <p class="mt-3 text-sm text-danger">{errorMsg}</p>
+        <div class="mt-3 flex items-start justify-between gap-3 rounded-lg border border-danger bg-danger-soft p-3" role="alert">
+          <p class="text-sm text-danger">{errorMsg}</p>
+          {#if file}
+            <button
+              type="button"
+              class="min-h-11 flex-shrink-0 text-sm font-medium text-danger underline underline-offset-2"
+              onclick={handleUpload}
+            >
+              Retry
+            </button>
+          {/if}
+        </div>
       {/if}
 
       <Button class="mt-4 w-full" variant="primary" disabled={!file || loading} onclick={handleUpload}>

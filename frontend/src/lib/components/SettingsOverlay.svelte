@@ -22,14 +22,11 @@
   let settings: SettingsState = $state({ ...get(settingsStore) })
 
   const colorSwatches = [
-    { value: '#FCD34D', label: 'Honey' },
-    { value: '#C4B5FD', label: 'Lavender' },
-    { value: '#6EE7B7', label: 'Mint' },
-    { value: '#F9A8D4', label: 'Rose' },
-    { value: '#7DD3FC', label: 'Sky' },
-    { value: '#FCA5A5', label: 'Coral' },
-    { value: '#FDBA74', label: 'Peach' },
-    { value: '#67E8F9', label: 'Aqua' },
+    { value: '#F5CB5C', label: 'Amber' },
+    { value: '#A8D672', label: 'Leaf' },
+    { value: '#7EC8E3', label: 'Sky' },
+    { value: '#F0A6CA', label: 'Rose' },
+    { value: '#B8A6F0', label: 'Violet' },
   ]
 
   function setColor(color: string) {
@@ -180,7 +177,7 @@
 </script>
 
 <Dialog titleId="settings-dialog-title" {onClose} closeOnBackdrop class="p-4">
-  <div class="max-h-[calc(100vh-2rem)] w-full max-w-sm overflow-y-auto rounded-xl border border-border bg-surface p-6 shadow-3">
+  <div class="max-h-[calc(100vh-2rem)] w-full max-w-md overflow-y-auto rounded-xl border border-border bg-surface p-6 shadow-3">
     <div class="mb-4 flex items-center justify-between">
       <h2 id="settings-dialog-title" class="text-lg font-bold text-fg">Settings</h2>
       <button
@@ -194,13 +191,17 @@
       </button>
     </div>
 
-    <div class="space-y-5">
+    <div class="space-y-6">
+      <section aria-labelledby="reading-section-title" class="space-y-4">
+        <h3 id="reading-section-title" class="text-xs font-semibold uppercase tracking-wide text-fg-subtle">
+          Reading
+        </h3>
       <div>
         <span id="color-label" class="mb-2 block text-sm font-medium text-fg">Highlight Color</span>
         <div class="flex flex-wrap gap-2" role="radiogroup" aria-labelledby="color-label">
           {#each colorSwatches as swatch}
             <button
-              class="h-8 w-8 rounded-full border-2 transition-all {settings.highlightColor === swatch.value ? 'border-fg scale-110' : 'border-transparent hover:scale-105'}"
+              class="h-8 w-8 rounded-full border-2 border-transparent transition-shadow {settings.highlightColor === swatch.value ? 'shadow-[0_0_0_3px_var(--surface),0_0_0_5px_var(--fg)]' : 'hover:shadow-1'}"
               style="background-color: {swatch.value}"
               title={swatch.label}
               aria-label={swatch.label}
@@ -233,6 +234,12 @@
         checked={settings.hotkeysEnabled}
         onToggle={toggleHotkeys}
       />
+      </section>
+
+      <section aria-labelledby="bionic-section-title" class="space-y-4">
+        <h3 id="bionic-section-title" class="text-xs font-semibold uppercase tracking-wide text-fg-subtle">
+          Bionic Reading
+        </h3>
       <Switch
         id="bionic-toggle"
         label="Bionic Reading"
@@ -306,8 +313,13 @@
           />
         </div>
       {/if}
+      </section>
 
-      <section class="rounded-lg border border-border p-3" aria-labelledby="engine-section-title">
+      <section aria-labelledby="processing-section-title" class="space-y-3">
+        <h3 id="processing-section-title" class="text-xs font-semibold uppercase tracking-wide text-fg-subtle">
+          Processing
+        </h3>
+        <div class="rounded-lg border border-border p-3">
         <h3 id="engine-section-title" class="text-sm font-medium text-fg">Processing Engine</h3>
         <p class="mb-2 text-xs text-fg-muted">
           Which synthesizer reads your books. Switching takes a while — a model load,
@@ -401,17 +413,18 @@
             <p class="mt-2 text-xs text-fg-muted">{capabilities.remote.error}</p>
           {/if}
         {/if}
+        </div>
       </section>
 
-      <div class="space-y-1 rounded-lg bg-surface-sunken p-3 text-xs text-fg-muted">
-        <p class="mb-1 font-medium text-fg">Hotkey Reference</p>
+      <section aria-labelledby="shortcuts-section-title" class="space-y-1 rounded-lg bg-surface-sunken p-3 text-xs text-fg-muted">
+        <h3 id="shortcuts-section-title" class="mb-1 font-medium text-fg">Hotkey Reference</h3>
         <p><kbd class="rounded bg-surface px-1 text-xs">Space</kbd> Play / Pause</p>
         <p><kbd class="rounded bg-surface px-1 text-xs">←</kbd> <kbd class="rounded bg-surface px-1 text-xs">→</kbd> Previous / Next sentence</p>
         <p><kbd class="rounded bg-surface px-1 text-xs">↑</kbd> <kbd class="rounded bg-surface px-1 text-xs">↓</kbd> Speed up / Slow down</p>
         <p><kbd class="rounded bg-surface px-1 text-xs">B</kbd> Bookmark current position</p>
         <p><kbd class="rounded bg-surface px-1 text-xs">F</kbd> Open search</p>
         <p><kbd class="rounded bg-surface px-1 text-xs">Esc</kbd> Close overlays</p>
-      </div>
+      </section>
     </div>
   </div>
 </Dialog>

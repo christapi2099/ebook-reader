@@ -42,6 +42,13 @@
 
   const progress = $derived(deriveReadingProgress(sentenceIndex, totalSentences))
 
+  // Cover art: the mockup's own rules reserve the vivid gradient palettes for
+  // books that actually have art (styles.css `.cover-a`..`.cover-f`). Every
+  // book here has none, and the mockup's own answer for that case is
+  // `.book-cover.art-missing` — a dashed border on a muted surface, not a
+  // gradient (handoff §3.5 also rules out shipping the gradients as if they
+  // were real jackets). That's what this renders.
+
   /**
    * What the number under the title counts.
    *
@@ -90,7 +97,7 @@
 </script>
 
 <div
-  class="bg-surface rounded-xl shadow-1 border border-border p-4 hover:shadow-2 transition-shadow relative group cursor-pointer {dragging ? 'opacity-50' : ''}"
+  class="bg-surface rounded-xl shadow-1 border border-border p-4 hover:shadow-2 hover:-translate-y-0.5 transition-[box-shadow,transform] relative group cursor-pointer {dragging ? 'opacity-50' : ''}"
   role="button"
   tabindex="0"
   draggable={Boolean(onDragStart)}
@@ -175,19 +182,50 @@
       {/if}
     </div>
   {/if}
-  <!-- No book can have cover art yet, so this placeholder is the normal look. -->
+  <!--
+    Dashed border + muted surface, per the mockup's own `.book-cover.art-missing`
+    rule for a book with no derivable art (handoff §3.5 rules out the vivid
+    gradients here — those are reserved for books that actually have a cover).
+    Title/author stay text-only below the cover, their one accessible spot.
+  -->
   <div
-    class="relative h-32 rounded-lg bg-surface-sunken border border-border flex flex-col items-center justify-center gap-1"
+    class="relative aspect-[2/3] rounded-lg overflow-hidden border border-dashed border-border-strong bg-surface-sunken flex flex-col items-center justify-center gap-2 p-4 transition-transform duration-200 group-hover:-translate-y-1 group-hover:shadow-2"
     data-cover-placeholder={book.id}
   >
+    <span class="absolute top-2 left-2 rounded-full bg-surface/90 backdrop-blur-sm border border-border px-2 py-0.5 text-[9px] font-bold uppercase tracking-wide text-fg-muted">
+      {book.file_type}
+    </span>
     <svg class="w-8 h-8 text-fg-subtle" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0018 18a8.967 8.967 0 00-6 2.292m0-14.25v14.25" />
     </svg>
-    <span class="text-xs text-fg-subtle">No cover</span>
-    <span class="absolute top-2 left-2 text-xs bg-surface border border-border text-fg-muted rounded px-1.5 py-0.5 font-medium uppercase">
-      {book.file_type}
-    </span>
+    <span class="text-xs text-fg-subtle">No cover art</span>
+
+    {#if progress}
+      <div
+        class="absolute inset-x-2 bottom-1 h-1 overflow-hidden rounded-full bg-border"
+        role="progressbar"
+        aria-label={`Reading progress for ${book.title}`}
+        aria-valuemin="0"
+        aria-valuemax="100"
+        aria-valuenow={progress.percent}
+        aria-valuetext={progress.label}
+      >
+        <div class="h-full rounded-full bg-accent" style={`width: ${progress.percent}%`}></div>
+      </div>
+    {/if}
+
+    {#if progress}
+      <button
+        type="button"
+        class="absolute bottom-3 z-10 min-h-11 rounded-full border border-border bg-surface px-3 text-xs font-semibold text-accent shadow-1 hover:bg-accent-soft"
+        onclick={handleResume}
+      >
+        Resume
+        <span class="sr-only"> {book.title}</span>
+      </button>
+    {/if}
   </div>
+
   <h3 class="font-semibold text-fg mt-2 line-clamp-2 text-sm">{book.title}</h3>
   <!--
     No import can read an author out of the file, so every book starts without
@@ -198,29 +236,7 @@
   {#if unitLabel}
     <p class="text-xs text-fg-subtle mt-1">{unitLabel}</p>
   {/if}
-
   {#if progress}
-    <div class="mt-2">
-      <div
-        class="h-1.5 w-full overflow-hidden rounded-full bg-surface-sunken"
-        role="progressbar"
-        aria-label={`Reading progress for ${book.title}`}
-        aria-valuemin="0"
-        aria-valuemax="100"
-        aria-valuenow={progress.percent}
-        aria-valuetext={progress.label}
-      >
-        <div class="h-full rounded-full bg-accent" style={`width: ${progress.percent}%`}></div>
-      </div>
-      <p class="mt-1 text-xs text-fg-muted tabular-nums">{progress.label}</p>
-    </div>
-    <button
-      type="button"
-      class="mt-2 min-h-11 w-full rounded-lg border border-border px-3 text-sm font-medium text-accent hover:bg-accent-soft"
-      onclick={handleResume}
-    >
-      Resume
-      <span class="sr-only"> {book.title}</span>
-    </button>
+    <p class="mt-1 text-xs text-fg-muted tabular-nums">{progress.label}</p>
   {/if}
 </div>

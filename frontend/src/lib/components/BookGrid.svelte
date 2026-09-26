@@ -47,19 +47,37 @@
     <p class="text-sm mt-1">Upload a PDF or EPUB to get started</p>
   </div>
 {:else}
-  <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3 md:gap-4">
-    {#each books as book (book.id)}
-      <LibraryCard
-        {book}
-        sentenceIndex={progress[book.id]?.sentenceIndex ?? null}
-        totalSentences={progress[book.id]?.totalSentences ?? null}
-        {onClick}
-        {onDelete}
-        {onMove}
-        {onEditMetadata}
-        {onDragStart}
-        {onDragEnd}
-      />
+  <div
+    class="grid gap-3 md:gap-4"
+    style="grid-template-columns: repeat(auto-fill, minmax(150px, 1fr))"
+  >
+    {#each books as book, i (book.id)}
+      <div class="card-in" style={`animation-delay: ${Math.min(i, 20) * 30}ms`}>
+        <LibraryCard
+          {book}
+          sentenceIndex={progress[book.id]?.sentenceIndex ?? null}
+          totalSentences={progress[book.id]?.totalSentences ?? null}
+          {onClick}
+          {onDelete}
+          {onMove}
+          {onEditMetadata}
+          {onDragStart}
+          {onDragEnd}
+        />
+      </div>
     {/each}
   </div>
 {/if}
+
+<style>
+  .card-in {
+    animation: card-in 240ms ease-out backwards;
+  }
+  @keyframes card-in {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .card-in { animation: none; }
+  }
+</style>

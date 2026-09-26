@@ -8,14 +8,11 @@ export type Theme = 'light' | 'sepia' | 'dark' | 'system'
 // Highlight swatches offered in Settings (DESIGN.md §1). Legacy stored
 // values outside this list still load — isValidColor accepts any #rrggbb.
 export const HIGHLIGHT_SWATCHES = [
-  '#FCD34D', // Honey (default)
-  '#C4B5FD', // Lavender
-  '#6EE7B7', // Mint
-  '#F9A8D4', // Rose
-  '#7DD3FC', // Sky
-  '#FCA5A5', // Coral
-  '#FDBA74', // Peach
-  '#67E8F9', // Aqua
+  '#F5CB5C', // Amber (default)
+  '#A8D672', // Leaf
+  '#7EC8E3', // Sky
+  '#F0A6CA', // Rose
+  '#B8A6F0', // Violet
 ] as const
 
 const VALID_COLORS = new Set<string>(HIGHLIGHT_SWATCHES)
@@ -41,7 +38,7 @@ export const BIONIC_MIN_WORD_LENGTH_RANGE = { min: 1, max: 8 } as const
 
 const DEFAULTS: SettingsState = {
   voice: 'af_heart',
-  highlightColor: '#FCD34D',
+  highlightColor: '#F5CB5C',
   autoscroll: true,
   hotkeysEnabled: true,
   bionicMode: false,

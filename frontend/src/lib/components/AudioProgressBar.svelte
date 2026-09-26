@@ -6,6 +6,7 @@
     sentenceDurations = {},
     isPlaying = false,
     buffering = false,
+    onSeek,
   }: {
     sentences: { index: number; text: string; filtered: boolean }[]
     currentIndex: number
@@ -21,6 +22,8 @@
     sentenceDurations?: Record<number, number>
     isPlaying?: boolean
     buffering?: boolean
+    /** Seeks to the nearest playable sentence for a click/drag position. Omit to keep the bar read-only. */
+    onSeek?: (index: number) => void
   } = $props()
 
   const playable = $derived(sentences.filter(s => !s.filtered))
@@ -46,6 +49,14 @@
     return total
   })
 
+  /** Maps a slider fraction (0–100) to the nearest playable sentence and seeks there. */
+  function handleScrub(event: Event) {
+    if (!onSeek || playable.length === 0) return
+    const fraction = Number((event.currentTarget as HTMLInputElement).value) / 100
+    const target = Math.min(playable.length - 1, Math.floor(fraction * playable.length))
+    onSeek(playable[target].index)
+  }
+
   function formatTime(secs: number): string {
     const s = Math.max(0, Math.floor(secs))
     const h = Math.floor(s / 3600)
@@ -58,24 +69,38 @@
 
 <div class="px-3 py-1.5 flex flex-col gap-1">
   <!-- Progress track -->
-  <div
-    class="relative w-full h-1 bg-surface-sunken rounded-full overflow-hidden"
-    role="progressbar"
-    aria-label="Reading position"
-    aria-valuemin="0"
-    aria-valuemax="100"
-    aria-valuenow={Math.round(positionPercent)}
-    aria-valuetext={`Sentence ${playedCount} of ${playable.length}`}
-  >
+  {#if onSeek}
+    <input
+      type="range"
+      class="scrub h-1.5 w-full cursor-pointer appearance-none rounded-full bg-surface-sunken accent-accent"
+      min="0"
+      max="100"
+      step="0.1"
+      value={positionPercent}
+      oninput={handleScrub}
+      aria-label="Reading position"
+      aria-valuetext={`Sentence ${playedCount} of ${playable.length}`}
+    />
+  {:else}
     <div
-      class="absolute inset-y-0 left-0 bg-accent rounded-full transition-[width] duration-500"
-      style="width: {positionPercent}%"
-    ></div>
-    {#if buffering && isPlaying}
-      <!-- Shimmer overlay while buffering -->
-      <div class="absolute inset-y-0 left-0 right-0 w-full h-full bg-gradient-to-r from-transparent via-accent-fg/40 to-transparent shimmer-shine"></div>
-    {/if}
-  </div>
+      class="relative w-full h-1 bg-surface-sunken rounded-full overflow-hidden"
+      role="progressbar"
+      aria-label="Reading position"
+      aria-valuemin="0"
+      aria-valuemax="100"
+      aria-valuenow={Math.round(positionPercent)}
+      aria-valuetext={`Sentence ${playedCount} of ${playable.length}`}
+    >
+      <div
+        class="absolute inset-y-0 left-0 bg-accent rounded-full transition-[width] duration-500"
+        style="width: {positionPercent}%"
+      ></div>
+      {#if buffering && isPlaying}
+        <!-- Shimmer overlay while buffering -->
+        <div class="absolute inset-y-0 left-0 right-0 w-full h-full bg-gradient-to-r from-transparent via-accent-fg/40 to-transparent shimmer-shine"></div>
+      {/if}
+    </div>
+  {/if}
   <!-- Time display: real elapsed always, real total only once it is fully known -->
   <div class="flex justify-end">
     <span class="text-xs text-fg-muted tabular-nums">

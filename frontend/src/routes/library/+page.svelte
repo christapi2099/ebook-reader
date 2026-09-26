@@ -45,10 +45,26 @@
   /** Non-null while a book's title/author dialog is open. */
   let editingBook = $state<Book | null>(null)
 
+  let searchQuery = $state('')
+  /** `null` means "All formats". */
+  let formatFilter = $state<string | null>(null)
+
   const currentFolder = $derived(folders.find(f => f.id === openFolderId) ?? null)
-  const visibleBooks = $derived(
+  const folderBooks = $derived(
     openFolderId === null ? books : books.filter(b => b.folder_id === openFolderId),
   )
+  const availableFormats = $derived(
+    Array.from(new Set(books.map(b => b.file_type))).sort(),
+  )
+  const visibleBooks = $derived(
+    folderBooks.filter(b => {
+      if (formatFilter && b.file_type !== formatFilter) return false
+      const q = searchQuery.trim().toLowerCase()
+      if (!q) return true
+      return b.title.toLowerCase().includes(q) || (b.author ?? '').toLowerCase().includes(q)
+    }),
+  )
+  const isFiltering = $derived(searchQuery.trim() !== '' || formatFilter !== null)
 
   async function fetchLibrary() {
     loading = true
@@ -385,7 +401,73 @@
     </h2>
   {/if}
 
-  {#if currentFolder && !loading && !error && visibleBooks.length === 0}
+  {#if !loading && !error && (books.length > 0 || isFiltering)}
+    <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <label class="relative w-full sm:max-w-xs">
+        <span class="sr-only">Search books</span>
+        <svg
+          class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-fg-subtle"
+          fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"
+        >
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M21 21l-4.35-4.35M17 10.5a6.5 6.5 0 11-13 0 6.5 6.5 0 0113 0z" />
+        </svg>
+        <input
+          type="search"
+          placeholder="Search title or author"
+          bind:value={searchQuery}
+          class="w-full min-h-11 rounded-md border border-border bg-surface py-2 pl-9 pr-3 text-sm text-fg placeholder:text-fg-subtle focus:outline-none focus:ring-2 focus:ring-accent"
+        />
+      </label>
+
+      {#if availableFormats.length > 1}
+        <div class="flex flex-wrap items-center gap-2" role="group" aria-label="Filter by format">
+          <button
+            type="button"
+            class="min-h-8 rounded-full border px-3 py-1 text-xs font-medium transition-colors"
+            class:border-accent={formatFilter === null}
+            class:bg-accent-soft={formatFilter === null}
+            class:text-accent={formatFilter === null}
+            class:border-border={formatFilter !== null}
+            class:text-fg-muted={formatFilter !== null}
+            aria-pressed={formatFilter === null}
+            onclick={() => (formatFilter = null)}
+          >
+            All
+          </button>
+          {#each availableFormats as format (format)}
+            <button
+              type="button"
+              class="min-h-8 rounded-full border px-3 py-1 text-xs font-medium uppercase transition-colors"
+              class:border-accent={formatFilter === format}
+              class:bg-accent-soft={formatFilter === format}
+              class:text-accent={formatFilter === format}
+              class:border-border={formatFilter !== format}
+              class:text-fg-muted={formatFilter !== format}
+              aria-pressed={formatFilter === format}
+              onclick={() => (formatFilter = format)}
+            >
+              {format}
+            </button>
+          {/each}
+        </div>
+      {/if}
+    </div>
+  {/if}
+
+  {#if !loading && !error && books.length > 0 && isFiltering && visibleBooks.length === 0}
+    <div class="flex flex-col items-center justify-center py-20 text-center">
+      <svg class="mb-4 h-16 w-16 text-fg-subtle" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+          d="M21 21l-4.35-4.35M17 10.5a6.5 6.5 0 11-13 0 6.5 6.5 0 0113 0z" />
+      </svg>
+      <p class="text-lg font-medium text-fg-muted">No books match your search</p>
+      <p class="mt-1 text-sm text-fg-subtle">Try a different title, author, or format.</p>
+      <Button variant="secondary" class="mt-4" onclick={() => { searchQuery = ''; formatFilter = null }}>
+        Clear filters
+      </Button>
+    </div>
+  {:else if currentFolder && !loading && !error && !isFiltering && visibleBooks.length === 0}
     <div class="flex flex-col items-center justify-center py-20 text-center">
       <svg class="mb-4 h-16 w-16 text-fg-subtle" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
         <path

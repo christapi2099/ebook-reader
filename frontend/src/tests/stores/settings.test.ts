@@ -4,10 +4,10 @@ import { DEFAULT_BIONIC_OPTIONS } from '$lib/utils/bionic-reading'
 import { get } from 'svelte/store'
 
 // Mirrors the store's DEFAULTS. Updated for the design-system revamp:
-// default highlight is now Honey #FCD34D and a `theme` setting was added.
+// default highlight is now Amber #F5CB5C and a `theme` setting was added.
 const DEFAULTS: SettingsState = {
   voice: 'af_heart',
-  highlightColor: '#FCD34D',
+  highlightColor: '#F5CB5C',
   autoscroll: true,
   hotkeysEnabled: true,
   highlightEnabled: true,

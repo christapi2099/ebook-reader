@@ -255,8 +255,8 @@ function handleBackToLibrary() {
         onResults={handleSearchResults}
       />
     {/if}
-    <div class="grid grid-cols-3 items-center px-3 py-2">
-      <div class="flex items-center justify-center gap-2">
+    <div class="flex items-center justify-between px-3 py-2">
+      <div class="flex items-center gap-2">
         <!-- Back button -->
         <button
           onclick={handleBackToLibrary}
@@ -282,39 +282,15 @@ function handleBackToLibrary() {
           Pages
         </button>
       </div>
-      <div class="flex justify-center">
-    <MediaBar
-      isPlaying={reader.isPlaying}
-      speed={reader.speed}
-      disabled={seeking}
-      ready={audioReady}
-      buffering={audio.buffering}
-      onPlay={handlePlay}
-      onPause={handlePause}
-      onRewind={handleRewind}
-      onForward={handleForward}
-      onSpeedChange={handleSpeedChange}
-    />
-      </div>
-      <div class="flex justify-end">
-        <TopToolbar
-          onToggleCC={() => {}}
-          onCopyText={() => {}}
-          onAddBookmark={handleAddBookmark}
-          onShowBookmarks={() => (bookmarksOpen = true)}
-          onSearch={() => (searchOpen = true)}
-          onSettings={() => (settingsOpen = true)}
-        />
-      </div>
+      <TopToolbar
+        onToggleCC={() => {}}
+        onCopyText={() => {}}
+        onAddBookmark={handleAddBookmark}
+        onShowBookmarks={() => (bookmarksOpen = true)}
+        onSearch={() => (searchOpen = true)}
+        onSettings={() => (settingsOpen = true)}
+      />
     </div>
-    <AudioProgressBar
-      sentences={reader.sentences}
-      currentIndex={audio.currentIndex}
-      elapsedSeconds={audio.elapsedSeconds}
-      sentenceDurations={audio.sentenceDurations}
-      isPlaying={audio.isPlaying}
-      buffering={audio.buffering}
-    />
   </div>
 
   <div class="flex-1 overflow-hidden">
@@ -365,6 +341,38 @@ function handleBackToLibrary() {
         Loading…
       </div>
     {/if}
+  </div>
+
+  <div
+    class="pointer-events-none fixed inset-x-0 bottom-5 z-30 flex justify-center px-3"
+  >
+    <div
+      class="pointer-events-auto w-full max-w-[720px] rounded-2xl border border-border bg-surface-raised/90 px-4 py-3 shadow-3 backdrop-blur-xl"
+    >
+      <AudioProgressBar
+        sentences={reader.sentences}
+        currentIndex={audio.currentIndex}
+        elapsedSeconds={audio.elapsedSeconds}
+        sentenceDurations={audio.sentenceDurations}
+        isPlaying={audio.isPlaying}
+        buffering={audio.buffering}
+        onSeek={handleSeek}
+      />
+      <div class="mt-2">
+        <MediaBar
+          isPlaying={reader.isPlaying}
+          speed={reader.speed}
+          disabled={seeking}
+          ready={audioReady}
+          buffering={audio.buffering}
+          onPlay={handlePlay}
+          onPause={handlePause}
+          onRewind={handleRewind}
+          onForward={handleForward}
+          onSpeedChange={handleSpeedChange}
+        />
+      </div>
+    </div>
   </div>
 </div>
 
