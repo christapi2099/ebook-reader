@@ -9,7 +9,8 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from sqlmodel import Session, select
 
 import db.database as _db
-from db.models import Book, Sentence
+from services import engine_manager
+from services.sentence_source import load_sentences
 from services.tts_engine import TTSEngine, SynthJob, normalize_speed
 
 
@@ -33,26 +34,11 @@ def set_kokoro(kokoro: Any) -> None:
     _kokoro = kokoro
 
 
-def _load_sentences(book_id: str) -> dict[int, dict] | None:
-    """Fetch sentences in a short-lived session — not held open during WebSocket lifetime."""
-    with Session(_db.engine) as session:
-        book = session.get(Book, book_id)
-        if not book:
-            return None
-        rows = session.exec(
-            select(Sentence)
-            .where(Sentence.book_id == book_id)
-            .order_by(Sentence.index)
-        ).all()
-        # Detach from session by converting to plain dicts
-        return {s.index: s.model_dump() for s in rows}
-
-
 @router.websocket("/ws/tts/{book_id}")
 async def tts_websocket(websocket: WebSocket, book_id: str):
     await websocket.accept()
 
-    sentence_data = _load_sentences(book_id)
+    sentence_data = load_sentences(book_id)
     if sentence_data is None:
         await websocket.close(code=4004, reason="Book not found")
         return
@@ -66,6 +52,31 @@ async def tts_websocket(websocket: WebSocket, book_id: str):
     # requested rate is a property of the engine, not of a sentence, so saying it
     # once is enough and repeating it per sentence would be noise.
     speed_downgrade_notified = False
+    # Last `engine_status` phase sent for the current session, so the reader is
+    # told about a cold GPU once and not on every sentence.
+    reported_engine_phase: str | None = None
+
+    async def _report_engine_phase(session_id: int, force: bool = False) -> None:
+        """Tell the client which GPU phase it is waiting on, if any.
+
+        Silent when the live engine is local or the Modal container is already
+        warm: a status line that appears when nothing is slow is worse than no
+        status line. The session_id tag lets the client's existing stale-session
+        filter discard a message that arrives after a seek.
+        """
+        nonlocal reported_engine_phase
+        phase = engine_manager.manager.playback_phase()
+        if phase is None:
+            reported_engine_phase = engine_manager.PHASE_READY
+            return
+        if not force and phase == reported_engine_phase:
+            return
+        reported_engine_phase = phase
+        await websocket.send_text(json.dumps({
+            "type": "engine_status",
+            "phase": phase,
+            "session_id": session_id,
+        }))
 
     async def _producer(from_index: int, voice: str, speed: float) -> None:
         for idx in sorted(sentence_data.keys()):
@@ -109,6 +120,16 @@ async def tts_websocket(websocket: WebSocket, book_id: str):
                     "index": job.sentence_index,
                     "session_id": session_id,
                 }))
+
+                # A cold Modal container is about to make this sentence wait, so
+                # say so before the audio rather than leaving the reader staring
+                # at a spinner with no explanation. Re-checked here because the
+                # phase can move on (starting → warming_up) between the play
+                # request and the first chunk; silent once warm.
+                try:
+                    await _report_engine_phase(session_id)
+                except Exception:
+                    pass
 
                 # Track actual audio sample count from Kokoro output for accurate duration
                 duration_ms = 0
@@ -247,6 +268,17 @@ async def tts_websocket(websocket: WebSocket, book_id: str):
                     }))
                     continue
                 await _cancel_and_clear()
+                # This engine object is built once per WebSocket, so a reader
+                # that stays open would otherwise keep synthesising on whatever
+                # engine was live when the page loaded — a switch in Settings
+                # would only take effect after a reload. The audio cache key
+                # (text:voice:speed) is engine-independent, which is correct:
+                # same model, same output, whichever device produced it.
+                live = engine_manager.manager.current()
+                if live is not None:
+                    engine_tts.kokoro = live
+                reported_engine_phase = None
+                await _report_engine_phase(session_id, force=True)
                 producer_task = asyncio.create_task(_producer(from_index, voice, speed))
                 consumer_task = asyncio.create_task(_consumer_with_events(session_id))
                 # Warm the cache ahead of the current position. The bound that
