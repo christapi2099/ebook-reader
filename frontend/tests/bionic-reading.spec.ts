@@ -38,7 +38,7 @@ test.describe('Bionic Reading', () => {
 
   async function toggleBionicOn(page: Page) {
     await openSettings(page)
-    await page.getByRole('switch').nth(3).click()
+    await page.getByRole('switch', { name: 'Bionic Reading' }).click()
   }
 
   // ── Basic reading mode ──
@@ -48,10 +48,16 @@ test.describe('Bionic Reading', () => {
     await expect(page.locator('[data-sentence-index="0"]')).toBeVisible()
   })
 
-  test('settings bionic toggle exists and can be opened', async ({ page }) => {
+  test('every settings switch has its visible label as its accessible name', async ({ page }) => {
     await enterReadingMode(page)
     await openSettings(page)
-    await expect(page.getByRole('switch', { name: '' })).toHaveCount(4)
+
+    // Named, never positional: adding or reordering a switch must not silently
+    // retarget these tests (see tests/README.md).
+    for (const name of ['Sentence Highlight', 'Auto-Scroll', 'Keyboard Hotkeys', 'Bionic Reading']) {
+      await expect(page.getByRole('switch', { name })).toBeVisible()
+    }
+    await expect(page.getByRole('switch')).toHaveCount(4)
   })
 
   // ── Bionic toggle ──
@@ -104,12 +110,12 @@ test.describe('Bionic Reading', () => {
     await expect(sentenceEl.locator('strong')).not.toHaveCount(0)
 
     await openSettings(page)
-    await page.getByRole('switch').nth(3).click()
+    await page.getByRole('switch', { name: 'Bionic Reading' }).click()
     await page.keyboard.press('Escape')
     await expect(sentenceEl.locator('strong')).toHaveCount(0)
 
     await openSettings(page)
-    await page.getByRole('switch').nth(3).click()
+    await page.getByRole('switch', { name: 'Bionic Reading' }).click()
     await page.keyboard.press('Escape')
     await expect(sentenceEl.locator('strong')).not.toHaveCount(0)
   })
@@ -169,7 +175,7 @@ test.describe('Bionic Reading', () => {
 
     await expect(page.locator('#bionic-fixation')).not.toBeVisible()
 
-    await page.getByRole('switch').nth(3).click()
+    await page.getByRole('switch', { name: 'Bionic Reading' }).click()
     await expect(page.locator('#bionic-fixation')).toBeVisible()
   })
 
@@ -179,7 +185,7 @@ test.describe('Bionic Reading', () => {
 
     await expect(page.locator('#bionic-ratio')).not.toBeVisible()
 
-    await page.getByRole('switch').nth(3).click()
+    await page.getByRole('switch', { name: 'Bionic Reading' }).click()
     await expect(page.locator('#bionic-ratio')).toBeVisible()
   })
 
@@ -213,15 +219,53 @@ test.describe('Bionic Reading', () => {
     await expect(page.getByText('Bold strength: 0.35')).toBeVisible()
   })
 
+  test('minimum word length slider is named, visible with bionic on, and persists', async ({ page }) => {
+    await enterReadingMode(page)
+    await openSettings(page)
+    await expect(page.locator('#bionic-min-length')).not.toBeVisible()
+
+    await page.getByRole('switch', { name: 'Bionic Reading' }).click()
+    await expect(page.locator('#bionic-min-length')).toBeVisible()
+
+    await page.evaluate(() => {
+      const slider = document.getElementById('bionic-min-length') as HTMLInputElement
+      if (slider) {
+        slider.value = '6'
+        slider.dispatchEvent(new Event('input', { bubbles: true }))
+      }
+    })
+    await expect(page.getByText('Minimum word length: 6')).toBeVisible()
+    await page.keyboard.press('Escape')
+
+    const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('kokoro-settings') || '{}'))
+    expect(stored.bionicMinWordLength).toBe(6)
+  })
+
+  test('common words are bolded once the skip-common-words switch is off', async ({ page }) => {
+    await enterReadingMode(page, 'The fox is near a bank.')
+    await toggleBionicOn(page)
+
+    const sentenceEl = page.locator('[data-sentence-index="0"]')
+    const boldedText = async () => (await sentenceEl.locator('strong').allTextContents()).join('|')
+    const before = await boldedText()
+
+    await page.getByRole('switch', { name: 'Skip Common Words' }).click()
+    await page.keyboard.press('Escape')
+
+    expect(await boldedText()).not.toBe(before)
+  })
+
   test('closing settings then reopening reflects persisted bionic state', async ({ page }) => {
     await enterReadingMode(page)
     await toggleBionicOn(page)
     await page.keyboard.press('Escape')
     await openSettings(page)
 
-    await expect(page.getByRole('switch').nth(3)).toHaveAttribute('aria-checked', 'true')
+    await expect(page.getByRole('switch', { name: 'Bionic Reading' })).toHaveAttribute('aria-checked', 'true')
     await expect(page.locator('#bionic-fixation')).toBeVisible()
     await expect(page.locator('#bionic-ratio')).toBeVisible()
+    await expect(page.locator('#bionic-min-length')).toBeVisible()
+    await expect(page.getByRole('switch', { name: 'Skip Common Words' })).toBeVisible()
   })
 
   // ── PDF viewer bionic tests ──
@@ -293,7 +337,7 @@ test.describe('Bionic Reading', () => {
     test('bionic overlay becomes visible when bionic mode turned ON', async ({ page }) => {
       await setupPdfBook(page)
       await page.locator('[aria-label="Settings"]').click()
-      await page.getByRole('switch').nth(3).click()
+      await page.getByRole('switch', { name: 'Bionic Reading' }).click()
       await page.keyboard.press('Escape')
 
       const overlay = page.locator('[data-bionic-overlay="0"]')
@@ -303,7 +347,7 @@ test.describe('Bionic Reading', () => {
     test('bionic overlay has aria-hidden attribute', async ({ page }) => {
       await setupPdfBook(page)
       await page.locator('[aria-label="Settings"]').click()
-      await page.getByRole('switch').nth(3).click()
+      await page.getByRole('switch', { name: 'Bionic Reading' }).click()
       await page.keyboard.press('Escape')
 
       const overlay = page.locator('[data-bionic-overlay="0"]')
@@ -313,7 +357,7 @@ test.describe('Bionic Reading', () => {
     test('bionic overlay contains text spans matching sentences', async ({ page }) => {
       await setupPdfBook(page)
       await page.locator('[aria-label="Settings"]').click()
-      await page.getByRole('switch').nth(3).click()
+      await page.getByRole('switch', { name: 'Bionic Reading' }).click()
       await page.keyboard.press('Escape')
 
       // Wait for debounced bionic render (80ms debounce)
@@ -334,12 +378,12 @@ test.describe('Bionic Reading', () => {
       await expect(overlay).toBeHidden()
 
       await page.locator('[aria-label="Settings"]').click()
-      await page.getByRole('switch').nth(3).click()
+      await page.getByRole('switch', { name: 'Bionic Reading' }).click()
       await page.keyboard.press('Escape')
       await expect(overlay).toBeVisible()
 
       await page.locator('[aria-label="Settings"]').click()
-      await page.getByRole('switch').nth(3).click()
+      await page.getByRole('switch', { name: 'Bionic Reading' }).click()
       await page.keyboard.press('Escape')
       await expect(overlay).toBeHidden()
     })
@@ -347,7 +391,7 @@ test.describe('Bionic Reading', () => {
     test('canvas opacity decreases when bionic mode is ON', async ({ page }) => {
       await setupPdfBook(page)
       await page.locator('[aria-label="Settings"]').click()
-      await page.getByRole('switch').nth(3).click()
+      await page.getByRole('switch', { name: 'Bionic Reading' }).click()
       await page.keyboard.press('Escape')
 
       await page.waitForTimeout(500)
@@ -359,12 +403,12 @@ test.describe('Bionic Reading', () => {
     test('canvas opacity returns to 1 when bionic mode is OFF', async ({ page }) => {
       await setupPdfBook(page)
       await page.locator('[aria-label="Settings"]').click()
-      await page.getByRole('switch').nth(3).click()
+      await page.getByRole('switch', { name: 'Bionic Reading' }).click()
       await page.keyboard.press('Escape')
       await page.waitForTimeout(500)
 
       await page.locator('[aria-label="Settings"]').click()
-      await page.getByRole('switch').nth(3).click()
+      await page.getByRole('switch', { name: 'Bionic Reading' }).click()
       await page.keyboard.press('Escape')
 
       await page.waitForTimeout(500)
@@ -433,7 +477,7 @@ test.describe('Bionic Reading', () => {
       await expect(page.locator('[data-sentence-index="0"]')).toBeVisible()
 
       await page.locator('[aria-label="Settings"]').click()
-      await expect(page.getByRole('switch').nth(3)).toHaveAttribute('aria-checked', 'true')
+      await expect(page.getByRole('switch', { name: 'Bionic Reading' })).toHaveAttribute('aria-checked', 'true')
       await page.keyboard.press('Escape')
 
       const sentenceEl = page.locator('[data-sentence-index="0"]')

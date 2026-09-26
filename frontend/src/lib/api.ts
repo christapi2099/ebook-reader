@@ -29,6 +29,18 @@ export interface Book {
   page_count: number
   /** `null` when the book is not filed in any folder. */
   folder_id: number | null
+  /**
+   * Sentences in the book, counted by the server. This is the only usable
+   * denominator for a progress bar: `page_count` means PDF pages, a sentence
+   * count or a derived guess depending on `file_type`.
+   */
+  sentence_count?: number
+  /**
+   * Where the reader is parked: `null` when the book was never started, `0` when
+   * it was started and left on the first sentence. The two used to be the same
+   * value, which is why an unread book and a barely-started one looked alike.
+   */
+  sentence_index?: number | null
 }
 
 /** Longest folder name the backend accepts (`FOLDER_NAME_MAX_LENGTH`). */

@@ -3,6 +3,7 @@ import {
   bionifyWord,
   bionifyText,
   bionifyTextToSegments,
+  toBionicOptions,
   COMMON_WORDS,
   DEFAULT_BIONIC_OPTIONS,
 } from '$lib/utils/bionic-reading'
@@ -374,6 +375,48 @@ describe('DEFAULT_BIONIC_OPTIONS', () => {
     expect(DEFAULT_BIONIC_OPTIONS.fixationPoint).toBe(1)
     expect(DEFAULT_BIONIC_OPTIONS.minWordLength).toBe(3)
     expect(DEFAULT_BIONIC_OPTIONS.skipCommonWords).toBe(true)
+  })
+})
+
+describe('toBionicOptions', () => {
+  const settings = {
+    bionicFixation: 3,
+    bionicBoldRatio: 0.35,
+    bionicMinWordLength: 5,
+    bionicSkipCommonWords: false,
+  }
+
+  it('maps every stored option onto the algorithm’s name', () => {
+    expect(toBionicOptions(settings)).toEqual({
+      fixationPoint: 3,
+      boldRatio: 0.35,
+      minWordLength: 5,
+      skipCommonWords: false,
+    })
+  })
+
+  it('changes what the algorithm renders', () => {
+    // fix "reading" is 7 chars, so a min length of 5 still bolds it…
+    const bolded = bionifyTextToSegments('reading', toBionicOptions(settings))
+    expect(bolded.filter(s => s.bold).map(s => s.text).join('')).toBe('rea')
+
+    // …but a min length above 7 leaves it alone.
+    const untouched = bionifyTextToSegments(
+      'reading',
+      toBionicOptions({ ...settings, bionicMinWordLength: 8 }),
+    )
+    expect(untouched.some(s => s.bold)).toBe(false)
+  })
+
+  it('passes the common-word skip through', () => {
+    const text = 'the lighthouse'
+    const short = { ...settings, bionicMinWordLength: 3 }
+
+    const skipping = bionifyTextToSegments(text, toBionicOptions({ ...short, bionicSkipCommonWords: true }))
+    expect(skipping.filter(s => s.bold).map(s => s.text).join('')).toBe('ligh')
+
+    const notSkipping = bionifyTextToSegments(text, toBionicOptions({ ...short, bionicSkipCommonWords: false }))
+    expect(notSkipping.filter(s => s.bold).map(s => s.text).join('')).toBe('thligh')
   })
 })
 

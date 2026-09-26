@@ -59,10 +59,12 @@ cd backend && venv/bin/python -m uvicorn main:app --port 8000
 - **Pinned browser build.** Playwright may ask for a build that is not in
   `~/.cache/ms-playwright`. Other builds usually are; point `launchOptions.executablePath`
   at one (see the workaround used for `folders.spec.ts`) rather than downloading.
-- **`getByRole('switch')` in `bionic-reading.spec.ts`** selects switches by
+- **`getByRole('switch')` in `bionic-reading.spec.ts`** used to select switches by
   unnamed position (`nth(3)`). Adding, removing or reordering a switch in
-  `SettingsOverlay.svelte` silently retargets those tests. Name the switches and
-  update the spec, or leave the count and order alone.
+  `SettingsOverlay.svelte` silently retargeted those tests, so every switch now
+  carries the accessible name of its visible label and the spec selects them by
+  name (`getByRole('switch', { name: 'Bionic Reading' })`). Keep it that way:
+  never reintroduce an index into a switch query.
 - **Pre-existing failures.** Four tests outside the critical set fail for reasons
   unrelated to recent work (`buffering-states` selector issues and a `text-reader`
   strict-mode collision between the Upload button and the Sidebar's Upload nav

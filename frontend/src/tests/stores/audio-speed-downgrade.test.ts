@@ -153,6 +153,28 @@ describe('audioStore speed downgrade', () => {
     expect(get(audioStore).speed).toBe(1.0)
   })
 
+  it('refuses further speed changes so no control can ask for a dead rate', () => {
+    audioStore.setSpeed(1.5)
+    currentSocket().onSpeedUnavailable(1.5, 1.0, sessionId)
+    sent.length = 0
+
+    // The reader's ↑/↓ hotkeys go through this same method.
+    audioStore.setSpeed(2.0)
+
+    expect(get(audioStore).speed).toBe(1.0)
+    expect(sent.filter(m => m.action === 'play')).toHaveLength(0)
+    expect(sent.filter(m => m.action === 'prefetch_speed')).toHaveLength(0)
+  })
+
+  it('accepts speed changes again on a new connection', () => {
+    currentSocket().onSpeedUnavailable(1.5, 1.0, sessionId)
+
+    audioStore.init('book-3')
+    audioStore.setSpeed(1.25)
+
+    expect(get(audioStore).speed).toBe(1.25)
+  })
+
   it('clears the notice for a new connection', () => {
     currentSocket().onSpeedUnavailable(1.5, 1.0, sessionId)
     expect(get(speedDowngradeStore)).not.toBeNull()

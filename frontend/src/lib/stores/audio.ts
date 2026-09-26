@@ -417,6 +417,13 @@ function createAudioStore() {
     },
 
     setSpeed(newSpeed: number) {
+      // Once the engine has said it cannot render anything but `effective`, any
+      // other request is accepted and then silently ignored — exactly the lie
+      // the notice exists to prevent. The transport's buttons are disabled, but
+      // the reader's ↑/↓ hotkeys reach this same method, so the refusal is
+      // enforced here too. A new connection (init) clears the refusal and asks
+      // the engine again.
+      if (get(speedDowngradeStore)) return
       const state = get({ subscribe })
       update(s => ({ ...s, speed: newSpeed }))
       // Kokoro renders speed natively, so every measured duration describes the

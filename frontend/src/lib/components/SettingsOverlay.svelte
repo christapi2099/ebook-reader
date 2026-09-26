@@ -110,6 +110,9 @@
 
   async function chooseEngine(engineId: string) {
     if (switchingTo || engineState?.active === engineId) return
+    // The radio is disabled for an unavailable engine; this keeps a programmatic
+    // click from asking the server for something the probe already ruled out.
+    if (!engineState?.options.find(o => o.id === engineId)?.available) return
     switchingTo = engineId
     switchError = null
     try {
