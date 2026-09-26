@@ -17,6 +17,24 @@ class BookmarkCreate(BaseModel):
     label: str
 
 
+def _serialize(bookmark: Bookmark) -> dict:
+    """The bookmark wire shape, in one place.
+
+    Creating and listing a bookmark each built this dict by hand, identically
+    apart from the variable name. The two must agree — a field added to one and
+    not the other is a client-visible inconsistency — so the shape lives here,
+    matching the `_serialize` helpers in routers/library.py and routers/folders.py.
+    """
+    return {
+        "id": bookmark.id,
+        "book_id": bookmark.book_id,
+        "sentence_index": bookmark.sentence_index,
+        "page": bookmark.page,
+        "label": bookmark.label,
+        "created_at": bookmark.created_at.isoformat(),
+    }
+
+
 @router.post("")
 def create_bookmark(body: BookmarkCreate, session: Session = Depends(get_session)):
     # Only the existence check matters here; the row itself is not used, so the
@@ -42,14 +60,7 @@ def create_bookmark(body: BookmarkCreate, session: Session = Depends(get_session
     session.add(bm)
     session.commit()
     session.refresh(bm)
-    return {
-        "id": bm.id,
-        "book_id": bm.book_id,
-        "sentence_index": bm.sentence_index,
-        "page": bm.page,
-        "label": bm.label,
-        "created_at": bm.created_at.isoformat(),
-    }
+    return _serialize(bm)
 
 
 @router.get("/{book_id}")
@@ -59,17 +70,7 @@ def list_bookmarks(book_id: str, session: Session = Depends(get_session)):
         .where(Bookmark.book_id == book_id)
         .order_by(Bookmark.page, Bookmark.sentence_index)
     ).all()
-    return [
-        {
-            "id": b.id,
-            "book_id": b.book_id,
-            "sentence_index": b.sentence_index,
-            "page": b.page,
-            "label": b.label,
-            "created_at": b.created_at.isoformat(),
-        }
-        for b in rows
-    ]
+    return [_serialize(row) for row in rows]
 
 
 @router.delete("/{bookmark_id}")
