@@ -697,3 +697,46 @@ test.describe('Search highlight styling', () => {
     expect(playbackOnOneBg).not.toContain('--search-match-bg')
   })
 })
+
+test.describe('Transport readiness', () => {
+  // Play used to be live before onMount had opened the audio socket. A click in
+  // that window set the reader playing, audioStore.play() dropped it (no socket
+  // yet), and the reader snapped back to Paused — the click did nothing. That was
+  // the intermittent @critical failure: under load the first Play landed early.
+  test('@critical play waits for the audio connection instead of dropping the click', async ({ page }) => {
+    const driver = new WsDriver()
+    let releaseBook!: () => void
+    const bookHeld = new Promise<void>(resolve => { releaseBook = resolve })
+
+    await page.clock.install()
+    await page.addInitScript(AUDIO_CONTEXT_MOCK)
+    await page.route('**/*', async route => {
+      const url = route.request().url()
+      if (url.includes('/documents/') && url.includes('/sentences')) {
+        await route.fulfill({ json: MOCK_SENTENCES })
+      } else if (url.includes('/library/') && url.includes('/progress')) {
+        await route.fulfill({ json: { sentence_index: 0 } })
+      } else if (url.includes('/library/') && !url.includes('/progress')) {
+        // Held open: onMount awaits this before it initialises the audio store.
+        await bookHeld
+        await route.fulfill({
+          json: { id: 'test-book', title: 'Test Book', author: 'Test Author', file_type: 'pdf', page_count: 5 }
+        })
+      } else if (url.includes('/uploads/')) {
+        await route.fulfill({ status: 200, headers: { 'content-type': 'application/pdf' }, body: makeMinimalPdf() })
+      } else {
+        await route.continue()
+      }
+    })
+    await driver.install(page, 'test-book')
+    await page.goto('/reader/test-book')
+
+    await expect(playBtn(page)).toBeDisabled()
+
+    releaseBook()
+    await expect(playBtn(page)).toBeEnabled()
+    await playBtn(page).click()
+    await expect.poll(() => driver.actionsOf('play').length).toBeGreaterThan(0)
+    await expect(pauseBtn(page)).toBeVisible()
+  })
+})

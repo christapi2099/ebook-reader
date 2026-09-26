@@ -34,6 +34,9 @@ let reader: ReaderState = $state(get(readerStore))
 let audio = $state(get(audioStore))
   let settings: SettingsState = $state(get(settingsStore))
 let seeking = $state(false)
+// The transport controls stay disabled until `audioStore.init` has opened the
+// socket; see MediaBar's `ready` prop for what an earlier Play click would do.
+let audioReady = $state(false)
 let currentPage = $state(0)
 let pageToScroll = $state<number | null>(null)
 let settingsOpen = $state(false)
@@ -75,6 +78,7 @@ onMount(async () => {
   audioStore.setSpeed((get(readerStore) as ReaderState).speed)
   audioStore.setCurrentIndex((get(readerStore) as ReaderState).currentIndex)
   audioStore.setVoice(get(settingsStore).voice)
+  audioReady = true
 
   const hotkeyMap: Record<string, () => void> = {
     ' ': handlePlayPause,
@@ -283,6 +287,7 @@ function handleBackToLibrary() {
       isPlaying={reader.isPlaying}
       speed={reader.speed}
       disabled={seeking}
+      ready={audioReady}
       buffering={audio.buffering}
       onPlay={handlePlay}
       onPause={handlePause}

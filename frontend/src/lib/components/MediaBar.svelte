@@ -5,6 +5,7 @@
     isPlaying,
     speed,
     disabled = false,
+    ready = true,
     buffering = false,
     onPlay,
     onPause,
@@ -15,6 +16,13 @@
     isPlaying: boolean
     speed: number
     disabled?: boolean
+    /**
+     * False until the audio connection exists. Unlike `disabled` (which only
+     * greys the skip buttons during a seek, so Pause stays reachable), this
+     * gates Play too: a Play before the socket exists is dropped by the audio
+     * store and the reader snaps back to Paused, so the click would do nothing.
+     */
+    ready?: boolean
     buffering?: boolean
     onPlay: () => void
     onPause: () => void
@@ -83,7 +91,7 @@
   <div class="flex items-center justify-center gap-4">
     <button
       onclick={onRewind}
-      {disabled}
+      disabled={disabled || !ready}
       class="flex items-center gap-1 px-4 py-3 rounded-full bg-surface-sunken hover:bg-accent-soft text-fg text-sm font-medium transition-colors min-h-[44px] disabled:opacity-40 disabled:cursor-not-allowed"
       aria-label={`Rewind ${STEP_SENTENCES} sentences`}
     >
@@ -96,7 +104,8 @@
 
     <button
       onclick={() => (isPlaying ? onPause() : onPlay())}
-      class="flex items-center justify-center w-12 h-12 rounded-full bg-accent hover:bg-accent-hover text-accent-fg shadow-2 transition-colors"
+      disabled={!ready}
+      class="flex items-center justify-center w-12 h-12 rounded-full bg-accent hover:bg-accent-hover text-accent-fg shadow-2 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
       aria-label={isPlaying ? 'Pause' : 'Play'}
       data-loading={isPlaying && buffering ? 'true' : 'false'}
     >
@@ -119,7 +128,7 @@
 
     <button
       onclick={onForward}
-      {disabled}
+      disabled={disabled || !ready}
       class="flex items-center gap-1 px-4 py-3 rounded-full bg-surface-sunken hover:bg-accent-soft text-fg text-sm font-medium transition-colors min-h-[44px] disabled:opacity-40 disabled:cursor-not-allowed"
       aria-label={`Forward ${STEP_SENTENCES} sentences`}
     >
