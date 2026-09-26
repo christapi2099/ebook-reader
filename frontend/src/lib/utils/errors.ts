@@ -9,12 +9,15 @@
 export class ApiError extends Error {
   readonly status: number
   readonly statusText: string
+  /** The server's own explanation, present only when it sent one. */
+  readonly detail: string | undefined
 
-  constructor(status: number, statusText: string, message?: string) {
-    super(message ?? `HTTP ${status}: ${statusText}`)
+  constructor(status: number, statusText: string, detail?: string) {
+    super(detail ?? `HTTP ${status}: ${statusText}`)
     this.name = 'ApiError'
     this.status = status
     this.statusText = statusText
+    this.detail = detail
   }
 }
 
@@ -29,10 +32,16 @@ export function isBackendDown(error: unknown): boolean {
  * say), which is always more specific than a generic mapping. `ApiError` only
  * carries a status line when the server sent no detail, so that case falls
  * through to `toUserMessage`.
+ *
+ * "Did the server send a detail?" is answered from the `detail` field, not by
+ * comparing the message against the `HTTP <status>: <statusText>` line the
+ * constructor would have generated. That comparison re-derived the same magic
+ * string in two places and would have silently started lying the moment either
+ * one was reworded.
  */
 export function toDetailMessage(error: unknown): string {
-  if (error instanceof ApiError && error.message !== `HTTP ${error.status}: ${error.statusText}`) {
-    return error.message
+  if (error instanceof ApiError && error.detail) {
+    return error.detail
   }
   return toUserMessage(error)
 }

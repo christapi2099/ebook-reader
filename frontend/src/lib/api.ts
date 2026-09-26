@@ -88,7 +88,7 @@ export async function uploadDocument(
   const formData = new FormData()
   formData.append('file', file)
   const response = await fetch(`${API_BASE}/documents/upload`, { method: 'POST', body: formData })
-  if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+  if (!response.ok) throw await toApiError(response)
   return response.json()
 }
 
@@ -163,7 +163,7 @@ export async function uploadVoice(file: File): Promise<{ id: string; path: strin
   const formData = new FormData()
   formData.append('file', file)
   const response = await fetch(`${API_BASE}/voices/upload`, { method: 'POST', body: formData })
-  if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+  if (!response.ok) throw await toApiError(response)
   return response.json()
 }
 
@@ -173,7 +173,7 @@ export async function deleteVoice(voiceId: string): Promise<void> {
 
 export async function previewVoice(voiceId: string): Promise<ArrayBuffer> {
   const response = await fetch(`${API_BASE}/voices/preview/${voiceId}`)
-  if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+  if (!response.ok) throw await toApiError(response)
   return response.arrayBuffer()
 }
 
@@ -299,7 +299,7 @@ export async function createTextBook(text: string, title?: string): Promise<{ bo
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
-  if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+  if (!response.ok) throw await toApiError(response)
   return response.json()
 }
 
