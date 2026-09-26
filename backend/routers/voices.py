@@ -5,6 +5,8 @@ import numpy as np
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import Response
 
+from services.tts_engine import SAMPLE_RATE
+
 VOICES_DIR = Path("voices")
 VOICE_EXT = ".pt"
 
@@ -162,5 +164,5 @@ async def preview_voice(voice_id: str):
 
     full = np.concatenate(parts)
     buf = io.BytesIO()
-    sf.write(buf, full, 24000, format="WAV", subtype="PCM_16")
+    sf.write(buf, full, SAMPLE_RATE, format="WAV", subtype="PCM_16")
     return Response(content=buf.getvalue(), media_type="audio/wav")

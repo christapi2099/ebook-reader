@@ -11,7 +11,7 @@ from sqlmodel import Session, select
 import db.database as _db
 from services import engine_manager
 from services.sentence_source import load_sentences
-from services.tts_engine import TTSEngine, SynthJob, normalize_speed
+from services.tts_engine import SAMPLE_RATE, TTSEngine, SynthJob, normalize_speed
 
 
 def _requested_speed(msg: dict) -> float:
@@ -186,9 +186,11 @@ async def tts_websocket(websocket: WebSocket, book_id: str):
                 if next_idx in sentence_data:
                     next_chapter = sentence_data[next_idx].get("chapter", 0)
                     if next_chapter != current_chapter:
-                        silence = np.zeros(12000, dtype=np.float32)  # 500ms @ 24000
+                        # Half a second of silence at the synthesis rate, so the
+                        # gap stays 500 ms if the rate ever stops being 24000.
+                        silence = np.zeros(SAMPLE_RATE // 2, dtype=np.float32)
                         buf = io.BytesIO()
-                        sf.write(buf, silence, 24000, format="WAV", subtype="PCM_16")
+                        sf.write(buf, silence, SAMPLE_RATE, format="WAV", subtype="PCM_16")
                         await websocket.send_bytes(buf.getvalue())
         except (asyncio.CancelledError, WebSocketDisconnect):
             return
