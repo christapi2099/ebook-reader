@@ -152,7 +152,7 @@ def test_delete_through_http_round_trip(client, voices_dir):
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def fake_kokoro(monkeypatch):
+def preview_recorder(monkeypatch):
     seen = {}
 
     def kokoro(text, voice=None, speed=None):
@@ -166,39 +166,39 @@ def fake_kokoro(monkeypatch):
 
 
 @pytest.mark.parametrize("voice_id", TRAVERSAL_IDS)
-def test_preview_rejects_traversal_before_touching_the_engine(voice_id, voices_dir, fake_kokoro):
+def test_preview_rejects_traversal_before_touching_the_engine(voice_id, voices_dir, preview_recorder):
     _, victim = voices_dir
     with pytest.raises(HTTPException) as exc:
         asyncio.run(voices_router.preview_voice(voice_id))
     assert exc.value.status_code == 400, f"{voice_id} should be rejected, got {exc.value.status_code}"
-    assert "voice" not in fake_kokoro, "engine received a voice argument for a rejected id"
+    assert "voice" not in preview_recorder, "engine received a voice argument for a rejected id"
 
 
-def test_preview_rejects_symlink_escaping_the_voices_dir(voices_dir, fake_kokoro):
+def test_preview_rejects_symlink_escaping_the_voices_dir(voices_dir, preview_recorder):
     d, victim = voices_dir
     (d / "escape.pt").symlink_to(victim)
     with pytest.raises(HTTPException) as exc:
         asyncio.run(voices_router.preview_voice("custom:escape"))
     assert exc.value.status_code == 400
-    assert "voice" not in fake_kokoro
+    assert "voice" not in preview_recorder
 
 
-def test_preview_passes_a_path_inside_the_voices_dir(voices_dir, fake_kokoro):
+def test_preview_passes_a_path_inside_the_voices_dir(voices_dir, preview_recorder):
     d, _ = voices_dir
     (d / "good.pt").write_bytes(b"voice")
     asyncio.run(voices_router.preview_voice("custom:good"))
 
-    passed = Path(fake_kokoro["voice"]).resolve()
+    passed = Path(preview_recorder["voice"]).resolve()
     assert passed.is_relative_to(d.resolve()), f"{passed} escaped {d}"
     assert passed.name == "good.pt"
 
 
-def test_preview_builtin_voice_id_is_forwarded_unchanged(voices_dir, fake_kokoro):
+def test_preview_builtin_voice_id_is_forwarded_unchanged(voices_dir, preview_recorder):
     asyncio.run(voices_router.preview_voice("af_heart"))
-    assert fake_kokoro["voice"] == "af_heart"
+    assert preview_recorder["voice"] == "af_heart"
 
 
-def test_preview_missing_custom_voice_is_404(voices_dir, fake_kokoro):
+def test_preview_missing_custom_voice_is_404(voices_dir, preview_recorder):
     with pytest.raises(HTTPException) as exc:
         asyncio.run(voices_router.preview_voice("custom:nope"))
     assert exc.value.status_code == 404
