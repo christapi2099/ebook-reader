@@ -39,6 +39,7 @@ dependencies = [
     # "en_core_web_sm")). It was present in backend/venv but missing from the old
     # requirements.txt, so it is declared here to make `uv sync` self-sufficient.
     "en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
+    "modal>=1.5.5",
 ]
 
 [dependency-groups]
