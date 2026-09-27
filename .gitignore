@@ -73,3 +73,6 @@ backend/voices/
 
 # Flake-hunt logs from the selective test runner
 backend/flake*.log
+
+# Precompiled chapter audio + sync manifests (services/precompile_engine.py)
+backend/chapter_audio/

@@ -36,7 +36,7 @@ from db.models import (  # noqa: E402
     UserSettings,
 )
 
-EXPECTED_TABLES = {"audiocache", "book", "bookmark", "folder", "mp3export", "progress", "sentence", "usersettings"}
+EXPECTED_TABLES = {"audiocache", "book", "bookmark", "chapteraudio", "folder", "mp3export", "progress", "sentence", "usersettings"}
 
 
 def test_every_model_is_registered_on_the_shared_metadata():

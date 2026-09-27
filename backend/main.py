@@ -20,6 +20,7 @@ from routers import documents, library
 from routers import tts as tts_router
 from routers import voices as voices_router
 from routers import mp3 as mp3_router
+from routers import precompiled_audio as precompiled_audio_router
 from routers import bookmarks as bookmarks_router
 from routers import folders as folders_router
 from routers import user as user_router
@@ -56,6 +57,7 @@ def _apply_kokoro(kokoro: Any) -> None:
     tts_router.set_kokoro(kokoro)
     voices_router.set_kokoro(kokoro)
     mp3_router.set_kokoro(kokoro)
+    precompiled_audio_router.set_kokoro(kokoro)
 
 
 engine_manager.register_applier(_apply_kokoro)
@@ -98,6 +100,7 @@ app.include_router(user_router.router)
 app.include_router(tts_router.router)
 app.include_router(voices_router.router)
 app.include_router(mp3_router.router)
+app.include_router(precompiled_audio_router.router)
 app.include_router(bookmarks_router.router)
 app.include_router(folders_router.router)
 app.include_router(system_router.router)
