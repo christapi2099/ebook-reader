@@ -393,6 +393,15 @@ host's load average of ~41 made wall-clock and CPU-second figures unusable).
 | Browser `playbackRate` | `AudioBufferSourceNode.playbackRate` **resamples**; MDN: "When set to another value, the `AudioBufferSourceNode` resamples the audio before sending it to the output", and its own example treats `2.0` as an octave up. `preservesPitch` is an **HTMLMediaElement** API, not an `AudioBufferSourceNode` one | **Cited** — [MDN](https://developer.mozilla.org/en-US/docs/Web/API/AudioBufferSourceNode/playbackRate), [caniuse](https://caniuse.com/mdn-api_htmlmediaelement_preservespitch); the repo's pin is **Verified** at `audio.ts:218` |
 | Hybrid (native up to ~1.5×, stretch the residual) | Not needed while no requirement exceeds ~2.1×, and it doubles the failure surface. `01-speed-strategy.md` Recommendation 4 specifies how to build it if a true 3× is ever required: server-side, per sentence, inside `_write_cache_entry`, with `start_ts`/`end_ts` divided by the same residual | **Intent** — recorded, not built |
 
+**2026-09-27 addendum — this decision was reversed, but only for a different playback path.**
+See §6.6: a *second*, non-streaming playback path (precompiled chapter audio) now exists
+alongside the live WebSocket path this section is about, and on that second path the app
+synthesises at 1.0× only and derives every other speed with `ffmpeg atempo` — exactly the
+"synthesise at 1× then time-stretch" design this section rejected. The rejection above still
+holds for *this* (live, per-chunk-streaming) path and was not re-litigated; §6.6 explains why
+the objections don't transfer to a whole-file, non-streaming context, and is honest about which
+parts of that are measured versus a subjective A/B call.
+
 One honest note against the code: the upstream maintainer's advice in
 [hexgrad/kokoro#174](https://github.com/hexgrad/kokoro/issues/174) is the opposite of this decision —
 *"I think this is mitigated if you generate at 1x and then increase audio playback speed to 1.5x
@@ -625,6 +634,11 @@ corpus, and this document does not have a better measurement than that.
 > The **wire format is not affected** by `codec`. `stream_job` still chunks WAV to the WebSocket
 > regardless of how the row is stored — see §5.5.
 
+> **2026-09-27.** The same Opus-at-24kbps choice, made independently, is now also used for
+> *chapter-file* storage by the precompiled-audio path (§6.6) — `ChapterAudio.audio_path` points at
+> a `.opus` file on disk, not a DB blob, since a chapter-length manifest/audio pair is bigger than
+> this table's per-sentence rows were designed to hold inline. `AudioCache` itself is unchanged by
+> that feature — the precompile job only ever reads/writes it at `speed=1.0` (§6.6).
 
 ### 5.2 Key derivation
 
@@ -849,6 +863,76 @@ total**. **Intent** — recorded in `docs/research/02-synthesis-strategy.md` §6
 | Also recommended, not done | Remove the duplicate work between `_producer` and `prefetch` (they walk the same indices — see §12); add a `speed` column to `AudioCache` | ❌ **Not implemented** |
 | Also recommended — **now landed** | Route `mp3.py` through `TTSEngine` so exports share the cache and the speed-capability probe instead of duplicating both, and so an export row cannot advertise a rate the file does not have | 🟡 **In progress** — a concurrent agent landed exactly this in the working tree mid-write: `TTSEngine.synthesize_cached` + module-level `synthesize_serialized` (which submits to the *shared* `_synthesis_pool`), `mp3._synthesize` delegating to it, and a new `MP3Export.effective_speed` column. §12 items 9–10 became stale while this document was being written |
 
+### 6.6 · 2026-09-27 addendum: precompiled chapter audio (implemented)
+
+**What this is.** A second playback path, alongside — not replacing — everything in §6.1–6.5 and
+§3. `services/precompile_engine.py` + `routers/precompiled_audio.py` synthesise one chapter at
+1.0× through the same `TTSEngine`/`AudioCache` as the live path, encode it to Opus, and derive
+every other speed tier (0.75×, 1.25×, 1.5×, 2.0×, 2.5×, 3.0×) from that single 1× file via
+`ffmpeg -filter:a atempo=...` rather than a second Kokoro pass per speed. The frontend
+(`frontend/src/lib/stores/audio.ts`, `mode: 'precompiled'`) plays the result from a static
+`<audio>` element against a JSON sync manifest (per-sentence and per-word `start_ms`/`end_ms`),
+falling back to the live WebSocket path (§8) for any chapter that has not been precompiled yet.
+**Verified**, this session — `db/models.py::ChapterAudio`, `services/precompile_engine.py`,
+`routers/precompiled_audio.py`, `stores/audio.ts` (`playPrecompiled`, `dispatchPlayback`,
+`checkPrecompiledAvailability`).
+
+**Why §6.3/§6.4's rejection of full pre-synthesis and a job-table/queue doesn't apply here.**
+Both rejections were quantified against a different proposal than this one:
+
+| §6.4's objection to the earlier proposal | Why this feature's numbers differ |
+|---|---|
+| 185–355 GiB per book (raw WAV, whole book, eagerly) | This session's own measurement (against a real book, `86600065...cleancodebook.pdf`): Opus at 24 kbps runs ~94% smaller than the WAV-equivalent (e.g. 111 s of audio: 5.34 MB WAV-equivalent vs 308 KB Opus, consistently ~17× across speed tiers). And it is **per-chapter, on first open**, not eager for the whole book at once — see the trigger design below |
+| "The repo has no job table, no worker, no resumable queue" | Now true: `ChapterAudio` is exactly that table, following `MP3Export`'s existing status/phase/progress shape (§4.6) rather than inventing new vocabulary. The gap §6.4 pointed at is closed for the chapter-audio case specifically, not generally |
+| Full pre-synthesis is "strictly worse time-to-first-audio" | Not eager: a chapter is precompiled the first time it is *opened*, and the live WebSocket path (§8) plays it in the meantime — nothing waits on synthesis finishing. §6.3's core "lazy and local, not eager and total" principle is kept; only the unit of laziness changed, from "the next few sentences" (live prefetch) to "the chapter currently open" (precompile-on-open) |
+
+The multi-speed-tier cost problem §6.4 quantified (171.93 h CPU per book per voice for 11 live
+speed changes, because each was a fresh Kokoro pass) is sidestepped differently here: only the
+1.0× tier is ever a Kokoro pass; every other tier is one `ffmpeg atempo` invocation against
+already-synthesised audio — measured in this session as low-single-digit seconds per tier for a
+25-sentence sample, not comparable in kind to a second full Kokoro synthesis.
+
+**Why §3.3's objections to "synthesise at 1× then stretch" don't transfer to this path.**
+§3.3 rejected that design for the *live, per-chunk-streaming* path specifically. Re-reading its
+three arguments against this path's actual shape:
+
+- **(a) Pitch.** §3.3's naive-resample measurement (+6.90 semitones) is about *resampling*
+  (changing sample rate), which is a different operation from `atempo`'s WSOLA-family
+  time-domain stretch — `atempo` is specifically a tempo-only filter and does not resample.
+  This was **not** re-measured with the same rigor (no semitone/autocorrelation check was run
+  against `atempo` output); the informal listening comparison done in this session (this
+  session's own A/B at 1.5×/2.0×/2.5×/3.0×, live vs atempo vs native-speed) judged `atempo`
+  clearly preferable to native `speed=` above ~2×, which itself degrades audibly at that range
+  (heard as "tapering off / whispering" — consistent with §3.4's own numbers on how far native
+  speed saturates from the request). **A rigorous re-measurement of atempo's pitch fidelity is
+  a documented gap, not a settled result** — flagged here rather than silently assumed clean.
+- **(b) Timestamps "would not have been free."** They were not free here either — the
+  implementation pays exactly the cost §3.3 predicted: `precompile_engine._synthesize_atempo_tier`
+  measures the *actual* ffmpeg output duration via `ffprobe` (not the theoretical `1/factor`
+  ratio, which chained `atempo` filters and frame rounding can miss by a few ms) and rescales
+  every sentence's and word's timestamp by that measured ratio. This matches §3.3's own
+  description of what the stretch design would require, done because it is required, not
+  avoided.
+- **(c) The WSOLA-artifact and lookahead objections (§3.3's rejected-alternatives table, "WSOLA /
+  SOLA / TDHS" row) are about a *streaming* context** — "fights chunk-by-chunk streaming" and
+  needing ~100 ms of lookahead *per sentence boundary* in a live session. This path is not
+  streaming: `ffmpeg atempo` runs once, offline, against a complete chapter-length file, so
+  there is no chunk boundary for a lookahead requirement to fight. The "15% modification"
+  artifact-onset threshold Parviainen documents is a real, unaddressed risk at this path's
+  higher tiers (2.0×–3.0× are 100–200% modifications, well past that threshold) — again judged
+  acceptable by the same informal A/B, not by an artifact measurement matching §3.3's rigor.
+
+**Honest summary.** This is a considered, scoped reversal — the live path's reasoning in §3.3
+and §6.3–6.4 was not wrong for what it evaluated, and is left as-is for that (still primary,
+still the fallback) path. The precompiled path changes three things at once relative to what was
+rejected: the operation runs on a complete file instead of a stream, the codec is Opus instead of
+raw PCM, and the trigger is per-chapter-on-open instead of eager-for-the-whole-book — and it is
+exactly those three changes that the original objections' numbers and mechanisms depended on.
+What is **not** yet done to this document's own evidentiary standard: a semitone-level pitch
+check and an artifact-audibility check on `atempo` output at 2.5×/3.0×, matching the rigor
+§3.3's table applied to the alternatives it rejected. Recorded here as a follow-up rather than
+implied to already exist.
+
 ---
 
 ## 7 · The concurrency model
@@ -985,6 +1069,11 @@ nowhere.
 `/ws/tts/{book_id}` — `routers/tts.py:72-281`. One connection per reader session; the router reads
 sentences once at connect time in a short-lived session (`_load_sentences`, so no session is held open
 for the WebSocket's lifetime) and closes with code `4004` if the book does not exist.
+
+> **2026-09-27.** This is no longer the only playback path — see §6.6. It remains the path for a
+> chapter's first play (before it has been precompiled) and for any speed not covered by a
+> precompiled tier; `routers/tts.py`'s own module docstring carries the same pointer for a reader
+> who lands there directly.
 
 ### 8.1 Client → server
 

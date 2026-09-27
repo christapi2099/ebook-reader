@@ -78,6 +78,10 @@ onMount(async () => {
   audioStore.setSpeed((get(readerStore) as ReaderState).speed)
   audioStore.setCurrentIndex((get(readerStore) as ReaderState).currentIndex)
   audioStore.setVoice(get(settingsStore).voice)
+  // Chapter lookup for the precompiled-audio path — see
+  // stores/audio.ts::chapterForIndex. Set after setCurrentIndex/setVoice so
+  // the store's best-effort warm-up check reads the settled voice/index.
+  audioStore.setSentences((get(readerStore) as ReaderState).sentences)
   audioReady = true
 
   const hotkeyMap: Record<string, () => void> = {

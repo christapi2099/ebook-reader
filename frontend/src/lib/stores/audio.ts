@@ -1,5 +1,20 @@
 import { writable, get } from 'svelte/store'
-import { TTSSocket, type WordTimestamp } from '$lib/api'
+import {
+  TTSSocket,
+  type WordTimestamp,
+  type Sentence,
+  type PrecompiledManifest,
+  buildPrecompiledChapter,
+  getPrecompiledStatus,
+  getPrecompiledManifest,
+  precompiledAudioUrl,
+} from '$lib/api'
+
+/** The full speed tier set a chapter is precompiled at. Kept in one place so
+ * the set the frontend asks for matches what a fresh chapter actually needs
+ * — asking for a narrower set here would leave some speeds permanently on
+ * the live-streaming fallback path. */
+const PRECOMPILED_SPEEDS = [0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0]
 
 export interface AudioState {
   isPlaying: boolean
@@ -57,6 +72,92 @@ function createAudioStore() {
   let ctx: AudioContext | null = null
   let socket: TTSSocket | null = null
   let cancelled = false
+
+  // --------------------------------------------------------------------
+  // Precompiled playback (Opus + sync manifest), alongside the live WS path
+  // --------------------------------------------------------------------
+  // `mode` picks which clock/source the rAF tick and the transport methods
+  // use. 'live' is the original WS/AudioContext path below, unchanged.
+  // 'precompiled' plays a single <audio> element pointed at a chapter's
+  // prebuilt Opus file, with sentenceTimings/wordTimings populated once from
+  // its manifest instead of incrementally from server events — the same
+  // maps, the same rAF tick, just a different source and a different clock
+  // (`htmlAudio.currentTime` instead of `ctx.currentTime`).
+  let mode: 'live' | 'precompiled' = 'live'
+  let htmlAudio: HTMLAudioElement | null = null
+  let bookId: string | null = null
+  let sentences: Sentence[] = []
+
+  // Resolved once per (book, chapter, voice, speed) per store lifetime, not
+  // re-checked on every play/seek/resume — those must stay synchronous (no
+  // network await in the hot path: identical latency to the live path
+  // whether or not precompiled audio exists, and existing tests assert
+  // state synchronously after calling play()). `undefined` = not checked
+  // yet, `null` = checked and not ready, a manifest = checked and ready.
+  // A background check runs on the first play() of a (chapter, voice,
+  // speed) combo and, once it resolves, every later play/seek/resume/
+  // setSpeed for that combo in this session uses the precompiled path
+  // straight away.
+  const precompiledAvailability = new Map<string, PrecompiledManifest | null>()
+  const precompileTriggered = new Set<string>()
+
+  function tierKey(chapter: number, voice: string, speed: number): string {
+    return `${bookId ?? ''}:${chapter}:${voice}:${speed}`
+  }
+
+  function chapterForIndex(index: number): number {
+    return sentences[index]?.chapter ?? 0
+  }
+
+  function getHtmlAudio(): HTMLAudioElement {
+    if (!htmlAudio) htmlAudio = new Audio()
+    return htmlAudio
+  }
+
+  /** Fire-and-forget: check whether a tier is ready, cache the answer, and
+   * kick off a build if nothing exists yet. Never awaited by a transport
+   * method — it only informs the NEXT call for this (chapter, voice, speed). */
+  function checkPrecompiledAvailability(chapter: number, voice: string, speed: number): void {
+    if (!bookId) return
+    const key = tierKey(chapter, voice, speed)
+    if (precompiledAvailability.has(key)) return
+    const bid = bookId
+    // Wrapped in try/catch, not just a promise .catch(): this is a
+    // speculative background check piggybacked onto play()/seek()/setSpeed(),
+    // which must stay synchronous and must never be able to throw out of
+    // those methods — including a *synchronous* throw from the call below
+    // itself (e.g. a test's `vi.mock('$lib/api', ...)` not stubbing this
+    // export, or the function genuinely missing on an older bundle).
+    try {
+      Promise.resolve(getPrecompiledStatus(bid, chapter, voice))
+        .then(tiers => {
+          const ready = tiers.find(t => t.requested_speed === speed && t.status === 'done')
+          if (!ready) {
+            precompiledAvailability.set(key, null)
+            const anyInFlight = tiers.some(t => t.status === 'pending' || t.status === 'processing')
+            const triggerKey = `${bid}:${chapter}:${voice}`
+            if (!anyInFlight && !precompileTriggered.has(triggerKey)) {
+              precompileTriggered.add(triggerKey)
+              Promise.resolve(buildPrecompiledChapter(bid, chapter, voice, PRECOMPILED_SPEEDS)).catch(() => {
+                precompileTriggered.delete(triggerKey)
+              })
+            }
+            return
+          }
+          return Promise.resolve(getPrecompiledManifest(bid, chapter, voice, speed)).then(manifest => {
+            precompiledAvailability.set(key, manifest)
+          })
+        })
+        .catch(() => {
+          // Network hiccup or the endpoint genuinely isn't there (older
+          // backend). Leave the key unset so a later play() tries again
+          // rather than permanently assuming "not available".
+        })
+    } catch {
+      // See comment above — a synchronous throw from the call itself must
+      // not propagate into the caller's (play/seek/setSpeed) call stack.
+    }
+  }
 
   // Generation counter — bumped on every stopAll(). Captured by scheduleChunk()
   // closures so stale decode tails and onended callbacks from stopped sources
@@ -129,13 +230,20 @@ function createAudioStore() {
     for (const [i, duration] of sentenceDurations) {
       if (i < index) elapsed += duration
     }
-    const ac = ctx
+    const now = nowSeconds()
     const startedAt = sentenceTimings.get(index)
     const duration = sentenceDurations.get(index)
-    if (ac && startedAt !== undefined && duration !== undefined) {
-      elapsed += Math.min(Math.max(ac.currentTime - startedAt, 0), duration)
+    if (now !== null && startedAt !== undefined && duration !== undefined) {
+      elapsed += Math.min(Math.max(now - startedAt, 0), duration)
     }
     return elapsed
+  }
+
+  /** The playback clock, whichever mode is active. `null` when that mode's
+   * clock source doesn't exist yet (before the first play of a session). */
+  function nowSeconds(): number | null {
+    if (mode === 'precompiled') return htmlAudio ? htmlAudio.currentTime : null
+    return ctx ? ctx.currentTime : null
   }
 
   /**
@@ -153,11 +261,11 @@ function createAudioStore() {
   function startRaf() {
     if (rafId !== null) return
     function tick() {
-      const ac = ctx
-      if (!ac || cancelled) { rafId = null; return }
+      if (cancelled) { rafId = null; return }
+      const now = nowSeconds()
+      if (now === null) { rafId = null; return }
       const s = get({ subscribe })
       if (!s.isPlaying) { rafId = requestAnimationFrame(tick); return }
-      const now = ac.currentTime
 
       // Find the latest sentence whose scheduled start is <= now.
       // Taking the max (not the min) lets us catch up if several very short
@@ -296,9 +404,11 @@ function createAudioStore() {
     receivingSentenceIndex = -1
     activeSessionId = -1
     decodeChain = Promise.resolve()
+    if (htmlAudio) htmlAudio.pause()
   }
 
   function resetForPlay() {
+    mode = 'live'
     stopAll()
     cancelled = false
     update(s => ({ ...s, currentWordIndex: -1 }))
@@ -306,6 +416,101 @@ function createAudioStore() {
     const ac = getCtx()
     try { if (ac.state === 'suspended') void ac.resume() } catch (e) { console.warn('AudioContext resume failed:', e) }
     startRaf()
+  }
+
+  function resetForPrecompiledPlay() {
+    mode = 'precompiled'
+    stopAll()
+    cancelled = false
+    update(s => ({ ...s, currentWordIndex: -1 }))
+    sessionId++
+    startRaf()
+  }
+
+  function loadManifestIntoTimings(manifest: PrecompiledManifest): void {
+    sentenceTimings.clear()
+    wordTimings.clear()
+    sentenceDurations = new Map()
+    for (const seg of manifest.segments) {
+      sentenceTimings.set(seg.sentence_index, seg.start_ms / 1000)
+      sentenceDurations.set(seg.sentence_index, (seg.end_ms - seg.start_ms) / 1000)
+      if (seg.words.length > 0) {
+        wordTimings.set(
+          seg.sentence_index,
+          seg.words.map(w => ({ word: w.text, start: w.start_ms / 1000, end: w.end_ms / 1000 })),
+        )
+      }
+    }
+    update(s => ({ ...s, sentenceDurations: snapshotDurations() }))
+  }
+
+  /** Switch to (or continue) precompiled playback at `manifest`'s speed,
+   * starting from `fromIndex`. Used by play/seek/resume/setSpeed alike —
+   * the only difference between "first play of a precompiled chapter" and
+   * "switch speed tier mid-playback" is which sentence index it starts at. */
+  function playPrecompiled(manifest: PrecompiledManifest, chapter: number, voice: string, fromIndex: number): void {
+    if (!bookId) return
+    resetForPrecompiledPlay()
+    loadManifestIntoTimings(manifest)
+    const audio = getHtmlAudio()
+    const url = precompiledAudioUrl(bookId, chapter, voice, manifest.requested_speed)
+    const myGeneration = generation
+    const segment = manifest.segments.find(s => s.sentence_index === fromIndex) ?? manifest.segments[0]
+    const startSeconds = segment ? segment.start_ms / 1000 : 0
+
+    update(s => ({
+      ...s,
+      isPlaying: true,
+      buffering: audio.src !== url, // only "buffering" while a new file has to load
+      currentIndex: fromIndex,
+      currentWordIndex: -1,
+      speed: manifest.requested_speed,
+    }))
+
+    const startPlayback = () => {
+      if (myGeneration !== generation) return // superseded by a later play/seek/pause
+      audio.currentTime = startSeconds
+      try {
+        // A real browser returns a Promise that can reject (autoplay policy);
+        // some environments (jsdom in tests) throw synchronously instead —
+        // guard both the same way, since neither should ever propagate out
+        // of a transport method.
+        audio.play()?.catch(() => {})
+      } catch {
+        // ignored — see above
+      }
+      update(s => ({ ...s, buffering: false }))
+    }
+
+    if (audio.src === url) {
+      startPlayback()
+    } else {
+      audio.src = url
+      audio.addEventListener('loadedmetadata', startPlayback, { once: true })
+    }
+
+    audio.onended = () => {
+      if (myGeneration !== generation) return
+      update(s => ({ ...s, isPlaying: false, buffering: false }))
+      stopRaf()
+    }
+  }
+
+  /** play()/seek() share this: use the cached precompiled tier for this
+   * (chapter, voice, speed) if one is already known to be ready, otherwise
+   * fall back to `playLive` immediately (never await a network check in a
+   * transport method) and kick off a background check for next time. */
+  function dispatchPlayback(index: number, playLive: () => void): void {
+    const state = get({ subscribe })
+    const chapter = chapterForIndex(index)
+    const key = tierKey(chapter, state.voice, state.speed)
+    const cached = precompiledAvailability.get(key)
+    if (cached) {
+      playPrecompiled(cached, chapter, state.voice, index)
+      return
+    }
+    playLive()
+    if (!precompiledAvailability.has(key)) checkPrecompiledAvailability(chapter, state.voice, state.speed)
   }
 
   return {
@@ -319,6 +524,13 @@ function createAudioStore() {
       // A new connection means a new engine session: whatever rate the previous
       // one refused says nothing about this one.
       speedDowngradeStore.set(null)
+
+      bookId = bid
+      sentences = []
+      mode = 'live'
+      precompiledAvailability.clear()
+      precompileTriggered.clear()
+      if (htmlAudio) { htmlAudio.pause(); htmlAudio.removeAttribute('src') }
 
       socket = new TTSSocket(bid)
 
@@ -383,15 +595,34 @@ function createAudioStore() {
       socket.connect()
     },
 
+    setSentences(list: Sentence[]) {
+      sentences = list
+      // Best-effort warm-up: if the reader's starting chapter already has a
+      // precompiled tier at the current voice/speed, the very first play()
+      // this session can use it instead of paying for one live round-trip
+      // first. Not awaited — dispatchPlayback() falls back to live and picks
+      // this up on the NEXT call if it hasn't resolved yet.
+      const state = get({ subscribe })
+      checkPrecompiledAvailability(chapterForIndex(state.currentIndex), state.voice, state.speed)
+    },
+
     play(fromIndex: number) {
       if (!socket) return
-      resetForPlay()
-      update(s => ({ ...s, currentWordIndex: -1, isPlaying: true, buffering: true, currentIndex: fromIndex }))
-      const state = get({ subscribe })
-      socket.play(fromIndex, state.voice, state.speed, sessionId)
+      dispatchPlayback(fromIndex, () => {
+        resetForPlay()
+        update(s => ({ ...s, currentWordIndex: -1, isPlaying: true, buffering: true, currentIndex: fromIndex }))
+        const state = get({ subscribe })
+        socket!.play(fromIndex, state.voice, state.speed, sessionId)
+      })
     },
 
     pause() {
+      if (mode === 'precompiled' && htmlAudio) {
+        htmlAudio.pause()
+        stopRaf()
+        update(s => ({ ...s, isPlaying: false, buffering: false, currentWordIndex: -1 }))
+        return
+      }
       if (!socket) return
       socket.pause()
       stopAll()
@@ -402,6 +633,13 @@ function createAudioStore() {
 
     resume() {
       const state = get({ subscribe })
+      if (mode === 'precompiled' && htmlAudio) {
+        cancelled = false
+        update(s => ({ ...s, isPlaying: true }))
+        try { htmlAudio.play()?.catch(() => {}) } catch { /* see playPrecompiled's startPlayback */ }
+        startRaf()
+        return
+      }
       if (!socket) return
       resetForPlay()
       update(s => ({ ...s, currentWordIndex: -1, isPlaying: true, buffering: true }))
@@ -410,10 +648,12 @@ function createAudioStore() {
 
     seek(index: number) {
       if (!socket) return
-      resetForPlay()
-      update(s => ({ ...s, currentWordIndex: -1, isPlaying: true, currentIndex: index, buffering: true }))
-      const state = get({ subscribe })
-      socket.seek(index, state.voice, state.speed, sessionId)
+      dispatchPlayback(index, () => {
+        resetForPlay()
+        update(s => ({ ...s, currentWordIndex: -1, isPlaying: true, currentIndex: index, buffering: true }))
+        const state = get({ subscribe })
+        socket!.seek(index, state.voice, state.speed, sessionId)
+      })
     },
 
     setSpeed(newSpeed: number) {
@@ -434,6 +674,22 @@ function createAudioStore() {
         elapsedSeconds = 0
         update(s => ({ ...s, elapsedSeconds: 0, sentenceDurations: {} }))
       }
+
+      const chapter = chapterForIndex(state.currentIndex)
+      const key = tierKey(chapter, state.voice, newSpeed)
+      const cachedManifest = precompiledAvailability.get(key)
+      if (!precompiledAvailability.has(key)) checkPrecompiledAvailability(chapter, state.voice, newSpeed)
+
+      if (cachedManifest) {
+        // A precompiled tier already exists at the new speed: switch straight
+        // to it (no server round-trip, unlike the live path's re-synthesis-
+        // from-here below) if playback is active; otherwise there is nothing
+        // to do until the next play()/resume(), which will pick this same
+        // cached tier up via dispatchPlayback().
+        if (state.isPlaying) playPrecompiled(cachedManifest, chapter, state.voice, state.currentIndex)
+        return
+      }
+
       if (!socket) return
       // Debounced cache warm-up at new speed (100ms) — prevents rapid task
       // cancellations when user drags a speed slider quickly.
@@ -467,6 +723,13 @@ function createAudioStore() {
       socket = null
       ctx?.close()
       ctx = null
+      if (htmlAudio) { htmlAudio.pause(); htmlAudio.removeAttribute('src'); htmlAudio.onended = null }
+      htmlAudio = null
+      mode = 'live'
+      bookId = null
+      sentences = []
+      precompiledAvailability.clear()
+      precompileTriggered.clear()
       sentenceDurations = new Map()
       elapsedSeconds = 0
       speedDowngradeStore.set(null)

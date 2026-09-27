@@ -50,6 +50,7 @@
       audioStore.init(bookId!)
       audioStore.setVoice(settings.voice)
       audioStore.setCurrentIndex(0)
+      audioStore.setSentences(sentences)
 
       mode = 'reading'
     } catch (e: any) {
