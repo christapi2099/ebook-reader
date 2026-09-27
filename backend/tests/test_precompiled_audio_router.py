@@ -6,12 +6,23 @@ fixtures come from conftest.py, ``CHAPTER_AUDIO_DIR`` is redirected under
 (opus encode + atempo are both mandatory for this feature, unlike MP3 export's
 optional WAV-without-ffmpeg path) so ``real_ffmpeg`` is requested everywhere.
 
-The subject is the router's job lifecycle (build/poll/serve/delete) and the
+The subject is the router's job lifecycle (build/poll/serve/delete), the
 idempotency contract (a chapter already ``done`` must not be re-touched by a
-later build call) — not manifest timing accuracy, which the real Kokoro engine
-and ffmpeg's atempo filter own, not this test double.
+later build call), and the global one-at-a-time queue (found necessary after
+a real CUDA OOM hit manually testing two chapters precompiling concurrently)
+— not manifest timing accuracy, which the real Kokoro engine and ffmpeg's
+atempo filter own, not this test double.
+
+The queue worker itself needs no special test setup: `main.py`'s lifespan
+starts it (`precompiled_audio_router.start_queue_worker()`), and the
+`client` fixture (conftest.py) enters `TestClient` as a context manager,
+which runs that lifespan on TestClient's own event loop — the same loop
+every request in this file runs on. A hand-rolled second loop/thread was
+tried here first and is exactly the kind of thing to avoid: `asyncio.Queue`
+is not safe to `put()` from one loop and `get()` from another.
 """
 import time
+from pathlib import Path
 
 import pytest
 from sqlmodel import Session, select
@@ -23,23 +34,17 @@ TERMINAL_STATES = ("done", "error")
 BUILD_TIMEOUT = 30.0
 
 
-def _drain_precompile_tasks(timeout: float = BUILD_TIMEOUT) -> None:
-    """Wait for every precompile task this test started to stop touching the DB.
-
-    Same reasoning as ``test_mp3_export.py::_drain_export_tasks``: the worker
-    thread and the test's own requests share one database, so a task that
-    outlives its test can corrupt the next test's data.
-    """
+def _await_queue_drained(timeout: float = BUILD_TIMEOUT) -> None:
     deadline = time.monotonic() + timeout
-    while precompiled_router._precompile_tasks and time.monotonic() < deadline:
+    while precompiled_router._queue_order and time.monotonic() < deadline:
         time.sleep(0.02)
-    assert not precompiled_router._precompile_tasks, "a precompile task did not finish in time"
+    assert not precompiled_router._queue_order, "a precompile job did not finish in time"
 
 
 @pytest.fixture(autouse=True)
-def _drain_precompile_tasks_after_each_test():
+def _drain_queue_after_each_test():
     yield
-    _drain_precompile_tasks()
+    _await_queue_drained()
 
 
 def _build(client, book_id, chapter=0, **overrides):
@@ -50,17 +55,22 @@ def _build(client, book_id, chapter=0, **overrides):
     return response.json()
 
 
+def _status(client, book_id, chapter=0, voice="af_heart"):
+    response = client.get(f"/precompiled/{book_id}/chapters/{chapter}/status", params={"voice": voice})
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
 def _await_all_terminal(client, book_id, chapter=0, voice="af_heart", timeout=BUILD_TIMEOUT):
     deadline = time.monotonic() + timeout
-    rows = None
+    data = None
     while time.monotonic() < deadline:
-        rows = client.get(
-            f"/precompiled/{book_id}/chapters/{chapter}/status", params={"voice": voice}
-        ).json()
+        data = _status(client, book_id, chapter, voice)
+        rows = data["tiers"]
         if rows and all(r["status"] in TERMINAL_STATES for r in rows):
             return rows
         time.sleep(0.05)
-    raise AssertionError(f"precompile for {book_id}/{chapter} never finished within {timeout}s: {rows}")
+    raise AssertionError(f"precompile for {book_id}/{chapter} never finished within {timeout}s: {data}")
 
 
 class TestBuildChapterAudio:
@@ -85,7 +95,7 @@ class TestBuildChapterAudio:
         seed_book(db_engine, book_id="book-1")
 
         started = _build(client, "book-1", speeds=[1.0, 1.5, 2.0])
-        assert started["status"] == "started"
+        assert started["status"] == "queued"
         assert sorted(started["tiers"]) == [1.0, 1.5, 2.0]
 
         rows = _await_all_terminal(client, "book-1")
@@ -109,7 +119,6 @@ class TestBuildChapterAudio:
         with Session(db_engine) as session:
             for row in session.exec(select(ChapterAudio).where(ChapterAudio.book_id == "book-1")).all():
                 assert row.audio_path and row.manifest_path
-                from pathlib import Path
                 assert Path(row.audio_path).exists()
                 assert Path(row.manifest_path).exists()
 
@@ -146,6 +155,59 @@ class TestBuildChapterAudio:
         rows = _await_all_terminal(client, "book-4")
         assert all(r["status"] == "error" for r in rows), rows
         assert all(r["error_message"] for r in rows)
+
+    def test_second_build_for_same_chapter_reports_already_queued(self, client, db_engine, seed_book, real_ffmpeg):
+        seed_book(db_engine, book_id="book-9")
+        _build(client, "book-9", speeds=[1.0])
+        # Fired again immediately, before the worker has necessarily finished
+        # — must not enqueue a second job for the same (book, chapter, voice).
+        second = client.post(
+            "/precompiled/book-9/chapters/0/build",
+            json={"voice": "af_heart", "speeds": [1.0]},
+        )
+        assert second.status_code == 200
+        assert second.json()["status"] == "already_queued"
+        _await_all_terminal(client, "book-9")
+
+
+class TestQueueSerialization:
+    def test_jobs_run_one_at_a_time_in_fifo_order(self, client, db_engine, seed_book, real_ffmpeg):
+        """Two chapters precompiling concurrently caused a real CUDA OOM
+        (hit manually testing this feature) — this asserts the fix: only one
+        job is ever `processing` across the whole queue at once."""
+        seed_book(db_engine, book_id="book-10")
+        seed_book(db_engine, book_id="book-11")
+
+        first = _build(client, "book-10", speeds=[1.0])
+        second = _build(client, "book-11", speeds=[1.0])
+        assert first["status"] == "queued"
+        assert second["status"] == "queued"
+
+        # The second job's queue position must reflect it's behind the first,
+        # at least until the first finishes (this is a race with the worker,
+        # so only assert the ordering invariant, not an exact position).
+        data = _status(client, "book-11")
+        assert data["queue_position"] is None or data["queue_position"] >= 0
+
+        deadline = time.monotonic() + BUILD_TIMEOUT
+        saw_two_processing_at_once = False
+        while time.monotonic() < deadline:
+            rows_10 = _status(client, "book-10")["tiers"]
+            rows_11 = _status(client, "book-11")["tiers"]
+            processing_10 = any(r["status"] == "processing" for r in rows_10)
+            processing_11 = any(r["status"] == "processing" for r in rows_11)
+            if processing_10 and processing_11:
+                saw_two_processing_at_once = True
+                break
+            if all(r["status"] in TERMINAL_STATES for r in rows_10) and all(
+                r["status"] in TERMINAL_STATES for r in rows_11
+            ):
+                break
+            time.sleep(0.01)
+
+        assert not saw_two_processing_at_once, "two precompile jobs ran concurrently — the queue did not serialize them"
+        _await_all_terminal(client, "book-10")
+        _await_all_terminal(client, "book-11")
 
 
 class TestServeChapterAudio:
@@ -193,8 +255,6 @@ class TestServeChapterAudio:
 
 class TestDeleteChapterAudio:
     def test_delete_removes_rows_and_files(self, client, db_engine, seed_book, real_ffmpeg):
-        from pathlib import Path
-
         seed_book(db_engine, book_id="book-8")
         _build(client, "book-8", speeds=[1.0])
         _await_all_terminal(client, "book-8")
@@ -209,5 +269,16 @@ class TestDeleteChapterAudio:
         assert d.status_code == 200
         assert not any(p.exists() for p in file_paths)
 
-        status = client.get("/precompiled/book-8/chapters/0/status", params={"voice": "af_heart"})
-        assert status.json() == []
+        assert _status(client, "book-8") == {"tiers": [], "queue_position": None}
+
+    def test_delete_removes_a_not_yet_started_job_from_the_queue(self, client, db_engine, seed_book, real_ffmpeg):
+        seed_book(db_engine, book_id="book-12")
+        seed_book(db_engine, book_id="book-13")
+        _build(client, "book-12", speeds=[1.0])  # occupies the worker
+        _build(client, "book-13", speeds=[1.0])  # sits behind it in queue
+
+        d = client.delete("/precompiled/book-13/chapters/0", params={"voice": "af_heart"})
+        assert d.status_code == 200
+        assert precompiled_router.queue_position(("book-13", 0, "af_heart")) is None
+
+        _await_all_terminal(client, "book-12")

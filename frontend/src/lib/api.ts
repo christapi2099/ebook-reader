@@ -310,12 +310,28 @@ export interface PrecompiledManifest {
   segments: PrecompiledSegment[]
 }
 
+export interface PrecompiledBuildResult {
+  status: 'queued' | 'already_queued' | 'already_done'
+  /** 0 = running now, 1 = next in line, ... absent when status is 'already_done'. */
+  queue_position?: number
+  tiers?: number[]
+}
+
+export interface PrecompiledStatusResult {
+  tiers: PrecompiledTierStatus[]
+  /** This chapter's own position in the global precompile queue (see
+   * routers/precompiled_audio.py's module docstring for why builds are
+   * serialized): 0 = running now, 1 = next, ... null = not queued (either
+   * finished, errored, or never requested). */
+  queue_position: number | null
+}
+
 export async function buildPrecompiledChapter(
   bookId: string,
   chapter: number,
   voice: string,
   speeds: number[],
-): Promise<{ status: string; tiers?: number[] }> {
+): Promise<PrecompiledBuildResult> {
   return fetchApi(`/precompiled/${bookId}/chapters/${chapter}/build`, {
     method: 'POST',
     body: JSON.stringify({ voice, speeds }),
@@ -326,7 +342,7 @@ export async function getPrecompiledStatus(
   bookId: string,
   chapter: number,
   voice: string,
-): Promise<PrecompiledTierStatus[]> {
+): Promise<PrecompiledStatusResult> {
   return fetchApi(
     `/precompiled/${bookId}/chapters/${chapter}/status?voice=${encodeURIComponent(voice)}`,
   )

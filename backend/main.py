@@ -76,12 +76,17 @@ async def lifespan(app: FastAPI):
     # and with a database that already sits under the cap.
     await audio_cache.sweep_once(engine)
     sweeper = audio_cache.start_periodic_sweep(engine)
+    # One worker, module-level: precompile jobs run one chapter at a time,
+    # not one task per POST .../build — see routers/precompiled_audio.py's
+    # module docstring for the CUDA-OOM this fixes.
+    precompiled_audio_router.start_queue_worker()
     try:
         yield
     finally:
         # Cancelled and awaited on shutdown so the task cannot outlive the
         # engine, and a sweep in flight cannot keep the process alive.
         await audio_cache.stop_periodic_sweep(sweeper)
+        await precompiled_audio_router.stop_queue_worker()
 
 
 app = FastAPI(lifespan=lifespan)

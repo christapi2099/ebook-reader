@@ -57,6 +57,22 @@ export interface SpeedDowngrade {
  */
 export const speedDowngradeStore = writable<SpeedDowngrade | null>(null)
 
+export interface PrecompileProgress {
+  chapter: number
+  status: 'pending' | 'processing' | 'error'
+  progress: number
+  /** 0 = running now, 1 = next in line, ... null = not in the queue (yet). */
+  queuePosition: number | null
+}
+
+/**
+ * Background-build status for the chapter/speed a reader is currently on, so
+ * the UI can show "Preparing offline audio… (2nd in queue)" instead of
+ * leaving a precompile job invisible. `null` when nothing is in flight for
+ * the current chapter (already done, not yet checked, or genuinely idle).
+ */
+export const precompileProgressStore = writable<PrecompileProgress | null>(null)
+
 function createAudioStore() {
   const { subscribe, set, update } = writable<AudioState>({
     isPlaying: false,
@@ -100,6 +116,11 @@ function createAudioStore() {
   // straight away.
   const precompiledAvailability = new Map<string, PrecompiledManifest | null>()
   const precompileTriggered = new Set<string>()
+  // Bumped on init()/destroy() so a progress-poll loop started for a
+  // previous book (or before a destroy()) recognizes it's stale and stops
+  // writing to precompileProgressStore instead of leaking cross-book state.
+  let pollGeneration = 0
+  const PRECOMPILE_POLL_MS = 2000
 
   function tierKey(chapter: number, voice: string, speed: number): string {
     return `${bookId ?? ''}:${chapter}:${voice}:${speed}`
@@ -114,49 +135,98 @@ function createAudioStore() {
     return htmlAudio
   }
 
-  /** Fire-and-forget: check whether a tier is ready, cache the answer, and
-   * kick off a build if nothing exists yet. Never awaited by a transport
-   * method — it only informs the NEXT call for this (chapter, voice, speed). */
+  /** Fire-and-forget: check whether a tier is ready, cache the answer, kick
+   * off a build if nothing exists yet, and — while a build is genuinely in
+   * flight — poll until it resolves, publishing to precompileProgressStore
+   * so the UI has something to show. Never awaited by a transport method —
+   * this only informs the NEXT call for this (chapter, voice, speed); the
+   * caller (play/seek/setSpeed) always proceeds synchronously without it. */
   function checkPrecompiledAvailability(chapter: number, voice: string, speed: number): void {
     if (!bookId) return
     const key = tierKey(chapter, voice, speed)
     if (precompiledAvailability.has(key)) return
+    // Mark "checking" immediately (not just when a definitive answer comes
+    // back) — otherwise a second play()/seek() call before this poll's first
+    // response arrives sees no cache entry yet and starts a second, parallel
+    // poll loop for the same key.
+    precompiledAvailability.set(key, null)
     const bid = bookId
-    // Wrapped in try/catch, not just a promise .catch(): this is a
-    // speculative background check piggybacked onto play()/seek()/setSpeed(),
-    // which must stay synchronous and must never be able to throw out of
-    // those methods — including a *synchronous* throw from the call below
-    // itself (e.g. a test's `vi.mock('$lib/api', ...)` not stubbing this
-    // export, or the function genuinely missing on an older bundle).
-    try {
-      Promise.resolve(getPrecompiledStatus(bid, chapter, voice))
-        .then(tiers => {
-          const ready = tiers.find(t => t.requested_speed === speed && t.status === 'done')
-          if (!ready) {
-            precompiledAvailability.set(key, null)
+    const myGeneration = pollGeneration
+
+    const poll = () => {
+      // Wrapped in try/catch, not just a promise .catch(): this is a
+      // speculative background check piggybacked onto play()/seek()/
+      // setSpeed(), which must stay synchronous and must never be able to
+      // throw out of those methods — including a *synchronous* throw from
+      // the call below itself (e.g. a test's `vi.mock('$lib/api', ...)` not
+      // stubbing this export, or the function genuinely missing on an
+      // older bundle).
+      try {
+        Promise.resolve(getPrecompiledStatus(bid, chapter, voice))
+          .then(data => {
+            if (myGeneration !== pollGeneration) return // a new book/destroy() superseded this poll
+            const tiers = data.tiers
+            const tier = tiers.find(t => t.requested_speed === speed)
+
+            if (tier?.status === 'done') {
+              precompileProgressStore.update(p => (p?.chapter === chapter ? null : p))
+              return Promise.resolve(getPrecompiledManifest(bid, chapter, voice, speed)).then(manifest => {
+                if (myGeneration !== pollGeneration) return
+                precompiledAvailability.set(key, manifest)
+              })
+            }
+
+            if (tier?.status === 'error') {
+              precompileProgressStore.update(p => (p?.chapter === chapter ? null : p))
+              return
+            }
+
+            if (tier) {
+              // pending or processing: still waiting, keep polling.
+              precompileProgressStore.set({
+                chapter, status: tier.status as 'pending' | 'processing',
+                progress: tier.progress, queuePosition: data.queue_position,
+              })
+              setTimeout(poll, PRECOMPILE_POLL_MS)
+              return
+            }
+
+            // No row at all yet for this tier: nothing has been requested.
             const anyInFlight = tiers.some(t => t.status === 'pending' || t.status === 'processing')
             const triggerKey = `${bid}:${chapter}:${voice}`
             if (!anyInFlight && !precompileTriggered.has(triggerKey)) {
               precompileTriggered.add(triggerKey)
-              Promise.resolve(buildPrecompiledChapter(bid, chapter, voice, PRECOMPILED_SPEEDS)).catch(() => {
-                precompileTriggered.delete(triggerKey)
-              })
+              Promise.resolve(buildPrecompiledChapter(bid, chapter, voice, PRECOMPILED_SPEEDS))
+                .then(result => {
+                  if (myGeneration !== pollGeneration) return
+                  if (result.status === 'queued' || result.status === 'already_queued') {
+                    precompileProgressStore.set({
+                      chapter, status: 'pending',
+                      progress: 0, queuePosition: result.queue_position ?? null,
+                    })
+                    setTimeout(poll, PRECOMPILE_POLL_MS)
+                  }
+                })
+                .catch(() => { precompileTriggered.delete(triggerKey) })
+            } else if (anyInFlight) {
+              // Another tier for this chapter is already building; keep
+              // polling so this speed's own completion is still noticed.
+              setTimeout(poll, PRECOMPILE_POLL_MS)
             }
-            return
-          }
-          return Promise.resolve(getPrecompiledManifest(bid, chapter, voice, speed)).then(manifest => {
-            precompiledAvailability.set(key, manifest)
           })
-        })
-        .catch(() => {
-          // Network hiccup or the endpoint genuinely isn't there (older
-          // backend). Leave the key unset so a later play() tries again
-          // rather than permanently assuming "not available".
-        })
-    } catch {
-      // See comment above — a synchronous throw from the call itself must
-      // not propagate into the caller's (play/seek/setSpeed) call stack.
+          .catch(() => {
+            // Network hiccup or the endpoint genuinely isn't there (older
+            // backend). Leave the key unset so a later play() tries again
+            // rather than permanently assuming "not available", and don't
+            // reschedule — an endpoint that doesn't exist never will.
+          })
+      } catch {
+        // See comment above — a synchronous throw from the call itself must
+        // not propagate into the caller's (play/seek/setSpeed) call stack.
+      }
     }
+
+    poll()
   }
 
   // Generation counter — bumped on every stopAll(). Captured by scheduleChunk()
@@ -530,6 +600,8 @@ function createAudioStore() {
       mode = 'live'
       precompiledAvailability.clear()
       precompileTriggered.clear()
+      pollGeneration++
+      precompileProgressStore.set(null)
       if (htmlAudio) { htmlAudio.pause(); htmlAudio.removeAttribute('src') }
 
       socket = new TTSSocket(bid)
@@ -730,6 +802,8 @@ function createAudioStore() {
       sentences = []
       precompiledAvailability.clear()
       precompileTriggered.clear()
+      pollGeneration++
+      precompileProgressStore.set(null)
       sentenceDurations = new Map()
       elapsedSeconds = 0
       speedDowngradeStore.set(null)

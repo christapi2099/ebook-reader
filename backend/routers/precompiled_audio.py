@@ -7,12 +7,24 @@ of that story. The actual synthesis/atempo logic lives in
 ``services/precompile_engine.py`` — this module is job bookkeeping and HTTP
 surface only, following the same shape as ``routers/mp3.py``'s export job
 (``create_export``/``_run_export``/``_run_export_blocking``).
+
+Precompile jobs run through a single global FIFO queue (`_job_queue`), one
+chapter at a time, rather than each `POST .../build` spawning its own task.
+This exists because of a real failure hit manually testing this feature: two
+chapters precompiling concurrently on a 4 GB GPU produced a CUDA OOM (the
+live WebSocket path shares the same GPU too, but that contention is not new
+here and is out of scope for this queue — see the module docstring in
+`routers/tts.py`). Queuing precompile jobs specifically is enough to fix the
+failure actually observed: multiple *precompile* jobs piling onto the GPU at
+once, which happens easily since a build is auto-triggered on every
+never-before-opened chapter.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -38,7 +50,95 @@ _kokoro = None
 # process, so this job shares the speed-capability probe and the on-disk
 # AudioCache with everything else instead of maintaining its own copies.
 _engine: TTSEngine | None = None
-_precompile_tasks: dict[tuple[str, int, str], asyncio.Task] = {}
+
+JobKey = tuple[str, int, str]  # (book_id, chapter, voice)
+
+
+@dataclass
+class _QueuedJob:
+    key: JobKey
+    book_id: str
+    chapter: int
+    voice: str
+    row_id_native: int
+    native_needs_work: bool
+    atempo_row_ids_to_build: dict[float, int]
+
+
+# All access to these three happens on the event loop thread only (enqueue
+# from a request handler, dequeue/pop from the worker coroutine below) — both
+# run as asyncio tasks on the same loop, so no lock is needed despite the
+# worker awaiting across the blocking synthesis call.
+_job_queue: "asyncio.Queue[_QueuedJob]" = asyncio.Queue()
+_queue_order: list[JobKey] = []  # FIFO order, index 0 is the currently-running job
+_worker_task: asyncio.Task | None = None
+
+
+def queue_position(key: JobKey) -> int | None:
+    """0 = running now, 1 = next, ... None = not queued at all."""
+    try:
+        return _queue_order.index(key)
+    except ValueError:
+        return None
+
+
+async def _queue_worker() -> None:
+    """Run queued precompile jobs one at a time, forever.
+
+    Started once at app startup (`main.py`'s lifespan) and cancelled at
+    shutdown — the same lifecycle as `services/audio_cache.py`'s periodic
+    sweep task.
+    """
+    while True:
+        job = await _job_queue.get()
+        try:
+            await run_in_threadpool(
+                _run_precompile_blocking, job.row_id_native, job.native_needs_work,
+                job.atempo_row_ids_to_build, job.book_id, job.chapter, job.voice,
+            )
+        except Exception:
+            logger.warning("Precompile job %s failed unexpectedly", job.key, exc_info=True)
+        finally:
+            if _queue_order and _queue_order[0] == job.key:
+                _queue_order.pop(0)
+            _job_queue.task_done()
+
+
+def start_queue_worker() -> asyncio.Task:
+    """Start (or restart) the queue worker, bound to whatever loop is running now.
+
+    ``asyncio.Queue`` binds to the first loop that calls ``get``/``put`` on it
+    and raises if a later call comes from a different loop — harmless for the
+    single continuous app lifespan this runs under in production, but fatal
+    across the backend test suite, where every test's ``TestClient`` gets its
+    own fresh loop: the worker's `await _job_queue.get()` would bind to test
+    N's loop, that loop closes when the test ends, and test N+1's *new*
+    worker task crashes immediately trying to `get()` from a queue bound to a
+    dead loop — silently, since nothing awaits a bare `asyncio.create_task`
+    result, so a build request just queues forever with nothing to dequeue it
+    (caught here after every subsequent build in the suite burned its full
+    poll timeout waiting). Recreating the queue here, every time a *fresh*
+    worker actually starts, closes that gap: a fresh queue always matches the
+    loop the fresh worker is about to run on. Safe in production too — this
+    only ever runs once, at real startup, before anything could be queued.
+    """
+    global _worker_task, _job_queue
+    if _worker_task is None or _worker_task.done():
+        _job_queue = asyncio.Queue()
+        _queue_order.clear()
+        _worker_task = asyncio.create_task(_queue_worker())
+    return _worker_task
+
+
+async def stop_queue_worker() -> None:
+    global _worker_task
+    if _worker_task is not None:
+        _worker_task.cancel()
+        try:
+            await _worker_task
+        except asyncio.CancelledError:
+            pass
+        _worker_task = None
 
 
 def set_kokoro(kokoro):
@@ -88,31 +188,6 @@ def _run_precompile_blocking(
     )
 
 
-async def _run_precompile(
-    key: tuple[str, int, str],
-    row_id_native: int,
-    native_needs_work: bool,
-    atempo_row_ids_to_build: dict[float, int],
-    book_id: str,
-    chapter: int,
-    voice: str,
-) -> None:
-    """Offload the blocking synthesis/ffmpeg work to a worker thread.
-
-    Same reasoning as ``routers/mp3.py::_run_export``: Kokoro inference and
-    ffmpeg are both blocking, and this can run for minutes on a long chapter —
-    it must not freeze the event loop (or the live WS playback path) for that
-    whole time.
-    """
-    try:
-        await run_in_threadpool(
-            _run_precompile_blocking, row_id_native, native_needs_work,
-            atempo_row_ids_to_build, book_id, chapter, voice,
-        )
-    finally:
-        _precompile_tasks.pop(key, None)
-
-
 class BuildRequest(BaseModel):
     voice: str = "af_heart"
     speeds: list[float] = [0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0]
@@ -134,13 +209,13 @@ async def build_chapter_audio(book_id: str, chapter: int, body: BuildRequest):
         raise HTTPException(status_code=400, detail=str(exc))
 
     key = (book_id, chapter, body.voice)
-    existing_task = _precompile_tasks.get(key)
-    if existing_task is not None and not existing_task.done():
+    existing_position = queue_position(key)
+    if existing_position is not None:
         # Idempotent: a chapter opened twice in quick succession (e.g. two tabs,
-        # or a re-render) must not spawn a second synthesis job for the same
+        # or a re-render) must not enqueue a second synthesis job for the same
         # audio — the frontend calls this unconditionally on every chapter open
         # that isn't already `done`.
-        return {"status": "already_running"}
+        return {"status": "already_queued", "queue_position": existing_position}
 
     with Session(_db.engine) as session:
         require_book(session, book_id)
@@ -201,16 +276,16 @@ async def build_chapter_audio(book_id: str, chapter: int, body: BuildRequest):
     if not native_needs_work and not atempo_row_ids_to_build:
         return {"status": "already_done"}
 
-    task = asyncio.create_task(
-        _run_precompile(
-            key, row_id_native, native_needs_work, atempo_row_ids_to_build,
-            book_id, chapter, body.voice,
-        )
+    job = _QueuedJob(
+        key=key, book_id=book_id, chapter=chapter, voice=body.voice,
+        row_id_native=row_id_native, native_needs_work=native_needs_work,
+        atempo_row_ids_to_build=atempo_row_ids_to_build,
     )
-    _precompile_tasks[key] = task
+    _queue_order.append(key)
+    await _job_queue.put(job)
 
     tiers = ([NATIVE_SPEED] if native_needs_work else []) + list(atempo_row_ids_to_build.keys())
-    return {"status": "started", "tiers": tiers}
+    return {"status": "queued", "queue_position": queue_position(key), "tiers": tiers}
 
 
 @router.get("/{book_id}/chapters/{chapter}/status")
@@ -223,7 +298,7 @@ def get_chapter_status(book_id: str, chapter: int, voice: str = "af_heart"):
                 ChapterAudio.voice == voice,
             )
         ).all()
-        return [
+        tiers = [
             {
                 "requested_speed": r.requested_speed,
                 "effective_speed": r.effective_speed,
@@ -236,6 +311,7 @@ def get_chapter_status(book_id: str, chapter: int, voice: str = "af_heart"):
             }
             for r in rows
         ]
+        return {"tiers": tiers, "queue_position": queue_position((book_id, chapter, voice))}
 
 
 def _find_done_tier(session: Session, book_id: str, chapter: int, voice: str, speed: float) -> ChapterAudio:
@@ -280,6 +356,16 @@ def get_chapter_audio(book_id: str, chapter: int, voice: str = "af_heart", speed
 # deliberately deferred rather than guessed at here.
 @router.delete("/{book_id}/chapters/{chapter}")
 def delete_chapter_audio(book_id: str, chapter: int, voice: str = "af_heart"):
+    key = (book_id, chapter, voice)
+    # A job still waiting in line (not yet dequeued by the worker) is removed
+    # outright — its rows are about to be deleted, so there is nothing left
+    # for it to write into. A job already RUNNING is a known, accepted gap
+    # (no cancellation exists here, matching MP3Export's own lack of one):
+    # it will finish and write to a path/row that may no longer exist, and
+    # `_update_tier` already no-ops silently on a missing row.
+    if key in _queue_order and _queue_order[0] != key:
+        _queue_order.remove(key)
+
     with Session(_db.engine) as session:
         rows = session.exec(
             select(ChapterAudio).where(

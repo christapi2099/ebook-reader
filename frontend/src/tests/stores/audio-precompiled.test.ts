@@ -39,7 +39,7 @@ const manifest = {
 
 const statusCalls: unknown[] = []
 const buildCalls: unknown[] = []
-let statusResponse: unknown[] = []
+let statusResponse: { tiers: unknown[]; queue_position: number | null } = { tiers: [], queue_position: null }
 
 vi.mock('$lib/api', () => {
   const sentMessages: unknown[] = []
@@ -70,7 +70,7 @@ vi.mock('$lib/api', () => {
     getPrecompiledManifest: () => Promise.resolve(manifest),
     buildPrecompiledChapter: (bookId: string, chapter: number, voice: string, speeds: number[]) => {
       buildCalls.push({ bookId, chapter, voice, speeds })
-      return Promise.resolve({ status: 'started' })
+      return Promise.resolve({ status: 'queued', queue_position: 0 })
     },
     precompiledAudioUrl: (bookId: string, chapter: number, voice: string, speed: number) =>
       `http://test/${bookId}/${chapter}/${voice}/${speed}`,
@@ -94,7 +94,7 @@ describe('audioStore precompiled playback', () => {
     settingsStore.reset()
     statusCalls.length = 0
     buildCalls.length = 0
-    statusResponse = []
+    statusResponse = { tiers: [], queue_position: null }
   })
 
   it('falls back to the live socket on the first play of a chapter with no precompiled tier', async () => {
@@ -108,7 +108,7 @@ describe('audioStore precompiled playback', () => {
   })
 
   it('triggers a background build when no tier exists yet for the chapter', async () => {
-    statusResponse = []
+    statusResponse = { tiers: [], queue_position: null }
     audioStore.init('book-2')
     audioStore.play(0)
     await flushMicrotasks()
@@ -118,9 +118,12 @@ describe('audioStore precompiled playback', () => {
   })
 
   it('does not trigger a second build while one is already pending', async () => {
-    statusResponse = [
-      { requested_speed: 1.0, effective_speed: null, method: 'native', status: 'processing', phase: 'processing', progress: 40, duration_ms: null, error_message: null },
-    ]
+    statusResponse = {
+      tiers: [
+        { requested_speed: 1.0, effective_speed: null, method: 'native', status: 'processing', phase: 'processing', progress: 40, duration_ms: null, error_message: null },
+      ],
+      queue_position: 0,
+    }
     audioStore.init('book-3')
     audioStore.play(0)
     await flushMicrotasks()
@@ -129,9 +132,12 @@ describe('audioStore precompiled playback', () => {
   })
 
   it('uses the precompiled tier once the background check resolves, without touching the live socket', async () => {
-    statusResponse = [
-      { requested_speed: 1.0, effective_speed: 1.0, method: 'native', status: 'done', phase: 'complete', progress: 100, duration_ms: 6000, error_message: null },
-    ]
+    statusResponse = {
+      tiers: [
+        { requested_speed: 1.0, effective_speed: 1.0, method: 'native', status: 'done', phase: 'complete', progress: 100, duration_ms: 6000, error_message: null },
+      ],
+      queue_position: null,
+    }
     audioStore.init('book-4')
 
     // First play(): live fallback fires immediately, background check starts.
@@ -152,9 +158,12 @@ describe('audioStore precompiled playback', () => {
   })
 
   it('seek() also uses a cached precompiled tier without contacting the live socket', async () => {
-    statusResponse = [
-      { requested_speed: 1.0, effective_speed: 1.0, method: 'native', status: 'done', phase: 'complete', progress: 100, duration_ms: 6000, error_message: null },
-    ]
+    statusResponse = {
+      tiers: [
+        { requested_speed: 1.0, effective_speed: 1.0, method: 'native', status: 'done', phase: 'complete', progress: 100, duration_ms: 6000, error_message: null },
+      ],
+      queue_position: null,
+    }
     audioStore.init('book-5')
     audioStore.play(0)
     await flushMicrotasks()
@@ -170,9 +179,12 @@ describe('audioStore precompiled playback', () => {
   })
 
   it('setSpeed switches to a cached precompiled tier at the new speed while playing, with no live re-synthesis', async () => {
-    statusResponse = [
-      { requested_speed: 1.0, effective_speed: 1.0, method: 'native', status: 'done', phase: 'complete', progress: 100, duration_ms: 6000, error_message: null },
-    ]
+    statusResponse = {
+      tiers: [
+        { requested_speed: 1.0, effective_speed: 1.0, method: 'native', status: 'done', phase: 'complete', progress: 100, duration_ms: 6000, error_message: null },
+      ],
+      queue_position: null,
+    }
     audioStore.init('book-6')
     audioStore.play(0)
     await flushMicrotasks()

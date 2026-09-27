@@ -11,7 +11,7 @@ import readerStore, {
   setSpeed,
   type ReaderState,
 } from '$lib/stores/reader'
-import { audioStore, type AudioState } from '$lib/stores/audio'
+import { audioStore, precompileProgressStore, type AudioState, type PrecompileProgress } from '$lib/stores/audio'
 import { settingsStore, type SettingsState } from '$lib/stores/settings'
 import { createBookmark, getBook } from '$lib/api'
 import { registerHotkeys, unregisterHotkeys } from '$lib/utils/hotkeys'
@@ -30,8 +30,21 @@ import { goto } from '$app/navigation'
 
 const bookId = $page.params.id as string
 
+/** "1st"/"2nd"/"3rd"/"4th"... for the precompile-queue indicator. */
+function ordinal(n: number): string {
+  const mod100 = n % 100
+  if (mod100 >= 11 && mod100 <= 13) return `${n}th`
+  switch (n % 10) {
+    case 1: return `${n}st`
+    case 2: return `${n}nd`
+    case 3: return `${n}rd`
+    default: return `${n}th`
+  }
+}
+
 let reader: ReaderState = $state(get(readerStore))
 let audio = $state(get(audioStore))
+let precompileProgress: PrecompileProgress | null = $state(get(precompileProgressStore))
   let settings: SettingsState = $state(get(settingsStore))
 let seeking = $state(false)
 // The transport controls stay disabled until `audioStore.init` has opened the
@@ -59,11 +72,13 @@ let currentSearchIndex = $state(-1)
 let unsubReader: () => void
 let unsubAudio: () => void
 let unsubSettings: () => void
+let unsubPrecompileProgress: () => void
 
 onMount(async () => {
   unsubReader = readerStore.subscribe((v: ReaderState) => (reader = v))
   unsubAudio = audioStore.subscribe((v: AudioState) => (audio = v))
   unsubSettings = settingsStore.subscribe((v: SettingsState) => (settings = v))
+  unsubPrecompileProgress = precompileProgressStore.subscribe((v) => (precompileProgress = v))
 
   // Fetch book metadata for type detection
   try {
@@ -116,6 +131,7 @@ onDestroy(() => {
   unsubReader?.()
   unsubAudio?.()
   unsubSettings?.()
+  unsubPrecompileProgress?.()
   audioStore.destroy()
   unregisterHotkeys()
 })
@@ -353,6 +369,19 @@ function handleBackToLibrary() {
     <div
       class="pointer-events-auto w-full max-w-[720px] rounded-2xl border border-border bg-surface-raised/90 px-4 py-3 shadow-3 backdrop-blur-xl"
     >
+      {#if precompileProgress}
+        <p class="mb-1 px-1 text-xs text-fg-subtle" role="status">
+          {#if precompileProgress.status === 'error'}
+            Offline audio failed to prepare for this chapter — still playing live.
+          {:else if precompileProgress.queuePosition === 0}
+            Preparing offline audio for this chapter… {precompileProgress.progress}%
+          {:else if precompileProgress.queuePosition && precompileProgress.queuePosition > 0}
+            Offline audio queued ({ordinal(precompileProgress.queuePosition + 1)} in line)…
+          {:else}
+            Preparing offline audio for this chapter…
+          {/if}
+        </p>
+      {/if}
       <AudioProgressBar
         sentences={reader.sentences}
         currentIndex={audio.currentIndex}
