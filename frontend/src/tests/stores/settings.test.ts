@@ -7,6 +7,7 @@ import { get } from 'svelte/store'
 // default highlight is now Amber #F5CB5C and a `theme` setting was added.
 const DEFAULTS: SettingsState = {
   voice: 'af_heart',
+  voiceByEngine: {},
   highlightColor: '#F5CB5C',
   autoscroll: true,
   hotkeysEnabled: true,

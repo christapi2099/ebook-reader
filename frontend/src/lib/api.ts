@@ -171,6 +171,8 @@ export interface Voice {
   gender: string
   quality: string
   built_in: boolean
+  /** Which engine this voice belongs to (`kokoro`/`piper`); absent on legacy rows means `kokoro`. */
+  engine?: string
 }
 
 export async function getVoices(): Promise<Voice[]> {

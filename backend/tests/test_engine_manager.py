@@ -14,6 +14,7 @@ from services.engine_manager import (
     CPU,
     GPU,
     MODAL,
+    PIPER,
     EngineBuildError,
     EngineManager,
     EngineUnavailable,
@@ -216,7 +217,7 @@ class TestOptions:
         assert state["selected"] == MODAL
         assert state["active"] == CPU
         assert state["switching"] is False
-        assert {o["id"] for o in state["options"]} == {CPU, GPU, MODAL}
+        assert {o["id"] for o in state["options"]} == {CPU, GPU, MODAL, PIPER}
 
     def test_the_selector_and_the_switch_use_the_same_probe(self, builders):
         """A machine with no GPU must not be offered the GPU card."""
@@ -442,10 +443,10 @@ def engine_client(monkeypatch):
 
 
 class TestEngineEndpoints:
-    def test_get_engine_lists_the_three_engines(self, engine_client):
+    def test_get_engine_lists_the_four_engines(self, engine_client):
         test_client, _ = engine_client
         body = test_client.get("/api/system/engine").json()
-        assert [o["id"] for o in body["options"]] == [CPU, GPU, MODAL]
+        assert [o["id"] for o in body["options"]] == [CPU, GPU, MODAL, PIPER]
         assert body["active"] is None
 
     def test_post_switches_and_reports_the_new_engine(self, engine_client):

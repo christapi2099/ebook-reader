@@ -9,6 +9,7 @@
   import {
     getCapabilities,
     getEngineState,
+    getVoices,
     setEngine,
     type EngineState,
     type SystemCapabilities,
@@ -116,11 +117,35 @@
     try {
       engineState = await setEngine(engineId)
       capabilities = await getCapabilities().catch(() => capabilities)
+      await applyVoiceForEngine(engineId)
     } catch (e) {
       switchError = toDetailMessage(e)
     } finally {
       switchingTo = null
     }
+  }
+
+  /**
+   * After switching engines, `settings.voice` can be holding an id that
+   * belongs to the *previous* engine (e.g. a Kokoro voice id left over when
+   * switching to Piper) — GET /voices only returns voices valid for the now-
+   * active engine, so that stale id silently fails on every sentence. Restore
+   * whichever voice was last picked for this engine, or fall back to its
+   * first available voice.
+   */
+  async function applyVoiceForEngine(engineId: string) {
+    let voices: Awaited<ReturnType<typeof getVoices>>
+    try {
+      voices = await getVoices()
+    } catch {
+      return
+    }
+    if (voices.length === 0) return
+    const remembered = settingsStore.voiceForEngine(engineId)
+    const target = (remembered && voices.some(v => v.id === remembered))
+      ? remembered
+      : voices[0].id
+    settingsStore.setVoiceForEngine(engineId, target)
   }
 
   function engineLabel(engineId: string): string {

@@ -97,9 +97,28 @@ describe('audioStore precompiled playback', () => {
     statusResponse = { tiers: [], queue_position: null }
   })
 
-  it('falls back to the live socket on the first play of a chapter with no precompiled tier', async () => {
+  it('does not touch the live socket while a chapter with no precompiled tier is still being prepared', async () => {
+    statusResponse = { tiers: [], queue_position: null }
     audioStore.init('book-1')
     audioStore.play(0)
+    await flushMicrotasks()
+
+    const { getSentMessages } = await importSentMessages()
+    expect(getSentMessages()).toEqual([])
+    expect(get(audioStore).isPlaying).toBe(false)
+    expect(get(audioStore).buffering).toBe(true)
+  })
+
+  it('falls back to the live socket only once the precompile job itself errors out', async () => {
+    statusResponse = {
+      tiers: [
+        { requested_speed: 1.0, effective_speed: null, method: 'native', status: 'error', phase: null, progress: 0, duration_ms: null, error_message: 'boom' },
+      ],
+      queue_position: null,
+    }
+    audioStore.init('book-1b')
+    audioStore.play(0)
+    await flushMicrotasks()
 
     const { getSentMessages } = await importSentMessages()
     expect(getSentMessages()).toContainEqual(
@@ -131,7 +150,7 @@ describe('audioStore precompiled playback', () => {
     expect(buildCalls).toHaveLength(0) // a tier is already in flight, must not pile on another build
   })
 
-  it('uses the precompiled tier once the background check resolves, without touching the live socket', async () => {
+  it('waits for the precompile job then plays the precompiled tier, without touching the live socket', async () => {
     statusResponse = {
       tiers: [
         { requested_speed: 1.0, effective_speed: 1.0, method: 'native', status: 'done', phase: 'complete', progress: 100, duration_ms: 6000, error_message: null },
@@ -140,21 +159,15 @@ describe('audioStore precompiled playback', () => {
     }
     audioStore.init('book-4')
 
-    // First play(): live fallback fires immediately, background check starts.
     audioStore.play(0)
-    const { getSentMessages, clearSentMessages } = await importSentMessages()
-    expect(getSentMessages().length).toBeGreaterThan(0)
+    const { getSentMessages } = await importSentMessages()
+    expect(getSentMessages()).toEqual([]) // no speculative live play while waiting
 
-    await flushMicrotasks()
-    clearSentMessages()
-
-    // Second play(): the check has resolved, so this one must go straight to
-    // the precompiled path — no new message to the live socket.
-    audioStore.play(1)
     await flushMicrotasks()
 
     expect(getSentMessages()).toEqual([])
-    expect(get(audioStore).currentIndex).toBe(1)
+    expect(get(audioStore).currentIndex).toBe(0)
+    expect(get(audioStore).isPlaying).toBe(true)
   })
 
   it('seek() also uses a cached precompiled tier without contacting the live socket', async () => {

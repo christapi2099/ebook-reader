@@ -116,6 +116,18 @@ function createAudioStore() {
   // straight away.
   const precompiledAvailability = new Map<string, PrecompiledManifest | null>()
   const precompileTriggered = new Set<string>()
+  // Callbacks waiting on a tier that isn't ready yet — see dispatchPlayback().
+  // A book is precompiled first and read from that afterwards; live playback
+  // is not a speculative first attempt any more, only the fallback once the
+  // precompile job itself has failed (`onError`).
+  const pendingPlaybackCallbacks = new Map<
+    string,
+    Array<{ onReady: (m: PrecompiledManifest) => void; onError: () => void }>
+  >()
+  // Bumped on every play()/seek() so a wait callback that resolves after the
+  // user has since moved on (different index/chapter) is a no-op instead of
+  // starting playback somewhere the reader no longer is.
+  let playRequestId = 0
   // Bumped on init()/destroy() so a progress-poll loop started for a
   // previous book (or before a destroy()) recognizes it's stale and stops
   // writing to precompileProgressStore instead of leaking cross-book state.
@@ -173,11 +185,18 @@ function createAudioStore() {
               return Promise.resolve(getPrecompiledManifest(bid, chapter, voice, speed)).then(manifest => {
                 if (myGeneration !== pollGeneration) return
                 precompiledAvailability.set(key, manifest)
+                const waiters = pendingPlaybackCallbacks.get(key)
+                pendingPlaybackCallbacks.delete(key)
+                waiters?.forEach(w => w.onReady(manifest))
               })
             }
 
             if (tier?.status === 'error') {
               precompileProgressStore.update(p => (p?.chapter === chapter ? null : p))
+              precompiledAvailability.delete(key) // let a later play() retry rather than getting stuck on "not ready"
+              const waiters = pendingPlaybackCallbacks.get(key)
+              pendingPlaybackCallbacks.delete(key)
+              waiters?.forEach(w => w.onError())
               return
             }
 
@@ -207,7 +226,13 @@ function createAudioStore() {
                     setTimeout(poll, PRECOMPILE_POLL_MS)
                   }
                 })
-                .catch(() => { precompileTriggered.delete(triggerKey) })
+                .catch(() => {
+                  precompileTriggered.delete(triggerKey)
+                  precompiledAvailability.delete(key)
+                  const waiters = pendingPlaybackCallbacks.get(key)
+                  pendingPlaybackCallbacks.delete(key)
+                  waiters?.forEach(w => w.onError())
+                })
             } else if (anyInFlight) {
               // Another tier for this chapter is already building; keep
               // polling so this speed's own completion is still noticed.
@@ -218,11 +243,23 @@ function createAudioStore() {
             // Network hiccup or the endpoint genuinely isn't there (older
             // backend). Leave the key unset so a later play() tries again
             // rather than permanently assuming "not available", and don't
-            // reschedule — an endpoint that doesn't exist never will.
+            // reschedule — an endpoint that doesn't exist never will. Anyone
+            // actively waiting on this key right now still needs an answer,
+            // though, or they'd be stuck on "Preparing…" forever.
+            precompiledAvailability.delete(key)
+            const waiters = pendingPlaybackCallbacks.get(key)
+            pendingPlaybackCallbacks.delete(key)
+            waiters?.forEach(w => w.onError())
           })
       } catch {
         // See comment above — a synchronous throw from the call itself must
         // not propagate into the caller's (play/seek/setSpeed) call stack.
+        // Still resolve anyone waiting on this key, the same as the async
+        // .catch() above, or they would be stuck on "Preparing…" forever.
+        precompiledAvailability.delete(key)
+        const waiters = pendingPlaybackCallbacks.get(key)
+        pendingPlaybackCallbacks.delete(key)
+        waiters?.forEach(w => w.onError())
       }
     }
 
@@ -567,9 +604,12 @@ function createAudioStore() {
   }
 
   /** play()/seek() share this: use the cached precompiled tier for this
-   * (chapter, voice, speed) if one is already known to be ready, otherwise
-   * fall back to `playLive` immediately (never await a network check in a
-   * transport method) and kick off a background check for next time. */
+   * (chapter, voice, speed) if one is already ready. Otherwise the book is
+   * precompiled first and read from that afterwards — this waits (showing
+   * "Preparing…" via precompileProgressStore) rather than starting live
+   * playback speculatively. `playLive` only runs if the precompile job
+   * itself ends in `error`, as the stability fallback for a chapter that
+   * genuinely cannot be precompiled. */
   function dispatchPlayback(index: number, playLive: () => void): void {
     const state = get({ subscribe })
     const chapter = chapterForIndex(index)
@@ -579,8 +619,23 @@ function createAudioStore() {
       playPrecompiled(cached, chapter, state.voice, index)
       return
     }
-    playLive()
-    if (!precompiledAvailability.has(key)) checkPrecompiledAvailability(chapter, state.voice, state.speed)
+
+    playRequestId += 1
+    const myRequestId = playRequestId
+    update(s => ({ ...s, isPlaying: false, buffering: true, currentIndex: index, currentWordIndex: -1 }))
+
+    if (!pendingPlaybackCallbacks.has(key)) pendingPlaybackCallbacks.set(key, [])
+    pendingPlaybackCallbacks.get(key)!.push({
+      onReady: manifest => {
+        if (myRequestId !== playRequestId) return // superseded by a later play()/seek()
+        playPrecompiled(manifest, chapter, state.voice, index)
+      },
+      onError: () => {
+        if (myRequestId !== playRequestId) return
+        playLive()
+      },
+    })
+    checkPrecompiledAvailability(chapter, state.voice, state.speed)
   }
 
   return {
@@ -600,6 +655,8 @@ function createAudioStore() {
       mode = 'live'
       precompiledAvailability.clear()
       precompileTriggered.clear()
+      pendingPlaybackCallbacks.clear()
+      playRequestId += 1
       pollGeneration++
       precompileProgressStore.set(null)
       if (htmlAudio) { htmlAudio.pause(); htmlAudio.removeAttribute('src') }
@@ -669,11 +726,10 @@ function createAudioStore() {
 
     setSentences(list: Sentence[]) {
       sentences = list
-      // Best-effort warm-up: if the reader's starting chapter already has a
-      // precompiled tier at the current voice/speed, the very first play()
-      // this session can use it instead of paying for one live round-trip
-      // first. Not awaited — dispatchPlayback() falls back to live and picks
-      // this up on the NEXT call if it hasn't resolved yet.
+      // Warm-up: start checking/building the starting chapter's precompiled
+      // tier as soon as the reader knows what book it's showing, so the
+      // "Preparing…" wait in dispatchPlayback() has a head start by the time
+      // the reader actually presses Play.
       const state = get({ subscribe })
       checkPrecompiledAvailability(chapterForIndex(state.currentIndex), state.voice, state.speed)
     },
@@ -689,6 +745,10 @@ function createAudioStore() {
     },
 
     pause() {
+      // Invalidates any dispatchPlayback() wait still in flight, so a
+      // precompile job that finishes (or fails) after this pause doesn't
+      // reach into a resolved callback and restart playback on its own.
+      playRequestId += 1
       if (mode === 'precompiled' && htmlAudio) {
         htmlAudio.pause()
         stopRaf()
@@ -802,6 +862,8 @@ function createAudioStore() {
       sentences = []
       precompiledAvailability.clear()
       precompileTriggered.clear()
+      pendingPlaybackCallbacks.clear()
+      playRequestId += 1
       pollGeneration++
       precompileProgressStore.set(null)
       sentenceDurations = new Map()
