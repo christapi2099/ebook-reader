@@ -620,6 +620,7 @@ function createAudioStore() {
       return
     }
 
+    stopAll() // don't let whatever was already playing (e.g. the old voice) keep going while we wait
     playRequestId += 1
     const myRequestId = playRequestId
     update(s => ({ ...s, isPlaying: false, buffering: true, currentIndex: index, currentWordIndex: -1 }))
@@ -636,6 +637,18 @@ function createAudioStore() {
       },
     })
     checkPrecompiledAvailability(chapter, state.voice, state.speed)
+  }
+
+  /** Shared by play() and setVoice()'s restart-on-switch: play from `fromIndex`
+   * under whatever voice is in state right now, live-socket fallback included. */
+  function playFrom(fromIndex: number): void {
+    if (!socket) return
+    dispatchPlayback(fromIndex, () => {
+      resetForPlay()
+      update(s => ({ ...s, currentWordIndex: -1, isPlaying: true, buffering: true, currentIndex: fromIndex }))
+      const state = get({ subscribe })
+      socket!.play(fromIndex, state.voice, state.speed, sessionId)
+    })
   }
 
   return {
@@ -735,13 +748,7 @@ function createAudioStore() {
     },
 
     play(fromIndex: number) {
-      if (!socket) return
-      dispatchPlayback(fromIndex, () => {
-        resetForPlay()
-        update(s => ({ ...s, currentWordIndex: -1, isPlaying: true, buffering: true, currentIndex: fromIndex }))
-        const state = get({ subscribe })
-        socket!.play(fromIndex, state.voice, state.speed, sessionId)
-      })
+      playFrom(fromIndex)
     },
 
     pause() {
@@ -846,7 +853,17 @@ function createAudioStore() {
     },
 
     setVoice(voice: string) {
+      const state = get({ subscribe })
+      if (voice === state.voice) return
+      const wasActive = state.isPlaying || state.buffering
       update(s => ({ ...s, voice }))
+      // Restart at the same sentence under the new voice right away, rather
+      // than leaving the old voice playing until the next manual pause/seek.
+      // playFrom() (via dispatchPlayback) stops whatever was playing and
+      // either switches straight to an already-precompiled tier for this
+      // voice or waits/builds one — same "Preparing…" flow as opening a
+      // chapter that has never been precompiled at all.
+      if (wasActive) playFrom(state.currentIndex)
     },
 
     destroy() {

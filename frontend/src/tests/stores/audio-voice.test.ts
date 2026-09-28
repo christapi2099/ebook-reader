@@ -118,4 +118,40 @@ describe('audioStore voice propagation', () => {
     audioStore.setVoice(get(settingsStore).voice)
     expect(get(audioStore).voice).toBe('am_adam')
   })
+
+  it('setVoice restarts playback at the same sentence under the new voice while playing', async () => {
+    const { getSentMessages, clearSentMessages } = await importSentMessages()
+    audioStore.init('test-book')
+    audioStore.play(3)
+    clearSentMessages()
+
+    audioStore.setVoice('bf_emma')
+
+    const msgs = getSentMessages() as any[]
+    const playMsg = msgs.find(m => m.action === 'play')
+    expect(playMsg).toBeDefined()
+    expect(playMsg.from_index).toBe(3)
+    expect(playMsg.voice).toBe('bf_emma')
+    expect(get(audioStore).currentIndex).toBe(3)
+  })
+
+  it('setVoice does not restart anything while playback is stopped', async () => {
+    const { getSentMessages } = await importSentMessages()
+    audioStore.init('test-book')
+
+    audioStore.setVoice('bf_emma')
+
+    expect(getSentMessages()).toEqual([])
+  })
+
+  it('setVoice is a no-op when the voice has not actually changed', async () => {
+    const { getSentMessages, clearSentMessages } = await importSentMessages()
+    audioStore.init('test-book')
+    audioStore.play(0)
+    clearSentMessages()
+
+    audioStore.setVoice('af_heart') // same as the default already in state
+
+    expect(getSentMessages()).toEqual([])
+  })
 })
