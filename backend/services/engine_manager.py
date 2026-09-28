@@ -6,7 +6,7 @@ process. ``EngineManager`` makes the same decision at runtime: it builds the
 requested engine first and swaps it in only on success, so a failed switch
 leaves the previous engine running and the reader keeps working.
 
-Three engines, all funnelling into the same ``TTSEngine`` contract:
+Four engines, all funnelling into the same ``TTSEngine`` contract:
 
 ``cpu`` / ``gpu``
     The in-process ``KPipeline``. ``gpu`` asks torch for CUDA; switching between
@@ -15,6 +15,11 @@ Three engines, all funnelling into the same ``TTSEngine`` contract:
 ``modal``
     ``ModalKokoroClient``, which behaves like ``KPipeline`` (same call, real word
     timestamps) but runs on a Modal GPU.
+``piper``
+    ``PiperEngine`` (services/piper_engine.py) — a lightweight local VITS-family
+    model for hardware too weak to run Kokoro comfortably at higher playback
+    speeds. No phoneme-alignment output, so callers fall back to the existing
+    phoneme-proportional word-timestamp estimate.
 
 The manager owns no FastAPI or router state. When the live engine changes it
 calls whatever applier was registered with :func:`register_applier`; ``main``
@@ -29,6 +34,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from services import env_config, kokoro_runtime, modal_remote
@@ -41,13 +47,20 @@ KOKORO_LANG_CODE = "a"
 CPU = "cpu"
 GPU = "gpu"
 MODAL = "modal"
-ENGINE_IDS = (CPU, GPU, MODAL)
+PIPER = "piper"
+ENGINE_IDS = (CPU, GPU, MODAL, PIPER)
 
 ENGINE_LABELS = {
     CPU: "This device · CPU",
     GPU: "This device · GPU",
     MODAL: "Cloud · Modal GPU",
+    PIPER: "This device · Piper (lightweight)",
 }
+
+# Piper voice models live here as <name>.onnx + <name>.onnx.json pairs (see
+# services/piper_engine.py and routers/voices.py's Piper catalog entries).
+# Not auto-downloaded like Kokoro's HF repo — see README for the fetch step.
+PIPER_VOICES_DIR = "voices/piper"
 
 # One vocabulary for "what is the GPU doing", shared by this module, the export
 # status endpoint and the reader WebSocket, so the UI can render one indicator.
@@ -164,6 +177,24 @@ def build_local(device: str) -> tuple[Any | None, str | None]:
     return pipeline, None
 
 
+def build_piper(device: str, voices_dir: str | None = None) -> tuple[Any | None, str | None]:
+    """Build a ``PiperEngine`` serving every voice model in ``voices_dir``.
+
+    Returns ``(engine, error)``, same shape as :func:`build_local`. Unlike
+    Kokoro, Piper has no auto-download step: a missing/empty voices dir is a
+    normal, expected reason to report "unavailable" rather than an exception.
+    """
+    from services.piper_engine import PiperEngine
+
+    try:
+        engine = PiperEngine(voices_dir or PIPER_VOICES_DIR, device=device)
+    except Exception as exc:
+        logger.warning("[piper] engine failed to initialise: %s", exc)
+        return None, f"{type(exc).__name__}: {exc}"
+    logger.info("[piper] engine ready on %s (%d voices)", device, len(engine.available_voices()))
+    return engine, None
+
+
 def build_remote(require_reachable: bool, probe_timeout_s: float | None = None) -> tuple[Any | None, str | None]:
     """Build the Modal client, or explain why it could not be built.
 
@@ -253,11 +284,13 @@ class EngineManager:
         self,
         local_builder: Callable[[str], tuple[Any | None, str | None]] = build_local,
         remote_builder: Callable[..., tuple[Any | None, str | None]] = build_remote,
+        piper_builder: Callable[..., tuple[Any | None, str | None]] = build_piper,
         torch_probe: Callable[[], dict[str, Any]] | None = None,
         remote_probe: Callable[..., dict[str, Any]] | None = None,
     ) -> None:
         self._local_builder = local_builder
         self._remote_builder = remote_builder
+        self._piper_builder = piper_builder
         # Both probes are injectable, and both the selector and the startup path
         # go through these same two callables: reading cuda_available from one
         # source while a switch consulted another is how a machine with no GPU
@@ -310,6 +343,8 @@ class EngineManager:
             return self._local_availability(engine_id)
         if engine_id == MODAL:
             return self._modal_availability()
+        if engine_id == PIPER:
+            return self._piper_availability()
         raise UnknownEngine(f"Unknown engine {engine_id!r}; expected one of {', '.join(ENGINE_IDS)}")
 
     def _local_availability(self, engine_id: str) -> EngineOption:
@@ -333,6 +368,19 @@ class EngineManager:
         available = bool(remote.get("configured") and remote.get("reachable"))
         reason = None if available else _modal_reason(remote)
         return EngineOption(MODAL, ENGINE_LABELS[MODAL], available, reason)
+
+    def _piper_availability(self) -> EngineOption:
+        try:
+            import piper.voice  # noqa: F401
+        except Exception as exc:
+            return EngineOption(PIPER, ENGINE_LABELS[PIPER], False, f"piper-tts not installed: {exc}")
+        voices_dir = Path(PIPER_VOICES_DIR)
+        if not voices_dir.exists() or not any(voices_dir.glob("*.onnx")):
+            return EngineOption(
+                PIPER, ENGINE_LABELS[PIPER], False,
+                f"No voice models in {PIPER_VOICES_DIR} — download one first",
+            )
+        return EngineOption(PIPER, ENGINE_LABELS[PIPER], True, None)
 
     def options(self) -> list[EngineOption]:
         """Every engine, with the reason each one is or is not usable.
@@ -405,6 +453,8 @@ class EngineManager:
     def _build(self, engine_id: str) -> Any:
         if engine_id == MODAL:
             client, error = self._remote_builder(False)
+        elif engine_id == PIPER:
+            client, error = self._piper_builder("cpu")
         else:
             device = "cuda" if engine_id == GPU else "cpu"
             client, error = self._local_builder(device)
@@ -444,6 +494,8 @@ class EngineManager:
         state = kokoro_runtime.runtime
         if engine_id == MODAL:
             state.record_remote()
+        elif engine_id == PIPER:
+            state.record_local(device="cpu", model_repo="piper (local voices)")
         else:
             state.record_local(
                 device="cuda" if engine_id == GPU else "cpu",
