@@ -192,7 +192,7 @@ function createAudioStore() {
             }
 
             if (tier?.status === 'error') {
-              precompileProgressStore.update(p => (p?.chapter === chapter ? null : p))
+              precompileProgressStore.set({ chapter, status: 'error', progress: 0, queuePosition: null })
               precompiledAvailability.delete(key) // let a later play() retry rather than getting stuck on "not ready"
               const waiters = pendingPlaybackCallbacks.get(key)
               pendingPlaybackCallbacks.delete(key)

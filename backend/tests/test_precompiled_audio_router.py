@@ -361,3 +361,63 @@ class TestOrphanedJobReset:
 
         with Session(db_engine) as session:
             assert session.get(ChapterAudio, row_id).status == "processing"
+
+
+class TestStallWatchdog:
+    """A job stuck in the single `_synthesis_pool` worker thread (a hung
+    ffmpeg/CUDA call) can't be force-cancelled, but it must not fail silently
+    forever either — `_mark_running_job_stalled` is what the periodic
+    `_stall_watchdog` calls once a running job goes quiet for too long.
+    """
+
+    def test_marks_processing_and_pending_rows_of_the_stalled_job_as_error(self, client, db_engine, seed_book):
+        seed_book(db_engine, book_id="book-17")
+        with Session(db_engine) as session:
+            native = ChapterAudio(
+                book_id="book-17", chapter=0, voice="af_heart", requested_speed=1.0,
+                method="native", status="processing", progress=30,
+                created_at=datetime.now(timezone.utc),
+            )
+            atempo = ChapterAudio(
+                book_id="book-17", chapter=0, voice="af_heart", requested_speed=1.5,
+                method="atempo", status="pending", progress=0,
+                created_at=datetime.now(timezone.utc),
+            )
+            session.add(native)
+            session.add(atempo)
+            session.commit()
+            native_id, atempo_id = native.id, atempo.id
+
+        precompiled_router._mark_running_job_stalled(("book-17", 0, "af_heart"), idle_for=900.0)
+
+        with Session(db_engine) as session:
+            for row_id in (native_id, atempo_id):
+                row = session.get(ChapterAudio, row_id)
+                assert row.status == "error"
+                assert row.phase == "error"
+                assert "stalled" in row.error_message.lower()
+
+    def test_leaves_other_books_and_done_rows_untouched(self, client, db_engine, seed_book):
+        seed_book(db_engine, book_id="book-18")
+        seed_book(db_engine, book_id="book-19")
+        with Session(db_engine) as session:
+            other_book = ChapterAudio(
+                book_id="book-19", chapter=0, voice="af_heart", requested_speed=1.0,
+                method="native", status="processing", progress=5,
+                created_at=datetime.now(timezone.utc),
+            )
+            done_row = ChapterAudio(
+                book_id="book-18", chapter=0, voice="af_heart", requested_speed=1.0,
+                method="native", status="done", progress=100,
+                created_at=datetime.now(timezone.utc),
+            )
+            session.add(other_book)
+            session.add(done_row)
+            session.commit()
+            other_id, done_id = other_book.id, done_row.id
+
+        precompiled_router._mark_running_job_stalled(("book-18", 0, "af_heart"), idle_for=900.0)
+
+        with Session(db_engine) as session:
+            assert session.get(ChapterAudio, other_id).status == "processing"
+            assert session.get(ChapterAudio, done_id).status == "done"

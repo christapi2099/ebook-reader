@@ -80,6 +80,10 @@ async def lifespan(app: FastAPI):
     # not one task per POST .../build — see routers/precompiled_audio.py's
     # module docstring for the CUDA-OOM this fixes.
     precompiled_audio_router.start_queue_worker()
+    # Detects a precompile job that has stopped reporting progress (a hung
+    # ffmpeg/CUDA call, not a dead process — see start_queue_worker()'s own
+    # _reset_orphaned_jobs() sweep for the dead-process case).
+    precompiled_audio_router.start_stall_watchdog()
     try:
         yield
     finally:
@@ -87,6 +91,7 @@ async def lifespan(app: FastAPI):
         # engine, and a sweep in flight cannot keep the process alive.
         await audio_cache.stop_periodic_sweep(sweeper)
         await precompiled_audio_router.stop_queue_worker()
+        await precompiled_audio_router.stop_stall_watchdog()
 
 
 app = FastAPI(lifespan=lifespan)

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -73,6 +74,15 @@ _job_queue: "asyncio.Queue[_QueuedJob]" = asyncio.Queue()
 _queue_order: list[JobKey] = []  # FIFO order, index 0 is the currently-running job
 _worker_task: asyncio.Task | None = None
 
+# In-process zombie-job detection (see _stall_watchdog docstring). Only ever
+# describes the job currently at _queue_order[0] — the single-worker queue
+# guarantees at most one job is genuinely running at a time.
+_running_job_key: JobKey | None = None
+_running_job_last_progress: float = 0.0
+STALL_TIMEOUT_S = 600.0  # no progress write in 10 minutes == stalled
+WATCHDOG_INTERVAL_S = 60.0
+_watchdog_task: asyncio.Task | None = None
+
 
 def queue_position(key: JobKey) -> int | None:
     """0 = running now, 1 = next, ... None = not queued at all."""
@@ -89,8 +99,11 @@ async def _queue_worker() -> None:
     shutdown — the same lifecycle as `services/audio_cache.py`'s periodic
     sweep task.
     """
+    global _running_job_key, _running_job_last_progress
     while True:
         job = await _job_queue.get()
+        _running_job_key = job.key
+        _running_job_last_progress = time.monotonic()
         try:
             await run_in_threadpool(
                 _run_precompile_blocking, job.row_id_native, job.native_needs_work,
@@ -99,6 +112,7 @@ async def _queue_worker() -> None:
         except Exception:
             logger.warning("Precompile job %s failed unexpectedly", job.key, exc_info=True)
         finally:
+            _running_job_key = None
             if _queue_order and _queue_order[0] == job.key:
                 _queue_order.pop(0)
             _job_queue.task_done()
@@ -171,6 +185,89 @@ async def stop_queue_worker() -> None:
         _worker_task = None
 
 
+def _mark_running_job_stalled(key: JobKey, idle_for: float) -> None:
+    """Error out every ``processing``/``pending`` row of the stalled job.
+
+    This makes the stall visible (an ``error`` status the frontend already
+    knows how to show, instead of an infinite "Preparing…" spinner with no
+    signal anywhere) — it does **not** free up `_synthesis_pool`'s one
+    worker thread, which Python has no way to force off a call that is
+    genuinely hung deep in Kokoro/Piper/CUDA. If the stall is real (not just
+    an unusually large chapter), live playback and every future precompile
+    job share that same stuck thread and stay blocked until the backend
+    process is restarted — this only stops the wait from being silent.
+    """
+    book_id, chapter, voice = key
+    with Session(_db.engine) as session:
+        rows = session.exec(
+            select(ChapterAudio).where(
+                ChapterAudio.book_id == book_id,
+                ChapterAudio.chapter == chapter,
+                ChapterAudio.voice == voice,
+                ChapterAudio.status.in_(["processing", "pending"]),
+            )
+        ).all()
+        for row in rows:
+            row.status = "error"
+            row.phase = "error"
+            row.error_message = (
+                f"Synthesis stalled — no progress for over {int(idle_for)}s. "
+                "The backend may need to be restarted to fully recover."
+            )
+        if rows:
+            session.commit()
+    logger.error(
+        "Precompile job %s has not reported progress for %.0fs — marked as stalled. "
+        "The synthesis worker thread itself cannot be forcibly cancelled; if this is "
+        "a genuine hang (not just a very large chapter), live playback and any future "
+        "precompile job share the same stuck thread until the process is restarted.",
+        key, idle_for,
+    )
+
+
+async def _stall_watchdog() -> None:
+    """Detect a precompile job that has stopped reporting progress.
+
+    Zombie jobs come in two shapes:
+      * the *process* died (killed, crashed) — `_reset_orphaned_jobs` handles
+        this, at the next startup, since nothing survives a restart to detect
+        it mid-flight.
+      * the *job* died but the process is still very much alive — a hung
+        ffmpeg subprocess, a wedged CUDA call, anything that blocks the
+        single `_synthesis_pool` worker thread forever without raising. This
+        task is for that second case: it can't be caught at startup because
+        there is no restart, so this polls `_running_job_last_progress` — the
+        heartbeat `_update_tier` bumps on every progress write — and flags
+        the running job once it's been quiet for `STALL_TIMEOUT_S`.
+    """
+    while True:
+        await asyncio.sleep(WATCHDOG_INTERVAL_S)
+        key = _running_job_key
+        if key is None:
+            continue
+        idle_for = time.monotonic() - _running_job_last_progress
+        if idle_for > STALL_TIMEOUT_S:
+            _mark_running_job_stalled(key, idle_for)
+
+
+def start_stall_watchdog() -> asyncio.Task:
+    global _watchdog_task
+    if _watchdog_task is None or _watchdog_task.done():
+        _watchdog_task = asyncio.create_task(_stall_watchdog(), name="precompile-stall-watchdog")
+    return _watchdog_task
+
+
+async def stop_stall_watchdog() -> None:
+    global _watchdog_task
+    if _watchdog_task is not None:
+        _watchdog_task.cancel()
+        try:
+            await _watchdog_task
+        except asyncio.CancelledError:
+            pass
+        _watchdog_task = None
+
+
 def set_kokoro(kokoro):
     global _kokoro, _engine
     _kokoro = kokoro
@@ -183,7 +280,12 @@ def _update_tier(row_id: int, **fields) -> None:
     Never raises — mirrors ``routers/mp3.py::_update_export``. This runs on the
     worker thread while a request thread may be reading the same row, and a
     progress-percentage write is never worth failing the whole job over.
+
+    Also the heartbeat for `_stall_watchdog`: every write means the running
+    job is still alive and making progress, whatever fields it's writing.
     """
+    global _running_job_last_progress
+    _running_job_last_progress = time.monotonic()
     try:
         with Session(_db.engine) as session:
             row = session.get(ChapterAudio, row_id)
