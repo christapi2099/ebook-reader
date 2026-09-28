@@ -22,6 +22,7 @@ tried here first and is exactly the kind of thing to avoid: `asyncio.Queue`
 is not safe to `put()` from one loop and `get()` from another.
 """
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -282,3 +283,81 @@ class TestDeleteChapterAudio:
         assert precompiled_router.queue_position(("book-13", 0, "af_heart")) is None
 
         _await_all_terminal(client, "book-12")
+
+
+class TestOrphanedJobReset:
+    """A row stuck at ``processing`` because a previous process was killed
+    (not stopped cleanly) mid-synthesis must not stay stuck forever — see
+    `_reset_orphaned_jobs`'s docstring. Simulated directly (write a
+    `processing` row, call the reset function) rather than by actually
+    killing the test process.
+    """
+
+    def test_processing_row_with_no_owning_job_is_reset_to_pending(self, client, db_engine, seed_book):
+        seed_book(db_engine, book_id="book-14")
+        with Session(db_engine) as session:
+            row = ChapterAudio(
+                book_id="book-14", chapter=0, voice="af_heart", requested_speed=1.0,
+                method="native", status="processing", phase="processing", progress=47,
+                created_at=datetime.now(timezone.utc),
+            )
+            session.add(row)
+            session.commit()
+            row_id = row.id
+
+        precompiled_router._reset_orphaned_jobs()
+
+        with Session(db_engine) as session:
+            reset = session.get(ChapterAudio, row_id)
+            assert reset.status == "pending"
+            assert reset.phase is None
+            assert reset.progress == 0
+            assert reset.error_message is None
+
+    def test_done_and_error_rows_are_left_alone(self, client, db_engine, seed_book):
+        seed_book(db_engine, book_id="book-15")
+        with Session(db_engine) as session:
+            done = ChapterAudio(
+                book_id="book-15", chapter=0, voice="af_heart", requested_speed=1.0,
+                method="native", status="done", progress=100,
+                created_at=datetime.now(timezone.utc),
+            )
+            errored = ChapterAudio(
+                book_id="book-15", chapter=0, voice="af_heart", requested_speed=1.5,
+                method="atempo", status="error", error_message="boom",
+                created_at=datetime.now(timezone.utc),
+            )
+            session.add(done)
+            session.add(errored)
+            session.commit()
+            done_id, error_id = done.id, errored.id
+
+        precompiled_router._reset_orphaned_jobs()
+
+        with Session(db_engine) as session:
+            assert session.get(ChapterAudio, done_id).status == "done"
+            errored_row = session.get(ChapterAudio, error_id)
+            assert errored_row.status == "error"
+            assert errored_row.error_message == "boom"
+
+    def test_start_queue_worker_resets_orphans_when_it_actually_starts_fresh(self, client, db_engine, seed_book):
+        """`client` (conftest.py) already ran the lifespan once for this test,
+        so the worker is live and start_queue_worker() below is a no-op
+        (matching its own "only when a fresh worker actually starts" guard)
+        — this asserts that guard, not a full-restart reset, since a real
+        restart isn't reachable from inside one TestClient session."""
+        seed_book(db_engine, book_id="book-16")
+        with Session(db_engine) as session:
+            row = ChapterAudio(
+                book_id="book-16", chapter=0, voice="af_heart", requested_speed=1.0,
+                method="native", status="processing", progress=10,
+                created_at=datetime.now(timezone.utc),
+            )
+            session.add(row)
+            session.commit()
+            row_id = row.id
+
+        precompiled_router.start_queue_worker()  # worker already running: no-op, row untouched
+
+        with Session(db_engine) as session:
+            assert session.get(ChapterAudio, row_id).status == "processing"

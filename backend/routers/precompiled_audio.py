@@ -104,6 +104,35 @@ async def _queue_worker() -> None:
             _job_queue.task_done()
 
 
+def _reset_orphaned_jobs() -> None:
+    """Reset any ``ChapterAudio`` row still ``processing`` from a run that no
+    longer exists.
+
+    The in-memory queue (`_job_queue`/`_queue_order`) is always empty right
+    after a fresh worker starts — nothing survives a restart. But a row's DB
+    status does survive: if the previous process was killed (not stopped
+    cleanly) while a job was mid-synthesis, that row is frozen at
+    ``status="processing"`` forever, because ``run_precompile_blocking`` only
+    ever marks a row ``error`` from inside an ``except`` block, which a hard
+    kill never reaches. Left alone, a stuck ``processing`` row can never be
+    rebuilt again: ``build_chapter_audio`` treats ``processing`` as "already
+    being worked on" and silently skips it on every future request for that
+    tier. Resetting it to ``pending`` here makes it look exactly like a tier
+    that was created but never started — which, from this fresh process's
+    point of view, it always was.
+    """
+    with Session(_db.engine) as session:
+        rows = session.exec(select(ChapterAudio).where(ChapterAudio.status == "processing")).all()
+        for row in rows:
+            row.status = "pending"
+            row.phase = None
+            row.progress = 0
+            row.error_message = None
+        if rows:
+            session.commit()
+            logger.info("Reset %d orphaned ChapterAudio row(s) from a previous run", len(rows))
+
+
 def start_queue_worker() -> asyncio.Task:
     """Start (or restart) the queue worker, bound to whatever loop is running now.
 
@@ -126,6 +155,7 @@ def start_queue_worker() -> asyncio.Task:
     if _worker_task is None or _worker_task.done():
         _job_queue = asyncio.Queue()
         _queue_order.clear()
+        _reset_orphaned_jobs()
         _worker_task = asyncio.create_task(_queue_worker())
     return _worker_task
 
