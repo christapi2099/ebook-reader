@@ -12,6 +12,7 @@ vi.mock('$lib/api', async (importOriginal) => {
     getEngineState: vi.fn(),
     getCapabilities: vi.fn(),
     setEngine: vi.fn(),
+    getLibrary: vi.fn(),
   }
 })
 
@@ -79,6 +80,8 @@ describe('SettingsOverlay', () => {
     localStorage.clear()
     settingsStore.reset()
     vi.clearAllMocks()
+    vi.mocked(api.getLibrary).mockResolvedValue([])
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
     vi.mocked(api.getEngineState).mockResolvedValue(ENGINE_STATE)
     vi.mocked(api.getCapabilities).mockResolvedValue(CAPABILITIES)
   })
@@ -198,6 +201,30 @@ describe('SettingsOverlay', () => {
       await waitFor(() => expect(api.setEngine).toHaveBeenCalledWith('modal'))
       const live = screen.getByRole('radio', { name: /Cloud · Modal GPU/ }) as HTMLInputElement
       expect(live.checked).toBe(true)
+    })
+
+    it('confirms an engine switch with the number of books that need re-rendering', async () => {
+      const book = { id: 'x', title: 't', author: null, file_type: 'pdf', page_count: 1, folder_id: null }
+      vi.mocked(api.getLibrary).mockResolvedValue([
+        { ...book, id: 'a', needs_render: true }, { ...book, id: 'b', needs_render: true },
+        { ...book, id: 'c', needs_render: false },
+      ])
+      vi.mocked(api.setEngine).mockResolvedValue({ ...ENGINE_STATE, active: 'modal', selected: 'modal' })
+      renderSettings()
+      await waitForEngine()
+      await fireEvent.click(screen.getByRole('radio', { name: /Cloud · Modal GPU/ }))
+      await waitFor(() => expect(window.confirm).toHaveBeenCalled())
+      expect(vi.mocked(window.confirm).mock.calls[0][0]).toContain('2 books will need re-rendering')
+      await waitFor(() => expect(api.setEngine).toHaveBeenCalledWith('modal'))
+    })
+
+    it('does not switch when the confirm is declined', async () => {
+      vi.mocked(window.confirm).mockReturnValue(false)
+      renderSettings()
+      await waitForEngine()
+      await fireEvent.click(screen.getByRole('radio', { name: /Cloud · Modal GPU/ }))
+      await waitFor(() => expect(window.confirm).toHaveBeenCalled())
+      expect(api.setEngine).not.toHaveBeenCalled()
     })
 
     it('never offers an engine the probe says this machine cannot run', async () => {

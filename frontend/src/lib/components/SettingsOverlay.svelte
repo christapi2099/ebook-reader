@@ -9,6 +9,7 @@
   import {
     getCapabilities,
     getEngineState,
+    getLibrary,
     setEngine,
     type EngineState,
     type SystemCapabilities,
@@ -111,6 +112,20 @@
     // The radio is disabled for an unavailable engine; this keeps a programmatic
     // click from asking the server for something the probe already ruled out.
     if (!engineState?.options.find(o => o.id === engineId)?.available) return
+    // Books whose render is stale for the new engine are re-rendered; say how many.
+    let affected: number | null = null
+    try {
+      affected = (await getLibrary()).filter(b => b.needs_render).length
+    } catch {
+      // Unknown count: the confirm just does not quote one.
+    }
+    const countText =
+      affected === null
+        ? 'Some books may need re-rendering.'
+        : affected === 1
+          ? '1 book will need re-rendering.'
+          : `${affected} books will need re-rendering.`
+    if (!confirm(`Switch to ${engineLabel(engineId)}? ${countText}`)) return
     switchingTo = engineId
     switchError = null
     try {

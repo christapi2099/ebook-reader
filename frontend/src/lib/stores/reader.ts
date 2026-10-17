@@ -134,8 +134,8 @@ export function flushProgress(beacon = false): boolean {
   return true
 }
 
-export const loadBook = async (bookId: string): Promise<void> => {
-  const sentences: Sentence[] = await getSentences(bookId)
+export const loadBook = async (bookId: string, generation?: number): Promise<void> => {
+  const sentences: Sentence[] = await getSentences(bookId, generation)
 
   let currentIndex = 0
   try {

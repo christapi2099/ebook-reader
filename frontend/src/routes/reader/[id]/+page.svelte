@@ -14,7 +14,19 @@ import readerStore, {
 } from '$lib/stores/reader'
 import { audioStore, type AudioState } from '$lib/stores/audio'
 import { settingsStore, type SettingsState } from '$lib/stores/settings'
-import { createBookmark, getBook } from '$lib/api'
+import {
+  createBookmark,
+  getBook,
+  getRenderManifest,
+  reprocessBook,
+  NotReadyError,
+  type Book,
+  type RenderManifest,
+} from '$lib/api'
+import { createRenderGate } from '$lib/utils/render-gate'
+import ProcessingScreen from '$lib/components/ProcessingScreen.svelte'
+import NewVersionBanner from '$lib/components/NewVersionBanner.svelte'
+import ReaderVoiceControl from '$lib/components/ReaderVoiceControl.svelte'
 import { registerHotkeys, unregisterHotkeys } from '$lib/utils/hotkeys'
 import { buildPageIndex, pageForSentenceIndex } from '$lib/utils/page-index'
 import PDFViewer from '$lib/components/PDFViewer.svelte'
@@ -45,7 +57,15 @@ let searchOpen = $state(false)
 let bookmarksOpen = $state(false)
 let pagesOpen = $state(false)
 
-let bookMeta = $state<{file_type: string; title: string; page_count: number} | null>(null)
+let bookMeta = $state<Book | null>(null)
+/** `processing` until the book has a ready render, then `ready`. */
+let gatePhase = $state<'checking' | 'processing' | 'ready'>('checking')
+let loadedGeneration = $state<number | null>(null)
+let manifest = $state<RenderManifest | null>(null)
+/** A newer published generation than the one on screen, awaiting a switch. */
+let pendingVersion = $state<{ generation: number; voice: string | null } | null>(null)
+let dismissedGeneration = $state<number | null>(null)
+let gate: ReturnType<typeof createRenderGate> | null = null
 let totalPages = $derived(bookMeta?.page_count ?? reader.sentences.length)
 
 // PDFs number their own pages; every other format has one page per sentence.
@@ -63,23 +83,101 @@ let unsubSettings: () => void
 
 let loadedBookId: string | null = null
 
-/** Load one book into the stores. Also used when the route param changes. */
+function stopGate() {
+  gate?.stop()
+  gate = null
+}
+
+/** Load one book into the stores, or show the processing screen if it has no render yet. */
 async function openBook(id: string) {
+  stopGate()
   bookMeta = null
   audioReady = false
+  loadedGeneration = null
+  manifest = null
+  pendingVersion = null
+  dismissedGeneration = null
+  gatePhase = 'checking'
   try {
     bookMeta = await getBook(id)
   } catch (e) {
     console.error('Failed to fetch book metadata:', e)
   }
 
-  await loadBook(id)
+  const ready = bookMeta?.ready_generation ?? null
+  if (bookMeta && ready === null && bookMeta.ready_generation !== undefined) {
+    gatePhase = 'processing'
+    startGate(id)
+    return
+  }
+  // A server that reports no render fields at all is treated as ready, so the
+  // reader keeps working until the backend ships them.
+  await loadGeneration(id, ready)
+}
+
+function startGate(id: string) {
+  gate = createRenderGate({
+    bookId: id,
+    getBook,
+    loadedGeneration,
+    onBook: (b) => { bookMeta = b },
+    onReady: (generation) => { void loadGeneration(id, generation) },
+    onNewer: (generation, b) => {
+      if (dismissedGeneration !== null && generation <= dismissedGeneration) return
+      pendingVersion = { generation, voice: b.voice ?? null }
+    },
+  })
+  gate.start()
+}
+
+/** Load sentences + manifest of one generation and bring up the audio store. */
+async function loadGeneration(id: string, generation: number | null) {
+  try {
+    await loadBook(id, generation ?? undefined)
+    if (generation !== null) manifest = await getRenderManifest(id)
+  } catch (e) {
+    if (e instanceof NotReadyError) {
+      gatePhase = 'processing'
+      stopGate()
+      startGate(id)
+      return
+    }
+    throw e
+  }
   settingsStore.loadFromServer().catch(() => {})
   audioStore.init(id)
   audioStore.setSpeed((get(readerStore) as ReaderState).speed)
   audioStore.setCurrentIndex((get(readerStore) as ReaderState).currentIndex)
   audioStore.setVoice(get(settingsStore).voice)
   audioReady = true
+  loadedGeneration = generation
+  pendingVersion = null
+  gatePhase = 'ready'
+  if (generation !== null) {
+    if (gate) gate.setLoaded(generation)
+    else startGate(id)
+  }
+}
+
+/** Tear everything down and reload the newer generation; the backend remaps the saved position. */
+async function switchToPending() {
+  const next = pendingVersion
+  if (!next) return
+  pendingVersion = null
+  flushProgress()
+  audioStore.destroy()
+  resetReader()
+  audioReady = false
+  await loadGeneration(bookId, next.generation)
+}
+
+// Newer render published while nothing is playing: switch without asking.
+$effect(() => {
+  if (pendingVersion && !reader.isPlaying && !audio.isPlaying && !seeking) void switchToPending()
+})
+
+async function handleRetryRender() {
+  try { await reprocessBook(bookId) } catch { /* the poll shows the real state */ }
 }
 
 // Navigating /reader/a -> /reader/b reuses this component; reload for the new id.
@@ -89,12 +187,13 @@ $effect(() => {
   loadedBookId = id
   flushProgress()
   audioStore.destroy()
+  resetReader()
   void openBook(id)
 })
 
 onMount(async () => {
   unsubReader = readerStore.subscribe((v: ReaderState) => (reader = v))
-  unsubAudio = audioStore.subscribe((v: AudioState) => (audio = v))
+  unsubAudio = audioStore.subscribe((v: AudioState) => audio = v)
   unsubSettings = settingsStore.subscribe((v: SettingsState) => (settings = v))
 
   await openBook(bookId)
@@ -129,6 +228,7 @@ onDestroy(() => {
   flushProgress()
   window.removeEventListener('pagehide', handlePageHide)
   document.removeEventListener('visibilitychange', handleVisibilityChange)
+  stopGate()
   unsubReader?.()
   unsubAudio?.()
   unsubSettings?.()
@@ -303,6 +403,11 @@ function handleBackToLibrary() {
           Pages
         </button>
       </div>
+      <ReaderVoiceControl
+        {bookId}
+        currentVoice={bookMeta?.voice ?? manifest?.voice ?? null}
+        onChanged={(v) => { if (bookMeta) bookMeta = { ...bookMeta, voice: v } }}
+      />
       <TopToolbar
         onToggleCC={() => {}}
         onCopyText={() => {}}
@@ -314,8 +419,23 @@ function handleBackToLibrary() {
     </div>
   </div>
 
+  {#if pendingVersion}
+    <NewVersionBanner
+      voice={pendingVersion.voice}
+      onSwitch={switchToPending}
+      onDismiss={() => { dismissedGeneration = pendingVersion?.generation ?? null; pendingVersion = null }}
+    />
+  {/if}
+
   <div class="flex-1 overflow-hidden">
-    {#if reader.sentences.length > 0}
+    {#if gatePhase === 'processing'}
+      <ProcessingScreen
+        book={bookMeta}
+        failed={bookMeta?.job_status === 'error'}
+        onRetry={handleRetryRender}
+        onBack={handleBackToLibrary}
+      />
+    {:else if reader.sentences.length > 0}
       {#if bookMeta?.file_type === 'text' || bookMeta?.file_type === 'epub'}
         <!-- Text books (saved from text reader) or EPUBs get TextViewer -->
         <TextViewer
