@@ -5,6 +5,7 @@ import { get } from 'svelte/store'
 import readerStore, {
   flushProgress,
   loadBook,
+  resetReader,
   mirrorPlaybackIndex,
   seek,
   setPlaying,
@@ -28,7 +29,7 @@ import SearchOverlay from '$lib/components/SearchOverlay.svelte'
 import BookmarkPanel from '$lib/components/BookmarkPanel.svelte'
 import { goto } from '$app/navigation'
 
-const bookId = $page.params.id as string
+const bookId = $derived($page.params.id as string)
 
 let reader: ReaderState = $state(get(readerStore))
 let audio = $state(get(audioStore))
@@ -60,25 +61,44 @@ let unsubReader: () => void
 let unsubAudio: () => void
 let unsubSettings: () => void
 
+let loadedBookId: string | null = null
+
+/** Load one book into the stores. Also used when the route param changes. */
+async function openBook(id: string) {
+  bookMeta = null
+  audioReady = false
+  try {
+    bookMeta = await getBook(id)
+  } catch (e) {
+    console.error('Failed to fetch book metadata:', e)
+  }
+
+  await loadBook(id)
+  settingsStore.loadFromServer().catch(() => {})
+  audioStore.init(id)
+  audioStore.setSpeed((get(readerStore) as ReaderState).speed)
+  audioStore.setCurrentIndex((get(readerStore) as ReaderState).currentIndex)
+  audioStore.setVoice(get(settingsStore).voice)
+  audioReady = true
+}
+
+// Navigating /reader/a -> /reader/b reuses this component; reload for the new id.
+$effect(() => {
+  const id = bookId
+  if (loadedBookId === null || id === loadedBookId) return
+  loadedBookId = id
+  flushProgress()
+  audioStore.destroy()
+  void openBook(id)
+})
+
 onMount(async () => {
   unsubReader = readerStore.subscribe((v: ReaderState) => (reader = v))
   unsubAudio = audioStore.subscribe((v: AudioState) => (audio = v))
   unsubSettings = settingsStore.subscribe((v: SettingsState) => (settings = v))
 
-  // Fetch book metadata for type detection
-  try {
-    bookMeta = await getBook(bookId)
-  } catch (e) {
-    console.error('Failed to fetch book metadata:', e)
-  }
-
-  await loadBook(bookId)
-  settingsStore.loadFromServer().catch(() => {})
-  audioStore.init(bookId)
-  audioStore.setSpeed((get(readerStore) as ReaderState).speed)
-  audioStore.setCurrentIndex((get(readerStore) as ReaderState).currentIndex)
-  audioStore.setVoice(get(settingsStore).voice)
-  audioReady = true
+  await openBook(bookId)
+  loadedBookId = bookId
 
   const hotkeyMap: Record<string, () => void> = {
     ' ': handlePlayPause,
@@ -114,6 +134,7 @@ onDestroy(() => {
   unsubSettings?.()
   audioStore.destroy()
   unregisterHotkeys()
+  resetReader()
 })
 
 /** A real unload or a bfcache freeze — a normal request would die with the page. */

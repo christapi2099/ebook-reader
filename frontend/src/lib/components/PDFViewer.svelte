@@ -433,6 +433,9 @@
   // Redraw highlights when highlightEnabled changes
   $effect(() => {
     void highlightEnabled
+    // A new `sentences` array (another book, a reload) yields a new
+    // sentencesByPage; rebuild every overlay instead of keeping the old book's.
+    void sentencesByPage
     for (const [page] of renderedPages) {
       drawHighlights(page)
     }

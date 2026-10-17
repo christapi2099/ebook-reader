@@ -54,7 +54,7 @@ const PROGRESS_SAVE_INTERVAL_MS = 5000
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null
 /** The index the server already has, so an unchanged position is never re-sent. */
-let lastSavedIndex: number | null = null
+const lastSavedIndexByBook = new Map<string, number>()
 let lastSavedAt = 0
 
 function clearSaveTimer(): void {
@@ -72,7 +72,7 @@ function clearSaveTimer(): void {
  * with what the server was actually told.
  */
 async function writeProgress(bookId: string, index: number): Promise<void> {
-  lastSavedIndex = index
+  lastSavedIndexByBook.set(bookId, index)
   lastSavedAt = Date.now()
   await saveProgress(bookId, index).catch(() => {})
   // The home page's "continue reading" reads this, not Progress, so it is the
@@ -83,7 +83,7 @@ async function writeProgress(bookId: string, index: number): Promise<void> {
 /** Write the current position, unless the server already has it. */
 function writeCurrentPosition(): Promise<void> {
   const { bookId, currentIndex } = get(readerStore)
-  if (bookId === null || currentIndex === lastSavedIndex) return Promise.resolve()
+  if (bookId === null || currentIndex === lastSavedIndexByBook.get(bookId)) return Promise.resolve()
   return writeProgress(bookId, currentIndex)
 }
 
@@ -120,7 +120,7 @@ function scheduleProgressSave(): void {
 export function flushProgress(beacon = false): boolean {
   clearSaveTimer()
   const { bookId, currentIndex } = get(readerStore)
-  if (bookId === null || currentIndex === lastSavedIndex) return true
+  if (bookId === null || currentIndex === lastSavedIndexByBook.get(bookId)) return true
   if (!beacon) {
     void writeProgress(bookId, currentIndex)
     return true
@@ -129,7 +129,7 @@ export function flushProgress(beacon = false): boolean {
   // `userStore.updateLastRead` is a second request and a beacon cannot carry it,
   // so the position is what gets forced out here. The last-read book is
   // refreshed by the next ordinary save.
-  lastSavedIndex = currentIndex
+  lastSavedIndexByBook.set(bookId, currentIndex)
   lastSavedAt = Date.now()
   return true
 }
@@ -143,14 +143,24 @@ export const loadBook = async (bookId: string): Promise<void> => {
   } catch {
     // No progress saved yet — start from 0
   }
+  // A saved index can be stale (the book was re-processed shorter) or corrupt;
+  // never leave the reader pointing outside the book.
+  currentIndex = Math.max(0, Math.min(currentIndex, sentences.length - 1))
   // This position came *from* the server, so it is nothing to write back.
-  lastSavedIndex = currentIndex
+  lastSavedIndexByBook.set(bookId, currentIndex)
   lastSavedAt = Date.now()
 
   readerStore.update(s => ({ ...s, bookId, sentences, currentIndex }))
 
   // Update user settings with the last read book (silently ignore errors)
   userStore.updateLastRead(bookId, currentIndex).catch(() => {})
+}
+
+/** Return the store to its empty state; call when leaving the reader. */
+export const resetReader = (): void => {
+  clearSaveTimer()
+  lastSavedAt = 0
+  readerStore.set({ bookId: null, sentences: [], currentIndex: 0, isPlaying: false, speed: 1.0 })
 }
 
 export const seek = async (index: number): Promise<void> => {
