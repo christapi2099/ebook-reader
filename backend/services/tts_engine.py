@@ -215,6 +215,39 @@ def synthesize_serialized(
     return _synthesis_pool.submit(engine.synthesize_cached, text, voice, speed).result()
 
 
+async def synthesize_sentence_for_render(
+    text: str, voice: str, speed: float = 1.0, *, engine: "TTSEngine | None" = None
+) -> tuple[np.ndarray | None, float]:
+    """Render-worker entry point: exactly ONE sentence per ``_synthesis_pool`` task.
+
+    Yields to live playback first (capped wait), then submits a single-sentence
+    task. Never batches; the task's runtime is tracked for ``modal_batch_allowed``.
+    """
+    from services import render_throttle
+
+    engine = engine or _render_engine
+    if engine is None:
+        raise RuntimeError("no render engine configured")
+    await render_throttle.await_playback_idle()
+
+    def _task(t: str, v: str, sp: float):
+        token = render_throttle.render_tasks.start()
+        try:
+            return engine.synthesize_cached(t, v, sp)
+        finally:
+            render_throttle.render_tasks.finish(token)
+
+    return await asyncio.wrap_future(_synthesis_pool.submit(_task, text, voice, speed))
+
+
+_render_engine: "TTSEngine | None" = None
+
+
+def set_render_engine(engine: "TTSEngine | None") -> None:
+    global _render_engine
+    _render_engine = engine
+
+
 def _batch_client(engine: "TTSEngine") -> Any | None:
     """The engine to batch prefetch against, or ``None`` for the serial path.
 

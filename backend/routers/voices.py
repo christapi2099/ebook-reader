@@ -5,6 +5,7 @@ import numpy as np
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import Response
 
+from services.render_throttle import run_preview
 from services.tts_engine import SAMPLE_RATE
 
 VOICES_DIR = Path("voices")
@@ -150,7 +151,10 @@ async def preview_voice(voice_id: str):
         voice = str(voice_path)
 
     try:
-        results = _kokoro(preview_text, voice=voice, speed=1.0)
+        def _synth():
+            return list(_kokoro(preview_text, voice=voice, speed=1.0))
+
+        results = await run_preview(_synth)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Synthesis failed: {e}")
 
