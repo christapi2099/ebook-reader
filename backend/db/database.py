@@ -151,6 +151,7 @@ def _migrate(engine):
             ("lease_owner", "TEXT DEFAULT NULL"),
             ("lease_expires", "DATETIME DEFAULT NULL"),
             ("voice", "TEXT DEFAULT NULL"),
+            ("pending_since", "DATETIME DEFAULT NULL"),
         ):
             if name not in book_cols:
                 conn.execute(text(f"ALTER TABLE book ADD COLUMN {name} {ddl}"))

@@ -60,6 +60,9 @@ class Book(SQLModel, table=True):
     lease_owner: Optional[str] = None
     lease_expires: Optional[datetime] = None
     voice: Optional[str] = None
+    # When the current pending job was requested; claim_next waits `debounce_s`
+    # after this so a toggle storm collapses into one job. NULL = no debounce.
+    pending_since: Optional[datetime] = None
 
 
 class Sentence(SQLModel, table=True):

@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, func, select
 
 from db.database import get_session
+from storage import RENDERS_DIR
 from db.models import Book, Bookmark, Folder, MP3Export, Progress, Sentence, UserSettings
 from routers.deps import require_book
 
@@ -225,6 +226,15 @@ def get_progress(book_id: str, session: Session = Depends(get_session)):
     return {"sentence_index": row.sentence_index if row else 0}
 
 
+def _remove_renders(book_id: str) -> None:
+    """rmtree RENDERS_DIR/{id}, refusing ids that would escape RENDERS_DIR."""
+    import shutil
+    root = Path(RENDERS_DIR).resolve()
+    target = (root / book_id).resolve()
+    if target != root and target.is_relative_to(root):
+        shutil.rmtree(target, ignore_errors=True)
+
+
 @router.delete("/{book_id}")
 def delete_book(book_id: str, session: Session = Depends(get_session)):
     book = require_book(session, book_id)
@@ -244,4 +254,5 @@ def delete_book(book_id: str, session: Session = Depends(get_session)):
     session.commit()
     if file_path:
         Path(file_path).unlink(missing_ok=True)
+    _remove_renders(book_id)
     return {"ok": True}
