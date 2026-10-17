@@ -92,10 +92,15 @@ def test_calling_create_engine_and_tables_twice_is_idempotent(tmp_path):
 def test_second_startup_does_not_rewrite_the_database_file(tmp_path):
     """_migrate() must stay O(1) — no table rewrite, no full scan on every boot."""
     db_file = tmp_path / "mtime.db"
-    _db.create_engine_and_tables(db_url=f"sqlite:///{db_file}")
+    # WAL mode defers writes to the main file until a checkpoint, which happens
+    # when the last connection closes. Dispose each engine before reading the
+    # stats so the comparison does not depend on checkpoint timing.
+    first = _db.create_engine_and_tables(db_url=f"sqlite:///{db_file}")
+    first.dispose()
     stat_before = (db_file.stat().st_size, db_file.stat().st_mtime_ns)
 
-    _db.create_engine_and_tables(db_url=f"sqlite:///{db_file}")
+    second = _db.create_engine_and_tables(db_url=f"sqlite:///{db_file}")
+    second.dispose()
     stat_after = (db_file.stat().st_size, db_file.stat().st_mtime_ns)
 
     assert stat_after == stat_before, "second startup wrote to the database file"
