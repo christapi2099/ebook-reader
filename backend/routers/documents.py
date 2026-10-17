@@ -3,6 +3,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from fastapi.concurrency import run_in_threadpool
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlmodel import Session, select
 
@@ -61,26 +62,28 @@ async def upload_document(
 
     if ext == "pdf":
         engine = PDFEngine()
-        raw = engine.extract_sentences(str(file_path))
-        page_count = engine.page_count(str(file_path))
+        raw = await run_in_threadpool(engine.extract_sentences, str(file_path))
+        page_count = await run_in_threadpool(engine.page_count, str(file_path))
         sentence_objs = [
             Sentence(
                 book_id=book_id, index=s.index, text=normalize_text(s.text),
                 page=s.page, x0=s.x0, y0=s.y0, x1=s.x1, y1=s.y1,
                 filtered=tf.should_filter(s.text),
                 words=json.dumps(s.words),
+                chapter=s.chapter, chapter_title=s.chapter_title,
             )
             for s in raw
         ]
     elif ext == "epub":
         engine = EPUBEngine()
-        raw = engine.extract_sentences(str(file_path))
+        raw = await run_in_threadpool(engine.extract_sentences, str(file_path))
         page_count = max(1, len(raw) // 10)
         sentence_objs = [
             Sentence(
                 book_id=book_id, index=s.index, text=normalize_text(s.text),
                 page=0, x0=0.0, y0=0.0, x1=0.0, y1=0.0,
                 filtered=tf.should_filter(s.text),
+                chapter=s.chapter, chapter_title=s.chapter_title,
             )
             for s in raw
         ]

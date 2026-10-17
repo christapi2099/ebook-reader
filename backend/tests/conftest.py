@@ -600,6 +600,9 @@ def fake_sentences() -> list[SentenceRecord]:
             y0=float(i * 20),
             x1=400.0,
             y1=float(i * 20 + 15),
+            chapter=i // 2,
+            words=[],
+            filtered=False,
         )
         for i in range(5)
     ]
