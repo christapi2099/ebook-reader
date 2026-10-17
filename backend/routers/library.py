@@ -1,11 +1,12 @@
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlmodel import Session, func, select
 
 from db.database import get_session
-from db.models import Book, Bookmark, Folder, MP3Export, Progress, Sentence
+from db.models import Book, Bookmark, Folder, MP3Export, Progress, Sentence, UserSettings
 from routers.deps import require_book
 
 router = APIRouter(prefix="/library")
@@ -227,14 +228,20 @@ def get_progress(book_id: str, session: Session = Depends(get_session)):
 @router.delete("/{book_id}")
 def delete_book(book_id: str, session: Session = Depends(get_session)):
     book = require_book(session, book_id)
-    for s in session.exec(select(Sentence).where(Sentence.book_id == book_id)):
-        session.delete(s)
-    for p in session.exec(select(Progress).where(Progress.book_id == book_id)):
-        session.delete(p)
-    for bm in session.exec(select(Bookmark).where(Bookmark.book_id == book_id)):
-        session.delete(bm)
-    for ex in session.exec(select(MP3Export).where(MP3Export.book_id == book_id)):
-        session.delete(ex)
+    file_path = book.file_path
+    # Children first, then anything that merely references the book, then the
+    # book itself, so foreign-key enforcement never sees a dangling reference.
+    for model in (Sentence, Progress, Bookmark, MP3Export):
+        for row in session.exec(select(model).where(model.book_id == book_id)):
+            session.delete(row)
+    for settings in session.exec(
+        select(UserSettings).where(UserSettings.last_book_id == book_id)
+    ):
+        settings.last_book_id = None
+        session.add(settings)
+    session.flush()
     session.delete(book)
     session.commit()
+    if file_path:
+        Path(file_path).unlink(missing_ok=True)
     return {"ok": True}

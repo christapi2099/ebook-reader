@@ -1,12 +1,23 @@
 import os
 from pathlib import Path
 from sqlmodel import SQLModel, create_engine, Session
-from sqlalchemy import text
+from sqlalchemy import event, text
 
 # DB_PATH env var allows Docker volume override; falls back to local file
 _DEFAULT_DB = os.environ.get("DB_PATH") or str(Path(__file__).parent.parent / "ebook_reader.db")
 
 engine = None
+
+
+def _set_sqlite_pragmas(dbapi_conn, _record) -> None:
+    """Per-connection pragmas: WAL for concurrent readers, FKs enforced."""
+    cur = dbapi_conn.cursor()
+    try:
+        cur.execute("PRAGMA journal_mode=WAL")
+        cur.execute("PRAGMA synchronous=NORMAL")
+        cur.execute("PRAGMA foreign_keys=ON")
+    finally:
+        cur.close()
 
 
 def create_engine_and_tables(db_url: str | None = None) -> object:
@@ -21,7 +32,8 @@ def create_engine_and_tables(db_url: str | None = None) -> object:
     import db.models  # noqa: F401  (registers tables on SQLModel.metadata)
 
     url = db_url or f"sqlite:///{_DEFAULT_DB}"
-    engine = create_engine(url)
+    engine = create_engine(url, connect_args={"timeout": 30})
+    event.listen(engine, "connect", _set_sqlite_pragmas)
     SQLModel.metadata.create_all(engine)
     _migrate(engine)
     return engine
