@@ -41,7 +41,7 @@ EXCLUDES=(
   --exclude=.svelte-kit --exclude=__pycache__ --exclude='*.pyc'
   --exclude='*.db' --exclude='*.db-wal' --exclude='*.db-shm'
   --exclude=test-results --exclude=playwright-report --exclude=blob-report
-  --exclude=exports --exclude=uploads --exclude=.pytest_cache
+  --exclude=exports --exclude=uploads --exclude=renders --exclude=.pytest_cache
 )
 
 snapshot() {

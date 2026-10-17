@@ -10,9 +10,11 @@ services:
     volumes:
       - backend_uploads:/app/uploads
       - backend_data:/data
+      - backend_renders:/app/renders
     environment:
       - PYTHONUNBUFFERED=1
       - DB_PATH=/data/ebook_reader.db
+      - RENDERS_DIR=/app/renders
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       - UVICORN_WS=websockets
@@ -71,3 +73,4 @@ networks:
 volumes:
   backend_uploads:
   backend_data:
+  backend_renders:
