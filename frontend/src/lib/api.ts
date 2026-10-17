@@ -41,7 +41,24 @@ export interface Book {
    * value, which is why an unread book and a barely-started one looked alike.
    */
   sentence_index?: number | null
+  // Process-first render status (docs/plans/process-first-architecture.md).
+  // Optional so fixtures and older servers without them still type-check.
+  /** Newest complete render, or `null`/absent when the book has never finished one. */
+  ready_generation?: number | null
+  job_status?: JobStatus | null
+  /** 0..1 while a job is running. */
+  progress?: number | null
+  phase?: string | null
+  eta_seconds?: number | null
+  /** 1-based place in the render queue while pending. */
+  queue_position?: number | null
+  /** True when the book's ready render is stale for the current voice/engine. */
+  needs_render?: boolean
+  /** Voice the book is (or will be) rendered with. */
+  voice?: string | null
 }
+
+export type JobStatus = 'pending' | 'processing' | 'ready' | 'error' | 'cancelled'
 
 /** Longest folder name the backend accepts (`FOLDER_NAME_MAX_LENGTH`). */
 export const FOLDER_NAME_MAX_LENGTH = 60
@@ -92,8 +109,107 @@ export async function uploadDocument(
   return response.json()
 }
 
-export async function getSentences(bookId: string): Promise<Sentence[]> {
-  return fetchApi<Sentence[]>(`/documents/${bookId}/sentences`)
+/** Thrown when a book has no ready render yet (the backend answers 409). */
+export class NotReadyError extends Error {
+  readonly bookId: string
+  constructor(bookId: string, detail?: string) {
+    super(detail ?? 'This book has not finished processing yet')
+    this.name = 'NotReadyError'
+    this.bookId = bookId
+  }
+}
+
+/** Turn a 409 into `NotReadyError`; anything else passes through unchanged. */
+async function fetchRender<T>(bookId: string, endpoint: string): Promise<T> {
+  try {
+    return await fetchApi<T>(endpoint)
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 409) throw new NotReadyError(bookId, e.detail)
+    throw e
+  }
+}
+
+/** `generation` pins the render; omit it for the ready one. Throws `NotReadyError` on 409. */
+export async function getSentences(bookId: string, generation?: number): Promise<Sentence[]> {
+  const query = generation === undefined ? '' : `?generation=${generation}`
+  return fetchRender<Sentence[]>(bookId, `/documents/${bookId}/sentences${query}`)
+}
+
+export type TimingQuality = 'exact' | 'aligned' | 'estimated'
+export type TimingSource = string
+
+export interface ManifestWord {
+  start_ms: number
+  end_ms: number
+  box: WordBbox | null
+  timing_source: TimingSource
+}
+
+export interface ManifestSegment {
+  index: number
+  start_ms: number
+  end_ms: number
+  gap_ms: number
+  words: ManifestWord[]
+}
+
+export interface ManifestTier {
+  requested_factor: number
+  actual_factor: number
+  max_drift_ms: number
+  segments: ManifestSegment[]
+}
+
+export interface RenderManifest {
+  duration_ms: number
+  base_effective_speed: number
+  voice: string
+  fingerprint: string
+  container: string
+  timing_quality: TimingQuality
+  mixed_backends: boolean
+  /** Keyed by tier name, e.g. "1x", "1.5x". */
+  tiers: Record<string, ManifestTier>
+}
+
+/** Manifest of the ready generation. Throws `NotReadyError` on 409. */
+export async function getRenderManifest(bookId: string): Promise<RenderManifest> {
+  return fetchRender<RenderManifest>(bookId, `/library/${encodeURIComponent(bookId)}/render`)
+}
+
+/** URL of one immutable tier file; the browser fetches it itself. */
+export function renderAudioUrl(bookId: string, generation: number, tier: string): string {
+  return `${API_BASE}/renders/${encodeURIComponent(bookId)}/${generation}/audio_${encodeURIComponent(tier)}.opus`
+}
+
+/** Queue a fresh render of the book (new generation; the old one keeps serving). */
+export async function reprocessBook(bookId: string): Promise<Book> {
+  return fetchApi<Book>(`/library/${encodeURIComponent(bookId)}/reprocess`, { method: 'POST' })
+}
+
+/** Cancel the book's running or queued render. */
+export async function cancelRender(bookId: string): Promise<Book> {
+  return fetchApi<Book>(`/library/${encodeURIComponent(bookId)}/reprocess?cancel=true`, { method: 'POST' })
+}
+
+/** Change the voice the book renders with; the current render keeps playing. */
+export async function setBookVoice(bookId: string, voice: string): Promise<Book> {
+  return fetchApi<Book>(`/library/${encodeURIComponent(bookId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ voice }),
+  })
+}
+
+export interface ProcessingInfo {
+  phase_timings: Record<string, number>
+  last_error: { message: string; traceback?: string } | null
+  sentences_done: number
+  sentences_total: number
+  sentences_per_second: number | null
+}
+
+export async function getProcessing(bookId: string): Promise<ProcessingInfo> {
+  return fetchApi<ProcessingInfo>(`/library/${encodeURIComponent(bookId)}/processing`)
 }
 
 /**

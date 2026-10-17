@@ -4,7 +4,7 @@
   import type { Book } from '$lib/api'
   import type { StoredProgress } from '$lib/utils/reading-progress'
 
-  let { books, loading, error, progress = {}, onRetry, onClick, onDelete, onMove, onEditMetadata, onDragStart, onDragEnd }: {
+  let { books, loading, error, progress = {}, onRetry, onRetryRender, onClick, onDelete, onMove, onEditMetadata, onDragStart, onDragEnd }: {
     books: Book[]
     loading: boolean
     error: string | null
@@ -14,6 +14,8 @@
      */
     progress?: Record<string, StoredProgress>
     onRetry: () => void
+    /** Re-queues one book's failed render. */
+    onRetryRender?: (id: string) => void
     onClick: (id: string) => void
     onDelete?: (id: string) => void
     onMove?: (book: Book) => void
@@ -58,6 +60,7 @@
           sentenceIndex={progress[book.id]?.sentenceIndex ?? null}
           totalSentences={progress[book.id]?.totalSentences ?? null}
           {onClick}
+          onRetry={onRetryRender}
           {onDelete}
           {onMove}
           {onEditMetadata}

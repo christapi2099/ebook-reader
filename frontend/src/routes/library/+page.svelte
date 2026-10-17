@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte'
+  import { onMount, onDestroy, tick } from 'svelte'
   import { goto } from '$app/navigation'
   import {
     createFolder,
@@ -7,6 +7,7 @@
     deleteFolder,
     getFolders,
     getLibrary,
+    reprocessBook,
     renameFolder,
     setBookFolder,
     updateBook,
@@ -22,6 +23,7 @@
   import FolderNameDialog from '$lib/components/FolderNameDialog.svelte'
   import MoveToFolderDialog from '$lib/components/MoveToFolderDialog.svelte'
   import LastRead from '$lib/components/LastRead.svelte'
+  import { anyJobActive } from '$lib/utils/render-status'
   import { toastStore } from '$lib/stores/toast'
   import { userStore } from '$lib/stores/user'
 
@@ -65,6 +67,45 @@
     }),
   )
   const isFiltering = $derived(searchQuery.trim() !== '' || formatFilter !== null)
+
+  /** How often the library refreshes while any render job is active. */
+  const POLL_MS = 3000
+  let pollTimer: ReturnType<typeof setInterval> | null = null
+  const jobsActive = $derived(anyJobActive(books))
+
+  /** Refresh just the books, silently: no spinner, no error banner. */
+  async function pollBooks() {
+    try {
+      const next = await getLibrary()
+      books = next
+      loadProgress(next)
+    } catch {
+      // A missed tick is harmless; the next one retries.
+    }
+  }
+
+  $effect(() => {
+    if (jobsActive) {
+      pollTimer ??= setInterval(pollBooks, POLL_MS)
+    } else if (pollTimer) {
+      clearInterval(pollTimer)
+      pollTimer = null
+    }
+  })
+
+  onDestroy(() => {
+    if (pollTimer) clearInterval(pollTimer)
+    pollTimer = null
+  })
+
+  async function handleRetryRender(bookId: string) {
+    try {
+      await reprocessBook(bookId)
+      await pollBooks()
+    } catch (e) {
+      toastStore.push({ tone: 'danger', title: 'Could not retry processing', message: toDetailMessage(e) })
+    }
+  }
 
   async function fetchLibrary() {
     loading = true
@@ -490,6 +531,7 @@
       {error}
       {progress}
       onRetry={fetchLibrary}
+      onRetryRender={handleRetryRender}
       onClick={(id) => goto(`/reader/${id}`)}
       onDelete={handleDelete}
       onMove={(book) => (movingBook = book)}

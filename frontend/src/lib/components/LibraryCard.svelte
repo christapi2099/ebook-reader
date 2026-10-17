@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { Book } from '$lib/api'
   import { deriveReadingProgress } from '$lib/utils/reading-progress'
+  import { renderCardState, formatEta } from '$lib/utils/render-status'
 
   /**
    * One book in the library.
@@ -15,6 +16,7 @@
     sentenceIndex = null,
     totalSentences = null,
     onClick,
+    onRetry,
     onDelete,
     onMove,
     onEditMetadata,
@@ -27,6 +29,8 @@
     /** Sentence total, or `null` when it is not known — no bar is shown then. */
     totalSentences?: number | null
     onClick: (id: string) => void
+    /** Re-queues a failed render. */
+    onRetry?: (id: string) => void
     onDelete?: (id: string) => void
     /** Opens the move dialog — the keyboard-reachable way to file a book. */
     onMove?: (book: Book) => void
@@ -39,6 +43,11 @@
 
   let showMenu = $state(false)
   let dragging = $state(false)
+
+  const renderState = $derived(renderCardState(book))
+  const locked = $derived(renderState === 'locked')
+  const eta = $derived(formatEta(book.eta_seconds))
+  const percent = $derived(Math.round(Math.min(1, Math.max(0, book.progress ?? 0)) * 100))
 
   const progress = $derived(deriveReadingProgress(sentenceIndex, totalSentences))
 
@@ -102,7 +111,9 @@
   tabindex="0"
   draggable={Boolean(onDragStart)}
   aria-label={`${book.title} by ${book.author ?? 'Unknown'}`}
-  onclick={() => onClick(book.id)}
+  aria-disabled={locked}
+  data-render-state={renderState}
+  onclick={() => { if (!locked) onClick(book.id) }}
   onkeydown={(e) => {
     // Only the card itself opens the book. Without this guard, Enter on the
     // "Book options" button bubbles here and navigates away instead of
@@ -111,7 +122,7 @@
     if (e.target !== e.currentTarget) return
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault()
-      onClick(book.id)
+      if (!locked) onClick(book.id)
     }
   }}
   ondragstart={handleDragStart}
@@ -200,7 +211,13 @@
     </svg>
     <span class="text-xs text-fg-subtle">No cover art</span>
 
-    {#if progress}
+    {#if renderState === 'rerendering'}
+      <span class="absolute top-2 right-12 rounded-full bg-accent-soft border border-accent px-2 py-0.5 text-[9px] font-bold text-accent" data-rerendering-badge>
+        Re-rendering…
+      </span>
+    {/if}
+
+    {#if !locked && progress}
       <div
         class="absolute inset-x-2 bottom-1 h-1 overflow-hidden rounded-full bg-border"
         role="progressbar"
@@ -214,7 +231,7 @@
       </div>
     {/if}
 
-    {#if progress}
+    {#if !locked && progress}
       <button
         type="button"
         class="absolute bottom-3 z-10 min-h-11 rounded-full border border-border bg-surface px-3 text-xs font-semibold text-accent shadow-1 hover:bg-accent-soft"
@@ -225,6 +242,39 @@
       </button>
     {/if}
   </div>
+
+  {#if locked}
+    <div class="mt-2 text-xs text-fg-muted" role="status" data-locked-status>
+      <div
+        class="h-1 overflow-hidden rounded-full bg-border"
+        role="progressbar"
+        aria-label={`Processing ${book.title}`}
+        aria-valuemin="0"
+        aria-valuemax="100"
+        aria-valuenow={percent}
+      >
+        <div class="h-full rounded-full bg-accent" style={`width: ${percent}%`}></div>
+      </div>
+      <p class="mt-1 tabular-nums">
+        {book.job_status === 'pending' ? 'Queued' : `Processing ${percent}%`}
+        {#if book.job_status === 'pending' && book.queue_position != null} · #{book.queue_position} in queue{/if}
+        {#if eta} · {eta}{/if}
+      </p>
+    </div>
+  {:else if renderState === 'error'}
+    <div class="mt-2 text-xs" data-error-status>
+      <p class="text-danger">Processing failed</p>
+      {#if onRetry}
+        <button
+          type="button"
+          class="mt-1 min-h-11 rounded-md border border-border px-3 text-xs font-semibold text-accent hover:bg-accent-soft"
+          onclick={(e) => { e.stopPropagation(); onRetry(book.id) }}
+        >
+          Retry<span class="sr-only"> {book.title}</span>
+        </button>
+      {/if}
+    </div>
+  {/if}
 
   <h3 class="font-semibold text-fg mt-2 line-clamp-2 text-sm">{book.title}</h3>
   <!--
