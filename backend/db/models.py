@@ -47,6 +47,19 @@ class Book(SQLModel, table=True):
     ephemeral: bool = False
     # NULL means "not filed"; books are never required to belong to a folder.
     folder_id: Optional[int] = Field(default=None, foreign_key="folder.id", index=True)
+    # Process-first render state. A book is readable iff ready_generation is not
+    # NULL (see services/render_state.py).
+    ready_generation: Optional[int] = None
+    ready_fingerprint: Optional[str] = None
+    job_status: str = "idle"  # idle | pending | processing | error | cancelled
+    target_fingerprint: Optional[str] = None
+    phase: Optional[str] = None
+    progress: float = 0.0
+    error_message: Optional[str] = None
+    render_priority: int = 0
+    lease_owner: Optional[str] = None
+    lease_expires: Optional[datetime] = None
+    voice: Optional[str] = None
 
 
 class Sentence(SQLModel, table=True):

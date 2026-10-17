@@ -134,6 +134,31 @@ def _migrate(engine):
         ))
         conn.commit()
 
+        # Process-first render state (Phase 1b). A book is readable iff
+        # ready_generation IS NOT NULL. Existing books have no render, so the
+        # first time job_status is added they are flipped to 'pending' (the
+        # force-render decision); the flip happens only in the same step that
+        # adds the column, which keeps reruns from clobbering live job state.
+        book_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(book)"))}
+        for name, ddl in (
+            ("ready_generation", "INTEGER DEFAULT NULL"),
+            ("ready_fingerprint", "TEXT DEFAULT NULL"),
+            ("target_fingerprint", "TEXT DEFAULT NULL"),
+            ("phase", "TEXT DEFAULT NULL"),
+            ("progress", "REAL DEFAULT 0"),
+            ("error_message", "TEXT DEFAULT NULL"),
+            ("render_priority", "INTEGER DEFAULT 0"),
+            ("lease_owner", "TEXT DEFAULT NULL"),
+            ("lease_expires", "DATETIME DEFAULT NULL"),
+            ("voice", "TEXT DEFAULT NULL"),
+        ):
+            if name not in book_cols:
+                conn.execute(text(f"ALTER TABLE book ADD COLUMN {name} {ddl}"))
+        if 'job_status' not in book_cols:
+            conn.execute(text("ALTER TABLE book ADD COLUMN job_status TEXT DEFAULT 'idle'"))
+            conn.execute(text("UPDATE book SET job_status='pending', ready_generation=NULL"))
+        conn.commit()
+
 
 def get_session():
     with Session(engine) as session:
