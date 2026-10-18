@@ -17,6 +17,7 @@
     onPageChange,
     buffering = false,
     pageToScroll = null,
+    resumePage = null,
     searchMatches = [],
     currentSearchIndex = -1,
     highlightColor = '#fef08a',
@@ -35,6 +36,8 @@
     currentWordIndex: number
     onSentenceClick: (index: number) => void
     onPageChange?: (page: number) => void
+    /** Page to open at on first load (0-based), so a reopened book resumes there. */
+    resumePage?: number | null
     buffering?: boolean
     pageToScroll?: number | null
     searchMatches?: number[]
@@ -81,6 +84,7 @@
   const BIONIC_CANVAS_OPACITY = 0.3
 
   let containerWidth = $state(0)
+  let pendingResumePage: number | null = null
   // Bumped whenever the overlays are rebuilt, so the highlight effects re-apply.
   let layoutVersion = $state(0)
   const RESIZE_SETTLE_MS = 150
@@ -156,6 +160,7 @@
       pdfDoc = await pdfjsLib.getDocument(getPdfUrl(bookId)).promise
       pageCount = pdfDoc.numPages
       loading = false
+      pendingResumePage = resumePage
       renderAllPages()
       setupIntersectionObserver()
       setupResizeObserver()
@@ -208,6 +213,12 @@
     wrapper.appendChild(bionicOverlay)
 
     pagesEl?.appendChild(wrapper)
+    // Pages render in order, so the resume page's wrapper has every page above it
+    // in place: scroll there once, instantly, instead of animating from the top.
+    if (pendingResumePage === pageNum - 1) {
+      scrollEl?.scrollTo({ top: wrapper.offsetTop })
+      pendingResumePage = null
+    }
     drawHighlights(pageNum - 1)
     drawBionicText(pageNum - 1)
 

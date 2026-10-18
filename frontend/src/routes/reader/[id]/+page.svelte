@@ -52,6 +52,8 @@ let seeking = $state(false)
 let audioReady = $state(false)
 let currentPage = $state(0)
 let pageToScroll = $state<number | null>(null)
+// Page of the saved sentence, set once per load so the viewer opens where the reader was.
+let resumePage = $state<number | null>(null)
 let settingsOpen = $state(false)
 let searchOpen = $state(false)
 let bookmarksOpen = $state(false)
@@ -134,6 +136,8 @@ function startGate(id: string) {
 async function loadGeneration(id: string, generation: number | null) {
   try {
     await loadBook(id, generation ?? undefined)
+    const resumed = get(readerStore) as ReaderState
+    resumePage = resumed.sentences[resumed.currentIndex]?.page ?? null
     if (generation !== null) manifest = await getRenderManifest(id)
   } catch (e) {
     if (e instanceof NotReadyError) {
@@ -462,6 +466,7 @@ function handleBackToLibrary() {
           currentWordIndex={audio.currentWordIndex}
           buffering={audio.buffering || seeking}
           pageToScroll={pageToScroll}
+          resumePage={resumePage}
           searchMatches={searchMatches}
           currentSearchIndex={currentSearchIndex}
           highlightColor={settings.highlightColor}
