@@ -309,6 +309,20 @@ def get_progress(book_id: str, session: Session = Depends(get_session)):
     return {"sentence_index": row.sentence_index if row else 0}
 
 
+@router.get("/{book_id}/cover")
+def get_cover(book_id: str, session: Session = Depends(get_session)):
+    """First page of the PDF as a PNG; 404 when the book has no cover."""
+    from fastapi.responses import FileResponse
+    from services import cover
+
+    book = require_book(session, book_id)
+    path = cover.ensure_cover(book.id, book.file_path, book.file_type, book.cover_page or 0)
+    if path is None:
+        raise HTTPException(status_code=404, detail="No cover art")
+    return FileResponse(path, media_type="image/png",
+                        headers={"Cache-Control": "private, max-age=86400"})
+
+
 @router.post("/{book_id}/priority")
 def move_to_front(book_id: str, session: Session = Depends(get_session)):
     """Move a queued render to the front. The running job is not interrupted;

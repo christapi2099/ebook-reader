@@ -28,3 +28,30 @@ def test_move_to_front_bumps_a_queued_book_above_the_others(client):
 def test_move_to_front_refuses_a_book_that_is_not_queued(client):
     _book("r1", "ready")
     assert client.post("/library/r1/priority").status_code == 409
+
+
+def test_cover_is_the_first_page_of_a_pdf(client, tmp_path, monkeypatch):
+    import fitz
+    import storage
+    from services import cover as cv
+
+    monkeypatch.setattr(storage, "COVERS_DIR", tmp_path / "covers")
+
+    pdf = tmp_path / "c.pdf"
+    doc = fitz.open()
+    doc.new_page(width=300, height=400)
+    doc.save(str(pdf))
+    doc.close()
+    with Session(_db.engine) as s:
+        s.add(Book(id="pdfcover", title="c", file_path=str(pdf), file_type="pdf", page_count=1,
+                   created_at=T0))
+        s.commit()
+    r = client.get("/library/pdfcover/cover")
+    assert r.status_code == 200 and r.headers["content-type"] == "image/png"
+    assert r.content[:8] == b"\x89PNG\r\n\x1a\n"
+    assert cv.cover_path("pdfcover").is_file()
+
+
+def test_no_cover_for_text_books(client):
+    _book("txt", "ready")
+    assert client.get("/library/txt/cover").status_code == 404

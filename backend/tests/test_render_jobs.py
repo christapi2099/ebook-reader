@@ -151,3 +151,21 @@ def test_delete_during_render_cleans_up(eng, client, monkeypatch, tmp_path):
     assert rj.claim_next("w", T0) is None
     with Session(eng) as s:
         assert s.exec(select(Sentence)).all() == [] and s.exec(select(Book)).all() == []
+
+
+def test_startup_expires_leases_left_by_a_dead_worker(db_engine, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from sqlmodel import Session
+    import db.database as _db
+    from db.models import Book
+    from services import render_jobs as rj
+
+    monkeypatch.setattr(_db, "engine", db_engine)
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    with Session(db_engine) as s:
+        s.add(Book(id="orphan", title="o", file_path="x", file_type="text", page_count=1,
+                   created_at=t0, job_status="processing", lease_owner="gone",
+                   lease_expires=t0 + timedelta(hours=1)))
+        s.commit()
+    assert rj.expire_orphan_leases(now=t0) == 1
+    assert rj.claim_next("new-worker", t0 + timedelta(days=1), debounce_s=0) == "orphan"

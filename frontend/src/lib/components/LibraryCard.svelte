@@ -1,6 +1,7 @@
 <script lang="ts">
-  import type { Book } from '$lib/api'
+  import { API_BASE, type Book } from '$lib/api'
   import { deriveReadingProgress } from '$lib/utils/reading-progress'
+  import ProgressBar from '$lib/components/ui/ProgressBar.svelte'
   import { renderCardState, formatEta } from '$lib/utils/render-status'
 
   /**
@@ -43,6 +44,7 @@
 
   let showMenu = $state(false)
   let dragging = $state(false)
+  let coverLoaded = $state(false)
 
   const renderState = $derived(renderCardState(book))
   const locked = $derived(renderState === 'locked')
@@ -203,6 +205,16 @@
     class="relative aspect-[2/3] rounded-lg overflow-hidden border border-dashed border-border-strong bg-surface-sunken flex flex-col items-center justify-center gap-2 p-4 transition-transform duration-200 group-hover:-translate-y-1 group-hover:shadow-2"
     data-cover-placeholder={book.id}
   >
+    {#if book.file_type === 'pdf'}
+      <img
+        src={`${API_BASE}/library/${encodeURIComponent(book.id)}/cover`}
+        alt=""
+        class="absolute inset-0 h-full w-full object-cover {coverLoaded ? '' : 'hidden'}"
+        onload={() => (coverLoaded = true)}
+        onerror={() => (coverLoaded = false)}
+        data-cover-image
+      />
+    {/if}
     <span class="absolute top-2 left-2 rounded-full bg-surface/90 backdrop-blur-sm border border-border px-2 py-0.5 text-[9px] font-bold uppercase tracking-wide text-fg-muted">
       {book.file_type}
     </span>
@@ -245,16 +257,11 @@
 
   {#if locked}
     <div class="mt-2 text-xs text-fg-muted" role="status" data-locked-status>
-      <div
-        class="h-1 overflow-hidden rounded-full bg-border"
-        role="progressbar"
-        aria-label={`Processing ${book.title}`}
-        aria-valuemin="0"
-        aria-valuemax="100"
-        aria-valuenow={percent}
-      >
-        <div class="h-full rounded-full bg-accent" style={`width: ${percent}%`}></div>
-      </div>
+      <ProgressBar
+        size="sm"
+        percent={book.job_status === 'pending' ? null : percent}
+        label={`Processing ${book.title}`}
+      />
       <p class="mt-1 tabular-nums">
         {book.job_status === 'pending' ? 'Queued' : `Processing ${percent}%`}
         {#if book.job_status === 'pending' && book.queue_position != null} · #{book.queue_position} in queue{/if}

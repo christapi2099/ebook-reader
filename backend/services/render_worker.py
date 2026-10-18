@@ -135,7 +135,7 @@ def db_sentences(book_id: str) -> list[dict]:
 def default_extractor(book: Book) -> list[dict]:
     """Re-extract PDF/EPUB from the stored file (so a changed text pipeline takes
     effect); anything else (pasted text) keeps its stored sentences."""
-    path = Path(book.file_path)
+    path = storage.book_file(book.file_path)
     if book.file_type not in ("pdf", "epub") or not path.is_file():
         return db_sentences(book.id)
     from services.epub_engine import EPUBEngine
@@ -159,11 +159,11 @@ def pdf_box_provider(book: Book) -> Optional[Callable[[dict], list]]:
     """sentence row -> PyMuPDF word tuples of that sentence only. The stored
     ``words`` hold boxes without text, so the text is recovered from the page by
     exact coordinates. EPUB (no geometry) returns None: every box is None."""
-    if book.file_type != "pdf" or not Path(book.file_path).is_file():
+    if book.file_type != "pdf" or not storage.book_file(book.file_path).is_file():
         return None
     import fitz
 
-    doc = fitz.open(book.file_path)
+    doc = fitz.open(str(storage.book_file(book.file_path)))
     pages: dict[int, dict] = {}
 
     def key(x0, y0, x1, y1):

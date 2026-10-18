@@ -99,8 +99,9 @@ def retarget_all() -> list[str]:
 
 def startup_sweep() -> None:
     """Run at process start: GC, reconcile missing artifacts, requeue stale fingerprints."""
-    from services import render_store
+    from services import render_jobs, render_store
     try:
+        render_jobs.expire_orphan_leases()
         render_store.gc()
         render_store.reconcile()
         retarget_all()

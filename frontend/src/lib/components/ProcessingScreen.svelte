@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { Book } from '$lib/api'
   import { formatEta } from '$lib/utils/render-status'
+  import ProgressBar from '$lib/components/ui/ProgressBar.svelte'
 
   /**
    * Shown instead of the reader while a book has no ready render. The reader
@@ -31,18 +32,11 @@
     <p class="text-lg font-medium text-fg" role="status">
       {queued ? 'Waiting in the queue…' : 'Preparing your audiobook…'}
     </p>
-    <div
-      class="h-2 w-64 max-w-full overflow-hidden rounded-full bg-border"
-      role="progressbar"
-      aria-label="Processing progress"
-      aria-valuemin="0"
-      aria-valuemax="100"
-      aria-valuenow={percent}
-    >
-      <div class="h-full rounded-full bg-accent" style={`width: ${percent}%`}></div>
+    <div class="w-72 max-w-full">
+      <ProgressBar percent={queued ? null : percent} label="Processing progress" />
     </div>
-    <p class="text-sm tabular-nums text-fg-muted">
-      {#if queued && book?.queue_position != null}#{book.queue_position} in queue{:else}{percent}%{/if}
+    <p class="text-sm font-medium tabular-nums text-fg">
+      {#if queued && book?.queue_position != null}#{book.queue_position} in queue{:else if queued}Queued{:else}{percent}%{/if}
       {#if eta} · {eta} left{/if}
     </p>
     <p class="text-xs text-fg-subtle">This page opens automatically when it is ready.</p>

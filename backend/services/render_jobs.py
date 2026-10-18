@@ -146,6 +146,18 @@ def cancel(book_id: str) -> bool:
                    pending_since=None)
 
 
+def expire_orphan_leases(now: Optional[datetime] = None) -> int:
+    """Startup only: every lease was taken by a process that no longer exists, so
+    expire them all and let claim_next take the jobs back. Safe because one backend
+    process runs the worker; do not call this while another worker is alive."""
+    now = _now(now)
+    with _db.engine.begin() as conn:
+        res = conn.execute(update(Book.__table__).where(
+            _B.job_status == JOB_PROCESSING, _B.lease_expires > now).values(
+            lease_expires=now))
+    return res.rowcount
+
+
 def check_job(book_id: str, my_target: Optional[str]) -> str:
     """Worker's between-sentence check: CONTINUE | SUPERSEDED | CANCELLED | GONE."""
     with _db.engine.connect() as conn:
