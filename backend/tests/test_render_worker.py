@@ -126,6 +126,8 @@ def test_upload_pending_processing_ready(env, real_ffmpeg):
     assert {"base.flac", "audio_1.0.opus", "audio_1.5.opus", "manifest.json",
             "remap_from_0.json"} <= set(files)
     assert not tmp_dirs()
+    # resume state is dropped once published
+    assert not any(p.startswith(("chunks/", "checkpoint.json")) for p in files)
     assert len(synth.calls) == 5  # the filtered sentence is never synthesized
     assert len(sentence_rows(env)) == 6  # ...but it is kept as a row
     m = json.loads(files["manifest.json"])

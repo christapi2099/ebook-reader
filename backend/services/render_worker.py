@@ -514,6 +514,9 @@ def _publish(book_id, tmp, rows, remap, target, fail_at) -> None:
             except OSError:
                 pass
         raise
+    # Resume state is only needed until publish; keep it out of the render's disk footprint.
+    shutil.rmtree(final / "chunks", ignore_errors=True)
+    (final / "checkpoint.json").unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------- loop
