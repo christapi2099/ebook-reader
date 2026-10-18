@@ -230,6 +230,13 @@ def _write_json(path: Path, obj) -> None:
     os.replace(tmp, path)
 
 
+def _speakable(row: dict) -> bool:
+    """A row the engine should synthesize: not filtered, and with something to say.
+    Leftovers such as a lone "." from a table of contents have no audio in Piper,
+    and used to fail the whole book."""
+    return not row.get("filtered") and any(c.isalnum() for c in row["text"])
+
+
 def _find_or_make_tmp(book_id: str, target: str) -> tuple[Path, dict]:
     """Reuse the tmp dir built for ``target`` (resume); delete tmp dirs built for
     any other target; else start a fresh one."""
@@ -297,7 +304,7 @@ class _Synth:
 
 
 def _estimate_bytes(rows: list[dict]) -> int:
-    chars = sum(len(r["text"]) for r in rows if not r.get("filtered"))
+    chars = sum(len(r["text"]) for r in rows if _speakable(r))
     return int(chars / CHARS_PER_SECOND / 3600 * BYTES_PER_AUDIO_HOUR)
 
 
@@ -391,7 +398,7 @@ def _render(book_id, worker_id, synthesizer, aligner, fallback, extractor, box_p
 
     progress(0.0, "extract")
     rows = (extractor or default_extractor)(book)
-    todo = [r for r in rows if not r.get("filtered")]
+    todo = [r for r in rows if _speakable(r)]
     phase_stat("synthesize")
     _stats(book_id, sentences_done=0, sentences_total=len(todo), now=time.time())
     if not todo:

@@ -444,3 +444,17 @@ def test_start_stop_worker_hooks(env, monkeypatch):
     assert th is not None and th.is_alive() and rw.start_worker() is th
     rw.stop_worker()
     assert not th.is_alive()
+
+
+def test_punctuation_only_sentence_is_skipped_not_fatal(env, real_ffmpeg):
+    ffmpeg_required()
+    mk_book(env)
+    with Session(env) as s:
+        s.exec(select(Sentence).where(Sentence.book_id == "b1", Sentence.index == 2))
+        row = s.exec(select(Sentence).where(Sentence.book_id == "b1", Sentence.index == 2)).one()
+        row.text = "."
+        s.add(row)
+        s.commit()
+    synth = FakeSynth()
+    assert run(synth) == rw.READY
+    assert "." not in synth.calls and len(synth.calls) == 5

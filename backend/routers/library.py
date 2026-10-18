@@ -309,6 +309,18 @@ def get_progress(book_id: str, session: Session = Depends(get_session)):
     return {"sentence_index": row.sentence_index if row else 0}
 
 
+@router.post("/{book_id}/priority")
+def move_to_front(book_id: str, session: Session = Depends(get_session)):
+    """Move a queued render to the front. The running job is not interrupted;
+    this decides which book the worker claims next."""
+    book = require_book(session, book_id)
+    if book.job_status != "pending":
+        raise HTTPException(status_code=409, detail="Only queued books can be moved")
+    render_jobs.bump_priority(book_id)
+    session.refresh(book)
+    return _serialize_one(session, book)
+
+
 @router.post("/{book_id}/reprocess")
 def reprocess_book(book_id: str, cancel: bool = Query(False),
                    session: Session = Depends(get_session)):
