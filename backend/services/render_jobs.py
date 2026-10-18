@@ -85,6 +85,13 @@ def release(book_id: str, worker_id: str) -> bool:
                    lease_owner=None, lease_expires=None)
 
 
+def pause(book_id: str, worker_id: str) -> bool:
+    """Give a running job back to the queue for a user pause. Unlike requeue, the
+    progress is kept, so the bar stays where it was while paused."""
+    return _update(book_id, [_B.lease_owner == worker_id, _B.job_status == JOB_PROCESSING],
+                   job_status=JOB_PENDING, lease_owner=None, lease_expires=None)
+
+
 def requeue(book_id: str, worker_id: str) -> bool:
     """Give a superseded job back to the queue (immediately claimable)."""
     return _update(book_id, [_B.lease_owner == worker_id, _B.job_status == JOB_PROCESSING],

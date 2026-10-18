@@ -518,3 +518,39 @@ def test_heartbeat_is_running_during_encode_and_audit(env, monkeypatch):
     mk_book(env)
     assert run(FakeSynth()) == rw.READY
     assert started == [True] and stopped == [True]
+
+
+def test_pause_requeues_mid_book_and_resume_finishes_it(env, real_ffmpeg, monkeypatch):
+    """Pausing stops the render between sentences and requeues the book with its
+    checkpoint; unpausing finishes it without re-synthesizing the finished sentences."""
+    from services import render_pause
+    ffmpeg_required()
+    mk_book(env)
+    synth = FakeSynth(hook=lambda n, t: render_pause.set_paused(True) if n == 2 else None)
+    assert run(synth) == rw.REQUEUED
+    assert len(synth.calls) == 2
+    b = book(env)
+    assert b.job_status == "pending" and b.lease_owner is None
+    assert render_pause.is_paused()
+    render_pause.set_paused(False)
+    synth2 = FakeSynth()
+    assert run(synth2, worker="w2") == rw.READY
+    assert len(synth2.calls) == 4  # sentences 0 and 1 came from the checkpoint; 2-5 remain
+
+
+def test_worker_loop_claims_nothing_while_paused(env, monkeypatch):
+    from services import render_pause
+    mk_book(env)
+    render_pause.set_paused(True)
+    monkeypatch.setattr(rw, "processor_enabled", lambda: True)
+    monkeypatch.setattr(rw, "_engine_ready", lambda: True)
+    stop = threading.Event()
+    calls = []
+    monkeypatch.setattr(rw, "run_once", lambda *a, **k: calls.append(1) or None)
+    t = threading.Thread(target=rw.worker_loop, args=(stop,), kwargs={"poll_s": 0.01,
+                                                                    "synthesizer": FakeSynth()})
+    t.start()
+    time.sleep(0.1)
+    stop.set()
+    t.join(2)
+    assert calls == []

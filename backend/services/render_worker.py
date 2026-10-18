@@ -45,6 +45,7 @@ from sqlmodel import Session, select
 
 import db.database as _db
 import storage
+from services import render_pause
 from db.models import Book, Sentence
 from services import (
     book_processor, render_artifacts as ra, render_jobs as rj, render_store as rs,
@@ -401,9 +402,13 @@ def _render(book_id, worker_id, synthesizer, aligner, fallback, extractor, box_p
     ctx["target"] = target
 
     def checkpoint_job(drop_tmp=False) -> None:
-        """Between-step supersede/cancel/delete check."""
+        """Between-step supersede/cancel/delete/pause check."""
         verdict = rj.check_job(book_id, target)
         if verdict == rj.CONTINUE:
+            if render_pause.is_paused():
+                # The user asked to read: keep the checkpoint and give the job back.
+                rj.pause(book_id, worker_id)
+                raise _Stop(REQUEUED)
             return
         if verdict == rj.GONE:
             _remove_book_dir(book_id)
@@ -592,7 +597,8 @@ def worker_loop(stop_event: threading.Event, poll_s: float = 2.0, *, worker_id: 
     while not stop_event.is_set():
         did = None
         try:
-            if processor_enabled() and (synthesizer is not None or _engine_ready()):
+            if processor_enabled() and not render_pause.is_paused() \
+                    and (synthesizer is not None or _engine_ready()):
                 did = run_once(worker_id, synthesizer=synthesizer, aligner=aligner, **kw)
         except Exception:  # noqa: BLE001 - keep the thread alive
             logger.exception("[render] worker iteration failed")

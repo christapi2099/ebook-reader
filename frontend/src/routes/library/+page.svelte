@@ -7,8 +7,10 @@
     deleteFolder,
     getFolders,
     getLibrary,
+    getRenderPaused,
     moveInQueue,
     moveToFrontOfQueue,
+    setRenderPaused,
     reprocessBook,
     renameFolder,
     setBookFolder,
@@ -99,6 +101,26 @@
     if (pollTimer) clearInterval(pollTimer)
     pollTimer = null
   })
+
+  let renderPaused = $state<boolean | null>(null)
+
+  async function loadRenderPaused() {
+    try {
+      renderPaused = await getRenderPaused()
+    } catch {
+      renderPaused = null
+    }
+  }
+
+  async function toggleRenderPause() {
+    if (renderPaused === null) return
+    try {
+      renderPaused = await setRenderPaused(!renderPaused)
+      await pollBooks()
+    } catch (e) {
+      toastStore.push({ tone: 'danger', title: 'Could not change rendering', message: toDetailMessage(e) })
+    }
+  }
 
   async function handleQueueMove(book: Book, direction: 'up' | 'down' | 'front') {
     try {
@@ -371,6 +393,7 @@
     // Load user settings first so LastRead card can check last_book_id
     await userStore.load()
     await fetchLibrary()
+    await loadRenderPaused()
   })
 </script>
 
@@ -399,11 +422,25 @@
       {/if}
     </div>
 
-    {#if !currentFolder}
-      <Button class="shrink-0" onclick={() => (nameDialog = { folder: null })}>
-        New folder
+    <div class="flex shrink-0 items-center gap-2">
+      {#if renderPaused}
+        <span class="text-xs text-fg-muted" role="status" data-render-paused-note>Rendering paused</span>
+      {/if}
+      <Button
+        variant="secondary"
+        class="shrink-0"
+        disabled={renderPaused === null}
+        onclick={toggleRenderPause}
+        data-render-pause-toggle
+      >
+        {renderPaused ? 'Resume rendering' : 'Pause rendering'}
       </Button>
-    {/if}
+      {#if !currentFolder}
+        <Button class="shrink-0" onclick={() => (nameDialog = { folder: null })}>
+          New folder
+        </Button>
+      {/if}
+    </div>
   </div>
 
   <!-- Last read card at the top of the unfiled view -->

@@ -187,6 +187,18 @@ export async function reprocessBook(bookId: string): Promise<Book> {
   return fetchApi<Book>(`/library/${encodeURIComponent(bookId)}/reprocess`, { method: 'POST' })
 }
 
+/** Whether background rendering is paused so the reader has the machine. */
+export async function getRenderPaused(): Promise<boolean> {
+  return (await fetchApi<{ paused: boolean }>('/api/system/render-pause')).paused
+}
+
+export async function setRenderPaused(paused: boolean): Promise<boolean> {
+  return (await fetchApi<{ paused: boolean }>('/api/system/render-pause', {
+    method: 'POST',
+    body: JSON.stringify({ paused }),
+  })).paused
+}
+
 /** Move a queued render one place up or down the queue. */
 export async function moveInQueue(bookId: string, direction: 'up' | 'down'): Promise<Book> {
   return fetchApi<Book>(`/library/${encodeURIComponent(bookId)}/queue?direction=${direction}`, { method: 'POST' })

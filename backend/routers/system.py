@@ -18,7 +18,7 @@ from starlette.concurrency import run_in_threadpool
 
 import logging
 
-from services import engine_manager, kokoro_runtime, render_triggers
+from services import engine_manager, kokoro_runtime, render_pause, render_triggers
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,21 @@ def get_capabilities() -> dict[str, Any]:
 
 class SwitchRequest(BaseModel):
     engine: str
+
+
+class RenderPauseRequest(BaseModel):
+    paused: bool
+
+
+@router.get("/render-pause")
+def get_render_pause() -> dict[str, bool]:
+    """Whether background rendering is paused so the reader has the machine."""
+    return {"paused": render_pause.is_paused()}
+
+
+@router.post("/render-pause")
+def set_render_pause(body: RenderPauseRequest) -> dict[str, bool]:
+    return {"paused": render_pause.set_paused(body.paused)}
 
 
 @router.get("/engine")
