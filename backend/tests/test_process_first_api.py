@@ -323,3 +323,21 @@ def test_audio_range_206_last_bytes(client, renders_dir):
     assert "immutable" in r.headers["cache-control"]
     r = client.get(f"/api/renders/{BID}/1/audio_0.75.opus", headers={"Range": "bytes=10-19"})
     assert r.status_code == 206 and r.content == data[10:20]
+
+
+def test_progress_reports_the_page_of_the_saved_sentence(client, db_engine, seed_book):
+    """The library's resume card shows this page, so it must be the saved sentence's
+    page, not the book's last page (a regression: the card said "Page 91" for a
+    position on page 8)."""
+    from sqlmodel import Session, select
+    from db.models import Sentence
+    ready_book(seed_book, db_engine)
+    with Session(db_engine) as s:
+        rows = s.exec(select(Sentence).where(Sentence.book_id == BID)).all()
+        for r in rows:
+            r.page = r.index // 10  # ten sentences per page
+            s.add(r)
+        s.commit()
+    client.post(f"/library/{BID}/progress", json={"sentence_index": 23})
+    body = client.get(f"/library/{BID}/progress").json()
+    assert body["page"] == body["sentence_index"] // 10

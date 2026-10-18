@@ -309,8 +309,12 @@ def update_book(
 
 @router.get("/{book_id}/progress")
 def get_progress(book_id: str, session: Session = Depends(get_session)):
+    """The saved sentence, and the page it sits on (for the resume card)."""
     row = session.get(Progress, book_id)
-    return {"sentence_index": row.sentence_index if row else 0}
+    index = row.sentence_index if row else 0
+    page = session.exec(select(Sentence.page).where(
+        Sentence.book_id == book_id, Sentence.index == index)).first()
+    return {"sentence_index": index, "page": page}
 
 
 @router.get("/{book_id}/cover")

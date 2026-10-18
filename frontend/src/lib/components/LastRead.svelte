@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { getLibrary } from '$lib/api'
+  import { getLibrary, getProgressDetail } from '$lib/api'
   import type { Book } from '$lib/api'
 
   let { bookId, sentenceIndex, onClick }: {
@@ -12,7 +12,9 @@
   let book = $state<Book | null>(null)
   let loading = $state(true)
   let error = $state<string | null>(null)
-  let pageNumber = $derived(book?.page_count ?? 1)
+  // The page of the saved position (0-based from the server), not the book's last page.
+  let savedPage = $state<number | null>(null)
+  let pageNumber = $derived(savedPage !== null ? savedPage + 1 : null)
 
   async function loadBookDetails() {
     if (!bookId) {
@@ -26,6 +28,8 @@
       const books = await getLibrary()
       const found = books.find((b) => b.id === bookId)
       book = found || null
+      // The page is a detail: if it fails, the card still shows the title.
+      savedPage = await getProgressDetail(bookId).then((d) => d.page).catch(() => null)
       loading = false
     } catch (e: any) {
       error = 'Could not load book details'
@@ -62,7 +66,7 @@
             Resume Reading
           </span>
           <span class="text-xs text-fg-muted">•</span>
-          <span class="text-xs text-fg-muted">Page {pageNumber}</span>
+          {#if pageNumber !== null}<span class="text-xs text-fg-muted">Page {pageNumber}</span>{/if}
         </div>
         <h2 class="font-semibold text-fg text-lg leading-tight line-clamp-2">
           {book.title}

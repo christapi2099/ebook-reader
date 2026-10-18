@@ -467,6 +467,11 @@ export async function getProgress(bookId: string): Promise<number> {
   return res.sentence_index
 }
 
+/** The saved sentence and the 0-based page it sits on (null when unknown). */
+export async function getProgressDetail(bookId: string): Promise<{ sentence_index: number; page: number | null }> {
+  return fetchApi<{ sentence_index: number; page: number | null }>(`/library/${bookId}/progress`)
+}
+
 export interface UserSettings {
   last_book_id: string | null
   last_sentence_index: number
