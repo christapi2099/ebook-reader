@@ -24,7 +24,8 @@ from routers import bookmarks as bookmarks_router
 from routers import folders as folders_router
 from routers import user as user_router
 from routers import system as system_router
-from services import audio_cache, engine_manager, kokoro_runtime
+from routers import renders as renders_router
+from services import audio_cache, engine_manager, kokoro_runtime, render_triggers, render_worker
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +66,11 @@ engine_manager.register_applier(_apply_kokoro)
 async def lifespan(app: FastAPI):
     engine = create_engine_and_tables()
     Path("uploads").mkdir(exist_ok=True)
+    # Process-first: GC, reconcile missing artifacts, requeue stale fingerprints.
+    render_triggers.startup_sweep()
     _apply_kokoro(_init_kokoro())
+    # Background render worker (no-op when PROCESSOR_ENABLED is 0/false).
+    render_worker.start_worker()
     # Audio cache eviction lives here, not in the write path: one sweep at
     # startup, then the periodic task below for the life of the process, so
     # every writer is covered instead of only the flows we remembered
@@ -77,6 +82,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        render_worker.stop_worker()
         # Cancelled and awaited on shutdown so the task cannot outlive the
         # engine, and a sweep in flight cannot keep the process alive.
         await audio_cache.stop_periodic_sweep(sweeper)
@@ -101,6 +107,7 @@ app.include_router(mp3_router.router)
 app.include_router(bookmarks_router.router)
 app.include_router(folders_router.router)
 app.include_router(system_router.router)
+app.include_router(renders_router.router)
 
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 

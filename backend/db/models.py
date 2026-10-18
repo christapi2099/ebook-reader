@@ -96,6 +96,8 @@ class Progress(SQLModel, table=True):
     book_id: str = Field(primary_key=True, foreign_key='book.id')
     sentence_index: int
     updated_at: datetime
+    # Render generation the index refers to (NULL = written before generations).
+    generation: Optional[int] = None
 
 
 class Bookmark(SQLModel, table=True):
@@ -104,6 +106,7 @@ class Bookmark(SQLModel, table=True):
     sentence_index: int
     page: int
     label: str
+    generation: Optional[int] = None
     created_at: datetime
 
 
@@ -144,6 +147,8 @@ class UserSettings(SQLModel, table=True):
     id: int = Field(primary_key=True, default=1)
     last_book_id: str | None = Field(foreign_key='book.id', nullable=True)
     last_sentence_index: int = 0
+    # Generation of last_book_id that last_sentence_index refers to.
+    last_generation: int | None = None
     highlight_enabled: bool = Field(default=True)
     # The synthesis engine the user last chose in Settings ("cpu" | "gpu" |
     # "modal"). NULL means "never chosen", in which case KOKORO_BACKEND decides.

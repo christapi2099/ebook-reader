@@ -13,6 +13,8 @@ def _upload(client, filename="test.pdf", content=b"fakepdfbytes"):
         files={"file": (filename, content, "application/pdf")},
     )
     assert response.status_code == 200, response.text
+    from tests.conftest import mark_book_ready
+    mark_book_ready(response.json()["book_id"])
     return response.json()
 
 

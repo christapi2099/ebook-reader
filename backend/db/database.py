@@ -155,6 +155,12 @@ def _migrate(engine):
         ):
             if name not in book_cols:
                 conn.execute(text(f"ALTER TABLE book ADD COLUMN {name} {ddl}"))
+        # Generation stamps on reading position / bookmarks / last-read pointer.
+        for table, col in (("progress", "generation"), ("bookmark", "generation"),
+                           ("usersettings", "last_generation")):
+            cols = {row[1] for row in conn.execute(text(f"PRAGMA table_info({table})"))}
+            if col not in cols:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} INTEGER DEFAULT NULL"))
         if 'job_status' not in book_cols:
             conn.execute(text("ALTER TABLE book ADD COLUMN job_status TEXT DEFAULT 'idle'"))
             conn.execute(text("UPDATE book SET job_status='pending', ready_generation=NULL"))

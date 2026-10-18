@@ -4,12 +4,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi.concurrency import run_in_threadpool
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+import logging
+
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 from sqlmodel import Session, select
 
 from db.database import get_session
 from db.models import Book, Sentence
 from routers.deps import require_book
+from services import render_triggers
 from services.epub_engine import EPUBEngine
 from services.pdf_engine import PDFEngine
 from services.text_engine import TextEngine
@@ -18,6 +21,18 @@ from services.text_filter import TextFilter
 
 router = APIRouter(prefix="/documents")
 UPLOAD_DIR = Path("uploads")
+logger = logging.getLogger(__name__)
+
+
+def _trigger_render(book_id: str) -> None:
+    """New book: target today's fingerprint and go pending immediately (no debounce).
+
+    Failure to fingerprint must not lose the import; the startup sweep retries.
+    """
+    try:
+        render_triggers.request_for_book(book_id, None, debounce=False)
+    except Exception:
+        logger.exception("[render] could not request render for %s", book_id)
 
 
 def _import_response(book_id: str, sentence_count: int, *, already_existed: bool) -> dict:
@@ -102,13 +117,24 @@ async def upload_document(
         last_opened=datetime.now(timezone.utc),
     ))
     session.commit()
+    _trigger_render(book_id)
 
     return _import_response(book_id, len(sentence_objs), already_existed=False)
 
 
 @router.get("/{book_id}/sentences")
-def get_sentences(book_id: str, session: Session = Depends(get_session)):
-    require_book(session, book_id)
+def get_sentences(book_id: str, response: Response,
+                  generation: int | None = Query(None),
+                  session: Session = Depends(get_session)):
+    """Sentences of the ready generation; 409 while the book has none.
+
+    Only the ready generation's sentences are stored, so ``generation`` is
+    advisory: the generation actually served is in ``X-Render-Generation``.
+    """
+    book = require_book(session, book_id)
+    if book.ready_generation is None:
+        raise HTTPException(status_code=409, detail="Book has no ready render")
+    response.headers["X-Render-Generation"] = str(book.ready_generation)
     rows = session.exec(
         select(Sentence).where(Sentence.book_id == book_id).order_by(Sentence.index)
     ).all()
@@ -168,7 +194,8 @@ def create_text_book(text_data: dict, session: Session = Depends(get_session)):
         ephemeral=True,  # Ephemeral by default
     ))
     session.commit()
-    
+    _trigger_render(book_id)
+
     return _import_response(book_id, len(sentence_objs), already_existed=False)
 
 

@@ -704,6 +704,9 @@ def seed_book() -> Callable[..., Any]:
             "cover_page": 0,
             "created_at": datetime.now(UTC),
         }
+        # Process-first: a book is readable only from a ready render, so seeded
+        # books are ready by default; pass ready_generation=None for "unrendered".
+        fields.setdefault("ready_generation", 1)
         fields.update(book_fields)
         with Session(engine) as session:
             session.add(Book(id=book_id, **fields))
@@ -754,6 +757,21 @@ def client(db_engine, mock_engines, fake_kokoro, monkeypatch) -> Iterator[TestCl
         main.app.dependency_overrides.clear()
 
 
+def mark_book_ready(book_id: str) -> None:
+    """Give an uploaded book a ready render so reader-path tests (sentences,
+    progress) keep working. Tests of the upload trigger itself post to
+    /documents/upload directly and never call this."""
+    import db.database as database
+    from db.models import Book
+    with Session(database.engine) as session:
+        book = session.get(Book, book_id)
+        if book is not None and book.ready_generation is None:
+            book.ready_generation = 1
+            book.job_status = "idle"
+            session.add(book)
+            session.commit()
+
+
 @pytest.fixture
 def upload_book(client: TestClient) -> Callable[..., dict]:
     """Upload a file through the API and return the parsed response body."""
@@ -769,7 +787,10 @@ def upload_book(client: TestClient) -> Callable[..., dict]:
             files={"file": (filename, content, content_type)},
         )
         assert response.status_code == expect_status, response.text
-        return response.json()
+        body = response.json()
+        if expect_status == 200 and body.get("book_id"):
+            mark_book_ready(body["book_id"])
+        return body
 
     return _upload
 
@@ -916,3 +937,12 @@ def collect_ws_messages(
 def ws_read() -> Callable[..., list[dict]]:
     """The WebSocket message collector, exposed as a fixture."""
     return collect_ws_messages
+
+
+@pytest.fixture(autouse=True)
+def _no_startup_render_sweep(monkeypatch) -> None:
+    """The lifespan's render sweep (GC + reconcile + retarget) would un-ready every
+    seeded book (no artifacts on disk). Tests of the sweep call the real function
+    captured at their module import."""
+    from services import render_triggers
+    monkeypatch.setattr(render_triggers, "startup_sweep", lambda: None)

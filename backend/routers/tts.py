@@ -11,6 +11,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from sqlmodel import Session, select
 
 import db.database as _db
+from db.models import Book
 from services import engine_manager
 from services.sentence_source import load_sentences
 from services.tts_engine import SAMPLE_RATE, TTSEngine, SynthJob, normalize_speed
@@ -75,6 +76,15 @@ async def tts_websocket(websocket: WebSocket, book_id: str):
     sentence_data = load_sentences(book_id)
     if sentence_data is None:
         await websocket.close(code=4004, reason="Book not found")
+        return
+
+    # Process-first gate: a book is read only from a ready render. This socket
+    # stays for voice preview and for books that already have one.
+    with Session(_db.engine) as _gate:
+        _book = _gate.get(Book, book_id)
+        _ready = _book is not None and _book.ready_generation is not None
+    if not _ready:
+        await websocket.close(code=4409, reason="Book has no ready render")
         return
 
     engine_tts = TTSEngine(_kokoro)

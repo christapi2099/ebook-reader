@@ -15,6 +15,8 @@ class BookmarkCreate(BaseModel):
     book_id: str
     sentence_index: int
     label: str
+    # Generation the index was computed against; older ones are translated.
+    generation: int | None = None
 
 
 def _serialize(bookmark: Bookmark) -> dict:
@@ -31,6 +33,7 @@ def _serialize(bookmark: Bookmark) -> dict:
         "sentence_index": bookmark.sentence_index,
         "page": bookmark.page,
         "label": bookmark.label,
+        "generation": bookmark.generation,
         "created_at": bookmark.created_at.isoformat(),
     }
 
@@ -39,20 +42,25 @@ def _serialize(bookmark: Bookmark) -> dict:
 def create_bookmark(body: BookmarkCreate, session: Session = Depends(get_session)):
     # Only the existence check matters here; the row itself is not used, so the
     # return value is deliberately discarded.
-    require_book(session, body.book_id)
+    book = require_book(session, body.book_id)
+    # An older-generation write is translated, never rejected.
+    from routers.library import translate_index
+    index = translate_index(body.book_id, body.generation, body.sentence_index,
+                            book.ready_generation)
 
     # Resolve page from sentence
     sentence = session.exec(
         select(Sentence).where(
             Sentence.book_id == body.book_id,
-            Sentence.index == body.sentence_index,
+            Sentence.index == index,
         )
     ).first()
     page = sentence.page if sentence else 0
 
     bm = Bookmark(
         book_id=body.book_id,
-        sentence_index=body.sentence_index,
+        sentence_index=index,
+        generation=book.ready_generation,
         page=page,
         label=body.label[:100],
         created_at=datetime.now(timezone.utc),

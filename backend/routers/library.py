@@ -1,7 +1,9 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+import json
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlmodel import Session, func, select
 
@@ -9,6 +11,8 @@ from db.database import get_session
 from storage import RENDERS_DIR
 from db.models import Book, Bookmark, Folder, MP3Export, Progress, Sentence, UserSettings
 from routers.deps import require_book
+from services import render_jobs, render_stats, render_triggers
+import storage
 
 router = APIRouter(prefix="/library")
 
@@ -21,11 +25,32 @@ BOOK_AUTHOR_MAX_LENGTH = 200
 TITLE_REQUIRED = "Title is required"
 TITLE_TOO_LONG = f"Title must be at most {BOOK_TITLE_MAX_LENGTH} characters"
 AUTHOR_TOO_LONG = f"Author must be at most {BOOK_AUTHOR_MAX_LENGTH} characters"
-NOTHING_TO_UPDATE = "Provide a title or an author to update"
+NOTHING_TO_UPDATE = "Provide a title, an author or a voice to update"
 
 
 class ProgressUpdate(BaseModel):
     sentence_index: int
+    # Render generation the index was computed against. Optional for old clients.
+    generation: int | None = None
+
+
+def translate_index(book_id: str, generation: int | None, index: int,
+                    ready_generation: int | None) -> int:
+    """Map an index written against an older generation onto the ready one.
+
+    A write is never rejected for being old (a backgrounded tab's pagehide
+    beacon must still land on the right text). ``services.remap`` is owned by
+    another module and may not exist yet, so it is imported lazily; without
+    ``translate_progress_write`` the index is stored as given, at the ready
+    generation, until that function lands.
+    """
+    if generation is None or ready_generation is None or generation >= ready_generation:
+        return index
+    try:
+        from services.remap import translate_progress_write
+    except (ImportError, AttributeError):
+        return index
+    return int(translate_progress_write(book_id, generation, index))
 
 
 class FolderAssignment(BaseModel):
@@ -46,6 +71,13 @@ class BookMetadata(BaseModel):
 
     title: str | None = None
     author: str | None = None
+    # Changing the voice requests a background re-render; the book stays
+    # readable on its current generation meanwhile.
+    voice: str | None = None
+
+
+VOICE_MAX_LENGTH = 100
+VOICE_INVALID = "Voice must be a non-empty string of at most 100 characters"
 
 
 def _clean_title(raw: str | None) -> str:
@@ -64,6 +96,13 @@ def _clean_title(raw: str | None) -> str:
     return title
 
 
+def _clean_voice(raw: str | None) -> str:
+    voice = (raw or "").strip()
+    if not voice or len(voice) > VOICE_MAX_LENGTH:
+        raise HTTPException(status_code=400, detail=VOICE_INVALID)
+    return voice
+
+
 def _clean_author(raw: str | None) -> str | None:
     """Validate and normalise an author, or raise 400.
 
@@ -77,7 +116,33 @@ def _clean_author(raw: str | None) -> str | None:
     return author
 
 
-def _serialize(book: Book, sentence_count: int, sentence_index: int | None) -> dict:
+def _render_status(book: Book, queue_position: int | None = None) -> dict:
+    """Render-state fields shared by the list and detail responses."""
+    stats = render_stats.read(book.id) if book.job_status in ("pending", "processing") else {}
+    sps, total = stats.get("sps_ewma"), stats.get("sentences_total")
+    eta = None
+    if book.job_status == "processing" and sps and total:
+        eta = max(0, round((1.0 - (book.progress or 0.0)) * total / sps))
+    needs = book.ready_generation is None or (
+        book.target_fingerprint is not None
+        and book.target_fingerprint != book.ready_fingerprint)
+    return {"ready_generation": book.ready_generation, "job_status": book.job_status,
+            "progress": book.progress, "phase": book.phase,
+            "eta_seconds": eta, "queue_position": queue_position,
+            "needs_render": needs, "voice": book.voice}
+
+
+def _queue_positions(session: Session) -> dict[str, int]:
+    """1-based position of each waiting/running job, in claim order."""
+    rows = session.exec(
+        select(Book.id).where(Book.job_status.in_(("pending", "processing")))
+        .order_by(Book.render_priority.desc(), Book.created_at.asc())
+    ).all()
+    return {bid: i + 1 for i, bid in enumerate(rows)}
+
+
+def _serialize(book: Book, sentence_count: int, sentence_index: int | None,
+               queue_position: int | None = None) -> dict:
     """One library row, including the two fields progress needs.
 
     `sentence_count` and `sentence_index` are the only honest denominator and
@@ -96,7 +161,8 @@ def _serialize(book: Book, sentence_count: int, sentence_index: int | None) -> d
             "created_at": book.created_at, "last_opened": book.last_opened,
             "folder_id": book.folder_id,
             "sentence_count": sentence_count,
-            "sentence_index": sentence_index}
+            "sentence_index": sentence_index,
+            **_render_status(book, queue_position)}
 
 
 @router.get("")
@@ -111,9 +177,10 @@ def list_books(session: Session = Depends(get_session)):
         select(Sentence.book_id, func.count(Sentence.id)).group_by(Sentence.book_id)
     ).all())
     positions = {p.book_id: p.sentence_index for p in session.exec(select(Progress)).all()}
+    queue = _queue_positions(session)
 
     return [
-        _serialize(b, counts.get(b.id, 0), positions.get(b.id))
+        _serialize(b, counts.get(b.id, 0), positions.get(b.id), queue.get(b.id))
         for b in books
     ]
 
@@ -132,20 +199,24 @@ def update_progress(
     the same transaction as the book, so the count is always known here. The
     stored value is returned so the caller can see what was actually kept.
     """
-    require_book(session, book_id)
+    book = require_book(session, book_id)
     count = session.exec(
         select(func.count(Sentence.id)).where(Sentence.book_id == book_id)
     ).one()
-    sentence_index = max(0, min(body.sentence_index, count - 1))
+    raw_index = translate_index(book_id, body.generation, body.sentence_index,
+                                book.ready_generation)
+    sentence_index = max(0, min(raw_index, count - 1))
     row = session.get(Progress, book_id)
     if row:
         row.sentence_index = sentence_index
         row.updated_at = datetime.now(timezone.utc)
+        row.generation = book.ready_generation
     else:
         session.add(Progress(
             book_id=book_id,
             sentence_index=sentence_index,
             updated_at=datetime.now(timezone.utc),
+            generation=book.ready_generation,
         ))
     session.commit()
     return {"ok": True, "sentence_index": sentence_index}
@@ -177,12 +248,17 @@ def _serialize_one(session: Session, book: Book) -> dict:
         select(func.count(Sentence.id)).where(Sentence.book_id == book.id)
     ).one()
     row = session.get(Progress, book.id)
-    return _serialize(book, count, row.sentence_index if row else None)
+    return _serialize(book, count, row.sentence_index if row else None,
+                      _queue_positions(session).get(book.id))
 
 
 @router.get("/{book_id}")
 def get_book(book_id: str, session: Session = Depends(get_session)):
-    return _serialize_one(session, require_book(session, book_id))
+    book = require_book(session, book_id)
+    # Opening a book moves its render to the front of the queue.
+    render_jobs.bump_priority(book_id)
+    session.refresh(book)
+    return _serialize_one(session, book)
 
 
 @router.patch("/{book_id}")
@@ -212,11 +288,18 @@ def update_book(
     # keeps the value it already had.
     title = _clean_title(body.title) if "title" in provided else book.title
     author = _clean_author(body.author) if "author" in provided else book.author
+    voice = _clean_voice(body.voice) if "voice" in provided else None
 
     book.title = title
     book.author = author
+    if voice is not None:
+        book.voice = voice
     session.add(book)
     session.commit()
+    if voice is not None:
+        # A voice equal to the ready render's cancels any pending job (flip-back).
+        render_triggers.request_for_book(book_id, voice)
+        session.refresh(book)
     return _serialize_one(session, book)
 
 
@@ -224,6 +307,52 @@ def update_book(
 def get_progress(book_id: str, session: Session = Depends(get_session)):
     row = session.get(Progress, book_id)
     return {"sentence_index": row.sentence_index if row else 0}
+
+
+@router.post("/{book_id}/reprocess")
+def reprocess_book(book_id: str, cancel: bool = Query(False),
+                   session: Session = Depends(get_session)):
+    """Re-render the book now (no debounce), or with ``?cancel=true`` cancel the job."""
+    book = require_book(session, book_id)
+    if cancel:
+        render_jobs.cancel(book_id)
+    else:
+        render_triggers.request_for_book(book_id, book.voice, debounce=False)
+    session.refresh(book)
+    return _serialize_one(session, book)
+
+
+@router.get("/{book_id}/render")
+def get_render_manifest(book_id: str, session: Session = Depends(get_session)):
+    """The ready generation's manifest.json."""
+    book = require_book(session, book_id)
+    if book.ready_generation is None:
+        raise HTTPException(status_code=409, detail="Book has no ready render")
+    path = Path(storage.RENDERS_DIR) / book_id / str(book.ready_generation) / "manifest.json"
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        raise HTTPException(status_code=404, detail="Manifest missing")
+
+
+@router.get("/{book_id}/processing")
+def get_processing(book_id: str, session: Session = Depends(get_session)):
+    """Diagnostics for a render job (see services/render_stats.py for the storage)."""
+    book = require_book(session, book_id)
+    stats = render_stats.read(book_id)
+    total = stats.get("sentences_total")
+    if total is None:
+        total = session.exec(
+            select(func.count(Sentence.id)).where(Sentence.book_id == book_id)).one()
+    return {
+        "job_status": book.job_status, "phase": book.phase, "progress": book.progress,
+        "phase_timings": stats.get("phase_timings", {}),
+        "last_error": stats.get("last_error") or book.error_message,
+        "error_message": book.error_message,
+        "sentences_done": stats.get("sentences_done", 0),
+        "sentences_total": total,
+        "sentences_per_second": stats.get("sps_ewma"),
+    }
 
 
 def _remove_renders(book_id: str) -> None:

@@ -16,7 +16,11 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
-from services import engine_manager, kokoro_runtime
+import logging
+
+from services import engine_manager, kokoro_runtime, render_triggers
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 
@@ -57,4 +61,10 @@ async def set_engine(body: SwitchRequest) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail=exc.reason)
     except engine_manager.EngineBuildError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+    # Compute device is not a fingerprint input, but the engine *family* is: mark
+    # every book whose fingerprint no longer matches (no-op for cpu<->gpu<->modal).
+    try:
+        await run_in_threadpool(render_triggers.retarget_all)
+    except Exception:
+        logger.exception("[render] retarget after engine switch failed")
     return engine_manager.manager.state()
