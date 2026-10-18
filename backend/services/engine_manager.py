@@ -321,15 +321,37 @@ class EngineManager:
             return self._phase
 
     def state(self, options: list[EngineOption] | None = None) -> dict[str, Any]:
-        """The payload behind ``GET /api/system/engine``."""
+        """The payload behind ``GET /api/system/engine``.
+
+        ``restart_required`` is true when the saved choice differs from the engine
+        that is running: the engine loads at startup only, so the app must restart.
+        """
         with self._lock:
+            selected = load_persisted_engine()
             return {
-                "selected": load_persisted_engine(),
+                "selected": selected,
                 "active": self._active,
                 "switching": self._switching,
                 "phase": self._phase,
+                "restart_required": selected is not None and selected != self._active,
                 "options": [o.as_dict() for o in (options if options is not None else self.options())],
             }
+
+    def request_switch(self, engine_id: str) -> None:
+        """Save a new engine choice. The engine itself loads on the next start.
+
+        Validates the id and the machine's probe, so a bad choice is refused now
+        and not at the next start. Nothing is built and the live engine is untouched.
+        """
+        if engine_id not in ENGINE_IDS:
+            raise UnknownEngine(
+                f"Unknown engine {engine_id!r}; expected one of {', '.join(ENGINE_IDS)}"
+            )
+        option = self.availability(engine_id)
+        if not option.available:
+            raise EngineUnavailable(engine_id, option.reason or "unavailable")
+        save_persisted_engine(engine_id)
+        logger.info("[engine] saved %s; it loads on the next start", engine_id)
 
     def availability(self, engine_id: str) -> EngineOption:
         """Whether one engine can run here, from that engine's own probe.

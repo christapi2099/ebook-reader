@@ -43,28 +43,16 @@ def get_engine() -> dict[str, Any]:
 
 @router.post("/engine")
 async def set_engine(body: SwitchRequest) -> dict[str, Any]:
-    """Switch the live synthesis engine.
+    """Save the engine choice. The app must restart to load it.
 
-    400 for an unknown id, 409 when the probe says this machine cannot run it
-    (with the probe's own reason), 503 when the build itself failed. In every
-    failure case the previously live engine keeps running, so a failed switch
-    never leaves the reader silent.
+    The engine is no longer swapped live: a live swap caused stale playback and
+    render bugs, and a restart loads a known state. 400 for an unknown id, 409 when
+    the probe says this machine cannot run it (with the probe's reason).
     """
     try:
-        # Building an engine takes seconds (a model load, or a container boot),
-        # so it must not run on the event loop: one Switch click would otherwise
-        # freeze playback and every other request for its whole duration.
-        await run_in_threadpool(engine_manager.manager.switch, body.engine)
+        await run_in_threadpool(engine_manager.manager.request_switch, body.engine)
     except engine_manager.UnknownEngine as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except engine_manager.EngineUnavailable as exc:
         raise HTTPException(status_code=409, detail=exc.reason)
-    except engine_manager.EngineBuildError as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
-    # Compute device is not a fingerprint input, but the engine *family* is: mark
-    # every book whose fingerprint no longer matches (no-op for cpu<->gpu<->modal).
-    try:
-        await run_in_threadpool(render_triggers.retarget_all)
-    except Exception:
-        logger.exception("[render] retarget after engine switch failed")
     return engine_manager.manager.state()

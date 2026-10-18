@@ -458,3 +458,63 @@ def test_punctuation_only_sentence_is_skipped_not_fatal(env, real_ffmpeg):
     synth = FakeSynth()
     assert run(synth) == rw.READY
     assert "." not in synth.calls and len(synth.calls) == 5
+
+
+def test_heartbeat_keeps_the_lease_alive_through_encode(env, monkeypatch):
+    """The encode and audit phases do not reach the per-sentence renewal; the heartbeat
+    must renew the lease while they run."""
+    mk_book(env)
+    renewals = []
+    real_renew = rj.renew_lease
+
+    def spy(book_id, worker_id, now, lease_s=120):
+        renewals.append(now)
+        return real_renew(book_id, worker_id, now, lease_s)
+
+    monkeypatch.setattr(rj, "renew_lease", spy)
+    assert rj.claim_next("w1", T0 + timedelta(days=1), debounce_s=0) == "b1"
+    hb = rw._Heartbeat("b1", "w1", lambda: T0 + timedelta(days=1), 120, 0.01)
+    hb.start()
+    time.sleep(0.1)
+    hb.stop()
+    assert len(renewals) >= 2
+
+
+def test_queue_shows_a_long_encode_as_processing_not_queued(env, monkeypatch):
+    """Regression: a render in its encode phase lost its lease after 120 s, and the
+    status showed "queued" while ffmpeg was still running. The lease must stay live for
+    as long as the worker runs, so the status must read processing throughout."""
+    from routers import library as lib
+    mk_book(env)
+    assert rj.claim_next("w1", T0 + timedelta(days=1), debounce_s=0) == "b1"
+    with Session(env) as s:
+        b = s.get(Book, "b1")
+        b.lease_expires = datetime.now(timezone.utc) + timedelta(seconds=120)
+        s.add(b)
+        s.commit()
+        assert lib._render_status(s.get(Book, "b1"))["job_status"] == "processing"
+        # the lease lapses (no heartbeat): the same row must now read as queued
+        b = s.get(Book, "b1")
+        b.lease_expires = datetime.now(timezone.utc) - timedelta(seconds=1)
+        s.add(b)
+        s.commit()
+        assert lib._render_status(s.get(Book, "b1"))["job_status"] == "pending"
+
+
+def test_heartbeat_is_running_during_encode_and_audit(env, monkeypatch):
+    """The render must start the heartbeat before the encode phase and stop it after."""
+    started, stopped = [], []
+
+    class Spy(rw._Heartbeat):
+        def start(self):
+            started.append(True)
+            super().start()
+
+        def stop(self):
+            stopped.append(True)
+            super().stop()
+
+    monkeypatch.setattr(rw, "_Heartbeat", Spy)
+    mk_book(env)
+    assert run(FakeSynth()) == rw.READY
+    assert started == [True] and stopped == [True]

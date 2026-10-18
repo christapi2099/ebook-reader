@@ -479,11 +479,32 @@ class TestEngineEndpoints:
         assert [o["id"] for o in body["options"]] == [CPU, GPU, MODAL, PIPER]
         assert body["active"] is None
 
-    def test_post_switches_and_reports_the_new_engine(self, engine_client):
-        test_client, _ = engine_client
+    def test_post_saves_the_choice_and_asks_for_a_restart(self, engine_client, monkeypatch):
+        test_client, manager = engine_client
+        saved = []
+        monkeypatch.setattr(engine_manager, "save_persisted_engine", saved.append)
+        monkeypatch.setattr(engine_manager, "load_persisted_engine", lambda: saved[-1] if saved else None)
         response = test_client.post("/api/system/engine", json={"engine": CPU})
         assert response.status_code == 200
-        assert response.json()["active"] == CPU
+        body = response.json()
+        assert saved == [CPU]
+        assert body["selected"] == CPU and body["active"] is None
+        assert body["restart_required"] is True
+        assert manager.current() is None  # nothing was built live
+
+    def test_restart_not_required_when_the_running_engine_is_the_saved_one(self, builders, monkeypatch):
+        manager = make_manager(builders)
+        manager.switch(CPU, persist=False)
+        monkeypatch.setattr(engine_manager, "load_persisted_engine", lambda: CPU)
+        assert manager.state()["restart_required"] is False
+
+    def test_request_switch_refuses_an_unavailable_engine_without_saving(self, builders, monkeypatch):
+        saved = []
+        monkeypatch.setattr(engine_manager, "save_persisted_engine", saved.append)
+        manager = make_manager(builders, cuda=False)
+        with pytest.raises(EngineUnavailable):
+            manager.request_switch(GPU)
+        assert saved == []
 
     def test_unknown_engine_is_a_400(self, engine_client):
         test_client, _ = engine_client
@@ -497,22 +518,23 @@ class TestEngineEndpoints:
         assert response.status_code == 409
         assert response.json()["detail"] == "No CUDA GPU detected"
 
-    def test_a_failed_build_is_a_503_with_the_build_error(self, engine_client, monkeypatch):
+    def test_the_endpoint_never_builds_an_engine(self, engine_client, monkeypatch):
+        """A switch only saves the choice; a build failure surfaces at the next start,
+        where startup falls back to a working engine."""
         test_client, manager = engine_client
         monkeypatch.setattr(
             manager, "_local_builder", lambda device: (None, "RuntimeError: cuda out of memory")
         )
-        response = test_client.post("/api/system/engine", json={"engine": CPU})
-        assert response.status_code == 503
-        assert "cuda out of memory" in response.json()["detail"]
+        assert test_client.post("/api/system/engine", json={"engine": CPU}).status_code == 200
+        assert manager.current() is None
 
-    def test_a_failed_switch_keeps_the_previous_engine(self, engine_client, monkeypatch):
+    def test_an_unavailable_engine_is_a_409_and_nothing_is_saved(self, engine_client, monkeypatch):
         test_client, manager = engine_client
-        test_client.post("/api/system/engine", json={"engine": CPU})
-        monkeypatch.setattr(manager, "_local_builder", lambda device: (None, "RuntimeError: nope"))
-        monkeypatch.setattr(manager, "_torch_probe", lambda: torch_info(cuda=True))
-        assert test_client.post("/api/system/engine", json={"engine": GPU}).status_code == 503
-        assert test_client.get("/api/system/engine").json()["active"] == CPU
+        saved = []
+        monkeypatch.setattr(engine_manager, "save_persisted_engine", saved.append)
+        monkeypatch.setattr(manager, "_torch_probe", lambda: torch_info(cuda=False))
+        assert test_client.post("/api/system/engine", json={"engine": GPU}).status_code == 409
+        assert saved == []
 
     def test_capabilities_still_works(self, engine_client):
         test_client, _ = engine_client

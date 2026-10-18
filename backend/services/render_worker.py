@@ -331,6 +331,8 @@ def render_book(book_id: str, worker_id: str, *, synthesizer, aligner=None,
     ``error_message``, ``phase`` = the failing phase) unless ``raise_errors``."""
     now = now or _utcnow
     ctx: dict = {}
+    heartbeat = _Heartbeat(book_id, worker_id, now, lease_s, renew_every_s)
+    heartbeat.start()
     try:
         return _render(book_id, worker_id, synthesizer, aligner, fallback_synthesizer,
                        extractor, box_provider, tiers, now, clock, sleep, disk_usage,
@@ -351,6 +353,37 @@ def render_book(book_id: str, worker_id: str, *, synthesizer, aligner=None,
         _stats(book_id, last_error=traceback.format_exc())
         _set_error(book_id, worker_id, phase, traceback.format_exc())
         return ERROR
+    finally:
+        heartbeat.stop()
+
+
+class _Heartbeat:
+    """Renews the lease on a timer for the whole render, including the encode and
+    audit phases that do not reach the per-sentence renewal. A lease that lapses
+    shows the book as queued and lets another worker claim it."""
+
+    def __init__(self, book_id, worker_id, now, lease_s, every_s):
+        self._args = (book_id, worker_id, now, lease_s)
+        self._every = every_s
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name=f"lease-{book_id[:8]}",
+                                        daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=5)
+
+    def _run(self) -> None:
+        book_id, worker_id, now, lease_s = self._args
+        while not self._stop.wait(self._every):
+            try:
+                if not rj.renew_lease(book_id, worker_id, now(), lease_s):
+                    return  # lease lost: the main loop sees it at its next checkpoint
+            except Exception:  # noqa: BLE001
+                logger.debug("[render] heartbeat renew failed", exc_info=True)
 
 
 def _render(book_id, worker_id, synthesizer, aligner, fallback, extractor, box_provider,

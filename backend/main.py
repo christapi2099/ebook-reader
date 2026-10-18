@@ -72,8 +72,9 @@ async def lifespan(app: FastAPI):
     engine = create_engine_and_tables()
     storage.UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     # Process-first: GC, reconcile missing artifacts, requeue stale fingerprints.
-    render_triggers.startup_sweep()
     _apply_kokoro(_init_kokoro())
+    # After the engine is live: the sweep compares books with the running engine family.
+    render_triggers.startup_sweep()
     # Background render worker (no-op when PROCESSOR_ENABLED is 0/false).
     render_worker.start_worker()
     # Audio cache eviction lives here, not in the write path: one sweep at
