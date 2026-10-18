@@ -5,6 +5,7 @@ import numpy as np
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import Response
 
+import storage
 from services.render_throttle import run_preview
 from services.tts_engine import SAMPLE_RATE
 
@@ -98,10 +99,48 @@ def _scan_custom_voices():
     return custom
 
 
+PIPER_QUALITIES = ("x_low", "low", "medium", "high")
+
+
+def piper_voice_info(stem: str) -> dict:
+    """A catalog entry for a Piper model named ``<lang>-<name>-<quality>``.
+
+    Piper names its files this way (``en_US-joe-medium``), so the metadata comes
+    from the file name and no model is loaded just to list it.
+    """
+    parts = stem.split("-")
+    quality = parts[-1] if len(parts) >= 3 and parts[-1] in PIPER_QUALITIES else None
+    name_parts = parts[1:-1] if quality else parts[1:]
+    lang = parts[0].replace("_", "-")
+    name = " ".join(name_parts).replace("_", " ").title() if name_parts else stem
+    return {
+        "id": f"piper:{stem}",
+        "name": name,
+        "lang": lang,
+        "gender": "unknown",
+        "quality": quality or "unknown",
+        "built_in": True,
+    }
+
+
+def _scan_piper_voices():
+    """Piper voices, listed only while Piper is the live engine.
+
+    Voice selection is stored apart from the engine, so a Piper id offered while
+    Kokoro is live would reach Kokoro and fail. The list follows the engine.
+    """
+    from services import engine_manager
+
+    if engine_manager.manager.active() != engine_manager.PIPER:
+        return []
+    return [piper_voice_info(stem) for stem in
+            sorted(p.stem for p in storage.PIPER_VOICES_DIR.glob("*.onnx"))]
+
+
 @router.get("")
 def list_voices():
     custom = _scan_custom_voices()
-    return ENGLISH_VOICE_CATALOG + custom
+    return ENGLISH_VOICE_CATALOG + _scan_piper_voices() + custom
 
 
 @router.post("/upload")

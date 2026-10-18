@@ -1,7 +1,6 @@
 import logging
 import os
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI
@@ -16,6 +15,7 @@ from env_file import load_env_file
 load_env_file()
 
 from db.database import create_engine_and_tables
+import storage
 from routers import documents, library
 from routers import tts as tts_router
 from routers import voices as voices_router
@@ -70,7 +70,7 @@ engine_manager.register_applier(_apply_kokoro)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     engine = create_engine_and_tables()
-    Path("uploads").mkdir(exist_ok=True)
+    storage.UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     # Process-first: GC, reconcile missing artifacts, requeue stale fingerprints.
     render_triggers.startup_sweep()
     _apply_kokoro(_init_kokoro())
@@ -114,7 +114,8 @@ app.include_router(folders_router.router)
 app.include_router(system_router.router)
 app.include_router(renders_router.router)
 
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+# check_dir=False: lifespan creates the directory, so importing main never depends on it.
+app.mount("/uploads", StaticFiles(directory=storage.UPLOADS_DIR, check_dir=False), name="uploads")
 
 
 @app.get("/health")

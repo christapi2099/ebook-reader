@@ -139,3 +139,35 @@ class TestSentenceBbox:
         block_bbox = (0.0, 0.0, 200.0, 100.0)
         result = sentence_bbox(sent_words, block_bbox)
         assert result == (90.0, 25.0, 140.0, 50.0)
+
+
+class TestJoinLineHyphens:
+    """Pure text-join rules; no PDF needed."""
+
+    @staticmethod
+    def W(x0, y0, text):
+        return (x0, y0, x0 + 40, y0 + 10, text)
+
+    def test_soft_hyphen_across_lines_joins_into_one_word(self):
+        from services.pdf_engine import join_line_hyphens
+        words = [self.W(0, 0, "the"), self.W(50, 0, "measure-"), self.W(0, 12, "ments"),
+                 self.W(45, 12, "matter.")]
+        text, spans = join_line_hyphens(words)
+        assert text == "the measurements matter."
+        assert spans[1] == spans[2] == (4, 16)  # both fragments point at the joined word
+        assert spans[0] == (0, 3) and spans[3] == (17, 24)
+
+    def test_hyphen_mid_line_is_kept(self):
+        from services.pdf_engine import join_line_hyphens
+        text, _ = join_line_hyphens([self.W(0, 0, "well-"), self.W(50, 0, "known")])
+        assert text == "well- known"  # same line: not a line-break hyphen
+
+    def test_uppercase_continuation_is_not_joined(self):
+        from services.pdf_engine import join_line_hyphens
+        text, _ = join_line_hyphens([self.W(0, 0, "end-"), self.W(0, 12, "Part")])
+        assert text == "end- Part"
+
+    def test_plain_words_unchanged(self):
+        from services.pdf_engine import join_line_hyphens
+        text, spans = join_line_hyphens([self.W(0, 0, "a"), self.W(50, 0, "b")])
+        assert text == "a b" and spans == [(0, 1), (2, 3)]

@@ -14,6 +14,7 @@ from services.engine_manager import (
     CPU,
     GPU,
     MODAL,
+    PIPER,
     EngineBuildError,
     EngineManager,
     EngineUnavailable,
@@ -34,6 +35,7 @@ class Builders:
 
     local_calls: list[str] = field(default_factory=list)
     remote_calls: list[int] = field(default_factory=list)
+    piper_calls: list[int] = field(default_factory=list)
     fail: set[str] = field(default_factory=set)
 
     def build_local(self, device: str):
@@ -41,6 +43,12 @@ class Builders:
         if device in self.fail or "local" in self.fail:
             return None, f"RuntimeError: could not load on {device}"
         return FakeEngine(device), None
+
+    def build_piper(self):
+        self.piper_calls.append(1)
+        if "piper" in self.fail:
+            return None, "RuntimeError: model failed to load"
+        return FakeEngine("piper"), None
 
     def build_remote(self, require_reachable: bool, probe_timeout_s=None):
         self.remote_calls.append(1 if require_reachable else 0)
@@ -73,7 +81,8 @@ def remote_info(*, reachable: bool, configured: bool = True, error: str | None =
     }
 
 
-def make_manager(builders, *, cuda: bool = True, remote: dict | None = None) -> EngineManager:
+def make_manager(builders, *, cuda: bool = True, remote: dict | None = None,
+                 piper: tuple[bool, str | None] = (False, "no Piper voice models")) -> EngineManager:
     """A manager whose builders *and* both probes are fakes.
 
     Defaults to a *reachable* Modal, because "can this machine switch to Modal?"
@@ -85,6 +94,8 @@ def make_manager(builders, *, cuda: bool = True, remote: dict | None = None) -> 
         remote_builder=builders.build_remote,
         torch_probe=lambda: torch_info(cuda=cuda),
         remote_probe=lambda **kwargs: remote_info(reachable=True) if remote is None else remote,
+        piper_builder=builders.build_piper,
+        piper_probe=lambda: piper,
     )
 
 
@@ -216,7 +227,27 @@ class TestOptions:
         assert state["selected"] == MODAL
         assert state["active"] == CPU
         assert state["switching"] is False
-        assert {o["id"] for o in state["options"]} == {CPU, GPU, MODAL}
+        assert {o["id"] for o in state["options"]} == {CPU, GPU, MODAL, PIPER}
+
+    def test_piper_switch_builds_piper_and_reports_why_when_unavailable(self, builders):
+        manager = make_manager(builders, piper=(True, None))
+        engine = manager.switch(PIPER, persist=False)
+        assert engine.name == "piper" and builders.piper_calls == [1]
+        assert manager.active() == PIPER
+        assert next(o for o in manager.options() if o.id == PIPER).available is True
+
+        unavailable = make_manager(builders, piper=(False, "piper-tts is not installed"))
+        assert next(o for o in unavailable.options() if o.id == PIPER).reason == "piper-tts is not installed"
+        with pytest.raises(EngineUnavailable):
+            unavailable.switch(PIPER, persist=False)
+
+    def test_piper_build_failure_keeps_the_previous_engine(self, builders):
+        manager = make_manager(builders, piper=(True, None))
+        manager.switch(CPU, persist=False)
+        builders.fail.add("piper")
+        with pytest.raises(EngineBuildError):
+            manager.switch(PIPER, persist=False)
+        assert manager.active() == CPU
 
     def test_the_selector_and_the_switch_use_the_same_probe(self, builders):
         """A machine with no GPU must not be offered the GPU card."""
@@ -445,7 +476,7 @@ class TestEngineEndpoints:
     def test_get_engine_lists_the_three_engines(self, engine_client):
         test_client, _ = engine_client
         body = test_client.get("/api/system/engine").json()
-        assert [o["id"] for o in body["options"]] == [CPU, GPU, MODAL]
+        assert [o["id"] for o in body["options"]] == [CPU, GPU, MODAL, PIPER]
         assert body["active"] is None
 
     def test_post_switches_and_reports_the_new_engine(self, engine_client):
@@ -486,3 +517,22 @@ class TestEngineEndpoints:
     def test_capabilities_still_works(self, engine_client):
         test_client, _ = engine_client
         assert test_client.get("/api/system/capabilities").status_code == 200
+
+
+class TestPiperVoices:
+    def test_probe_needs_the_package_and_a_model(self, tmp_path, monkeypatch):
+        from services import piper_engine
+
+        assert piper_engine.probe_voices(tmp_path)[0] is False  # no models yet
+        (tmp_path / "en_US-joe-medium.onnx").write_bytes(b"")
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+        assert piper_engine.probe_voices(tmp_path) == (False, "piper-tts is not installed")
+
+    def test_voice_info_is_read_from_the_model_name(self):
+        from routers.voices import piper_voice_info
+
+        assert piper_voice_info("en_US-hfc_female-medium") == {
+            "id": "piper:en_US-hfc_female-medium", "name": "Hfc Female", "lang": "en-US",
+            "gender": "unknown", "quality": "medium", "built_in": True,
+        }
+        assert piper_voice_info("en_GB-alba")["quality"] == "unknown"

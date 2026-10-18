@@ -17,6 +17,43 @@ def sentence_bbox(sent_words, block_bbox):
     )
 
 
+def _starts_new_line(prev, nxt) -> bool:
+    return nxt[1] > prev[1] + (prev[3] - prev[1]) / 2
+
+
+def join_line_hyphens(words_sorted):
+    """Block text and each word's (start, end) character span.
+
+    A word ending in "-" whose continuation starts a lowercase word on the next line
+    is one word split by the line break ("measure-" / "ments"), so the text joins
+    them. Both fragments keep their own word entry and share the joined token's span.
+    Known limit: a real compound split at the line end ("well-" / "known") joins too,
+    because a PDF cannot say which hyphens are soft.
+    """
+    tokens: List[Tuple[str, List[int]]] = []
+    i = 0
+    while i < len(words_sorted):
+        t = words_sorted[i][4]
+        nxt = words_sorted[i + 1] if i + 1 < len(words_sorted) else None
+        if (nxt is not None and len(t) > 1 and t.endswith("-")
+                and _starts_new_line(words_sorted[i], nxt) and nxt[4][:1].islower()):
+            tokens.append((t[:-1] + nxt[4], [i, i + 1]))
+            i += 2
+        else:
+            tokens.append((t, [i]))
+            i += 1
+    text = ""
+    spans: List[Tuple[int, int]] = [(0, 0)] * len(words_sorted)
+    for n, (tok, idxs) in enumerate(tokens):
+        if n:
+            text += " "
+        start = len(text)
+        text += tok
+        for k in idxs:
+            spans[k] = (start, len(text))
+    return text, spans
+
+
 class PDFEngine(BaseEngine):
     def __init__(self):
         super().__init__()  # Initialize spaCy via BaseEngine
@@ -53,17 +90,9 @@ class PDFEngine(BaseEngine):
                 if not block_list:
                     continue
                 words_sorted = sorted(block_list, key=lambda w: (w[1], w[0]))
-                block_text_parts = [w[4] for w in words_sorted]
-                block_text = " ".join(block_text_parts)
+                block_text, word_char_positions = join_line_hyphens(words_sorted)
                 if not block_text.strip():
                     continue
-
-                # Build precise char offsets for each word in the joined block_text
-                word_char_positions: List[Tuple[int, int]] = []  # (start, end) per word
-                pos = 0
-                for word_text in block_text_parts:
-                    word_char_positions.append((pos, pos + len(word_text)))
-                    pos += len(word_text) + 1  # +1 for space separator
 
                 # Full block bbox — used as fallback for short/unmatched sentences
                 block_x0 = min(w[0] for w in words_sorted)

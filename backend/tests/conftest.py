@@ -81,11 +81,9 @@ KOKORO_HOLDERS = ("routers.tts", "routers.voices", "routers.mp3")
 # --------------------------------------------------------------------------- #
 # 2. Working-directory sandbox
 # --------------------------------------------------------------------------- #
-# ``main`` mounts ``StaticFiles(directory="uploads")`` at *import* time, so an
-# ``uploads`` directory has to exist in the working directory before any test
-# module is imported. Redirecting the working directory (instead of requiring
-# every invocation to ``cd backend``) also means a test that writes through a
-# relative path cannot land in the repository, whatever it does.
+# Redirecting the working directory (instead of requiring every invocation to
+# ``cd backend``) means a test that writes through a relative path cannot land in
+# the repository, whatever it does. Uploads resolve through storage.UPLOADS_DIR.
 
 def _make_working_sandbox() -> Path:
     """Return a writable scratch directory holding empty runtime dirs."""

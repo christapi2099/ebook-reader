@@ -1,7 +1,6 @@
 import hashlib
 import json
 from datetime import datetime, timezone
-from pathlib import Path
 
 from fastapi.concurrency import run_in_threadpool
 import logging
@@ -10,6 +9,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Respon
 from sqlmodel import Session, select
 
 from db.database import get_session
+import storage
 from db.models import Book, Sentence
 from routers.deps import require_book
 from services import render_triggers
@@ -20,7 +20,7 @@ from services.text_cleaner import normalize_text
 from services.text_filter import TextFilter
 
 router = APIRouter(prefix="/documents")
-UPLOAD_DIR = Path("uploads")
+UPLOAD_DIR = storage.UPLOADS_DIR
 logger = logging.getLogger(__name__)
 
 

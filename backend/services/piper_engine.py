@@ -107,6 +107,21 @@ def words_from_alignments(chunks, rate: int) -> list[tuple[float, float]]:
     return words
 
 
+def probe_voices(voices_dir) -> tuple[bool, str | None]:
+    """``(usable, reason)``: needs the ``piper`` package and at least one voice model.
+
+    Checks with ``find_spec`` so probing never imports the ONNX runtime.
+    """
+    from importlib.util import find_spec
+
+    if find_spec("piper") is None:
+        return False, "piper-tts is not installed"
+    voices = Path(voices_dir)
+    if not voices.is_dir() or not any(voices.glob("*.onnx")):
+        return False, f"no Piper voice models in {voices}"
+    return True, None
+
+
 def is_piper(obj: Any) -> bool:
     return isinstance(obj, PiperEngine)
 
