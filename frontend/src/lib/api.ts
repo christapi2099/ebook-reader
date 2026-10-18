@@ -168,7 +168,7 @@ export interface RenderManifest {
   container: string
   timing_quality: TimingQuality
   mixed_backends: boolean
-  /** Keyed by tier name, e.g. "1x", "1.5x". */
+  /** Keyed by speed as a string, e.g. "1.0", "0.75", "1.5" (no "x" suffix). */
   tiers: Record<string, ManifestTier>
 }
 

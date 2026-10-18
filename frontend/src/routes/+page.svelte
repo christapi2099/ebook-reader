@@ -1,37 +1,14 @@
 <script lang="ts">
-  import { onMount } from 'svelte'
   import { goto } from '$app/navigation'
-  import { createTextBook, getSentences, persistTextBook, type Sentence } from '$lib/api'
-  import { audioStore } from '$lib/stores/audio'
-  import { settingsStore } from '$lib/stores/settings'
-  import MediaBar from '$lib/components/MediaBar.svelte'
-  import AudioProgressBar from '$lib/components/AudioProgressBar.svelte'
-  import TextViewer from '$lib/components/TextViewer.svelte'
+  import { createTextBook } from '$lib/api'
   import UploadDialog from '$lib/components/UploadDialog.svelte'
-  import SettingsOverlay from '$lib/components/SettingsOverlay.svelte'
-  import { get } from 'svelte/store'
   import Button from '$lib/ui/Button.svelte'
 
   let textarea = $state('')
   let isSubmitting = $state(false)
   let error = $state<string | null>(null)
 
-  // Reading state
-  let mode = $state<'idle' | 'reading'>('idle')
-  let bookId = $state<string | null>(null)
-  let sentences = $state<Sentence[]>([])
-  let isSaved = $state(false)
   let uploadOpen = $state(false)
-  let settingsOpen = $state(false)
-
-  // Subscribe to audio store for playback state
-  let audio = $state(get(audioStore))
-  let settings = $state(get(settingsStore))
-  onMount(() => {
-    const unsubAudio = audioStore.subscribe(v => audio = v)
-    const unsubSettings = settingsStore.subscribe(v => settings = v)
-    return () => { unsubAudio(); unsubSettings() }
-  })
 
   async function handleSubmit() {
     if (!textarea.trim()) return
@@ -41,69 +18,14 @@
 
     try {
       const result = await createTextBook(textarea.trim())
-      bookId = result.book_id
-      isSaved = false
-
-      // Fetch sentences for display
-      sentences = await getSentences(bookId)
-
-      audioStore.init(bookId!)
-      audioStore.setVoice(settings.voice)
-      audioStore.setCurrentIndex(0)
-
-      mode = 'reading'
+      // The book is created pending; the reader owns the render gate (the
+      // processing screen, then audioStore.load once a generation is ready).
+      await goto(`/reader/${result.book_id}`)
     } catch (e: any) {
       error = e?.message || 'Failed to create text book'
     } finally {
       isSubmitting = false
     }
-  }
-
-  function handleNewText() {
-    audioStore.destroy()
-    mode = 'idle'
-    textarea = ''
-    bookId = null
-    sentences = []
-    isSaved = false
-    error = null
-  }
-
-  async function handleSave() {
-    if (!bookId) return
-    try {
-      await persistTextBook(bookId)
-      isSaved = true
-    } catch (e: any) {
-      error = e?.message || 'Failed to save text'
-    }
-  }
-
-  // Media control handlers
-  function handlePlay() {
-    if (!bookId) return
-    audioStore.play(audio.currentIndex)
-  }
-
-  function handlePause() {
-    audioStore.pause()
-  }
-
-  function handleSeek(index: number) {
-    if (!bookId) return
-    audioStore.seek(index)
-  }
-
-  function handleSpeedChange(speed: number) {
-    audioStore.setSpeed(speed)
-  }
-
-  function handleRewind() {
-    handleSeek(Math.max(0, audio.currentIndex - 5))
-  }
-
-  function handleForward() {
-    handleSeek(Math.min(sentences.length - 1, audio.currentIndex + 5))
   }
 
   function handleUploaded(bookId: string, _title: string) {
@@ -112,8 +34,7 @@
   }
 </script>
 
-<!-- Idle State: Text Input -->
-{#if mode === 'idle'}
+<!-- Text input; the reader takes over once the book is created -->
   <div class="flex flex-col h-full">
     <div class="flex-1 flex flex-col items-center justify-center p-4 md:p-8">
       <div class="w-full max-w-3xl space-y-6">
@@ -166,122 +87,9 @@
     </div>
   </div>
 
-  <!-- Reading State: TextViewer + Controls -->
-{:else}
-  <div class="flex flex-col h-full">
-    <!-- Header -->
-    <div class="border-b border-border bg-surface">
-      <div class="flex items-center justify-between px-3 py-2">
-        <div class="flex items-center gap-2">
-          <button
-            onclick={handleNewText}
-            class="p-2 rounded-md hover:bg-surface-sunken text-fg-muted"
-            aria-label="New text"
-          >
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
-            </svg>
-          </button>
-          <button
-            onclick={() => uploadOpen = true}
-            class="p-2 rounded-md hover:bg-surface-sunken text-fg-muted"
-            aria-label="Upload file"
-          >
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/>
-            </svg>
-          </button>
-        </div>
-        <div class="flex items-center gap-2">
-          {#if !isSaved}
-            <button
-              onclick={handleSave}
-              class="px-3 py-1.5 text-sm text-accent hover:bg-accent-soft rounded-md"
-              aria-label="Save to library"
-            >
-              Save
-            </button>
-          {:else}
-            <span
-              class="px-3 py-1.5 text-sm text-success flex items-center gap-1"
-              role="status"
-              aria-live="polite"
-            >
-              <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
-                <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>
-              </svg>
-              Saved
-            </span>
-          {/if}
-          <button
-            onclick={() => settingsOpen = true}
-            class="p-2 rounded-md hover:bg-surface-sunken text-fg-muted"
-            aria-label="Settings"
-          >
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <circle cx="12" cy="5" r="1" fill="currentColor" />
-              <circle cx="12" cy="12" r="1" fill="currentColor" />
-              <circle cx="12" cy="19" r="1" fill="currentColor" />
-            </svg>
-          </button>
-        </div>
-      </div>
-
-      <!-- Audio progress bar -->
-      <AudioProgressBar
-        sentences={sentences}
-        currentIndex={audio.currentIndex}
-        elapsedSeconds={audio.elapsedSeconds}
-        sentenceDurations={audio.sentenceDurations}
-        isPlaying={audio.isPlaying}
-      />
-    </div>
-
-    <!-- Media controls -->
-    <div class="border-b border-border bg-surface">
-      <div class="flex items-center justify-center gap-2 py-2 px-2">
-        <MediaBar
-          isPlaying={audio.isPlaying}
-          speed={audio.speed}
-          disabled={audio.buffering}
-          onPlay={handlePlay}
-          onPause={handlePause}
-          onRewind={handleRewind}
-          onForward={handleForward}
-          onSpeedChange={handleSpeedChange}
-        />
-      </div>
-    </div>
-
-    <!-- TextViewer -->
-    {#if sentences.length > 0}
-      <TextViewer
-        sentences={sentences}
-        currentIndex={audio.currentIndex}
-        currentWordIndex={audio.currentWordIndex}
-        isPlaying={audio.isPlaying}
-        highlightColor={settings.highlightColor}
-        autoscroll={settings.autoscroll}
-        bionicMode={settings.bionicMode}
-        bionicFixation={settings.bionicFixation}
-        bionicBoldRatio={settings.bionicBoldRatio}
-        onSentenceClick={handleSeek}
-      />
-    {:else}
-      <div class="flex-1 flex items-center justify-center text-fg-subtle">
-        Loading sentences...
-      </div>
-    {/if}
-  </div>
-{/if}
-
 <!-- Upload Dialog -->
 <UploadDialog
   open={uploadOpen}
   onClose={() => uploadOpen = false}
   onUploaded={handleUploaded}
 />
-
-{#if settingsOpen}
-  <SettingsOverlay onClose={() => settingsOpen = false} />
-{/if}
