@@ -187,6 +187,16 @@ export async function reprocessBook(bookId: string): Promise<Book> {
   return fetchApi<Book>(`/library/${encodeURIComponent(bookId)}/reprocess`, { method: 'POST' })
 }
 
+/** Move a queued render one place up or down the queue. */
+export async function moveInQueue(bookId: string, direction: 'up' | 'down'): Promise<Book> {
+  return fetchApi<Book>(`/library/${encodeURIComponent(bookId)}/queue?direction=${direction}`, { method: 'POST' })
+}
+
+/** Move a queued render to the front of the queue. */
+export async function moveToFrontOfQueue(bookId: string): Promise<Book> {
+  return fetchApi<Book>(`/library/${encodeURIComponent(bookId)}/priority`, { method: 'POST' })
+}
+
 /** Cancel the book's running or queued render. */
 export async function cancelRender(bookId: string): Promise<Book> {
   return fetchApi<Book>(`/library/${encodeURIComponent(bookId)}/reprocess?cancel=true`, { method: 'POST' })

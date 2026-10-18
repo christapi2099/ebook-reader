@@ -18,6 +18,7 @@
     totalSentences = null,
     onClick,
     onRetry,
+    onQueueMove,
     onDelete,
     onMove,
     onEditMetadata,
@@ -32,6 +33,8 @@
     onClick: (id: string) => void
     /** Re-queues a failed render. */
     onRetry?: (id: string) => void
+    /** Moves a queued render: "up", "down" or "front". */
+    onQueueMove?: (book: Book, direction: 'up' | 'down' | 'front') => void
     onDelete?: (id: string) => void
     /** Opens the move dialog — the keyboard-reachable way to file a book. */
     onMove?: (book: Book) => void
@@ -166,6 +169,29 @@
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L6.832 19.82a4.5 4.5 0 01-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 011.13-1.897L16.863 4.487zm0 0L19.5 7.125" />
                 </svg>
                 Edit book details
+              </button>
+            {/if}
+            {#if onQueueMove && book.job_status === 'pending'}
+              <button
+                class="w-full min-h-11 px-3 text-left text-sm text-fg hover:bg-surface-sunken"
+                onclick={() => { onQueueMove(book, 'front'); showMenu = false }}
+                data-queue-action="front"
+              >
+                Move to front of queue
+              </button>
+              <button
+                class="w-full min-h-11 px-3 text-left text-sm text-fg hover:bg-surface-sunken"
+                onclick={() => { onQueueMove(book, 'up'); showMenu = false }}
+                data-queue-action="up"
+              >
+                Move up in queue
+              </button>
+              <button
+                class="w-full min-h-11 px-3 text-left text-sm text-fg hover:bg-surface-sunken"
+                onclick={() => { onQueueMove(book, 'down'); showMenu = false }}
+                data-queue-action="down"
+              >
+                Move down in queue
               </button>
             {/if}
             {#if onMove}

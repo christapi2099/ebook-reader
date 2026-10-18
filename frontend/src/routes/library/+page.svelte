@@ -7,6 +7,8 @@
     deleteFolder,
     getFolders,
     getLibrary,
+    moveInQueue,
+    moveToFrontOfQueue,
     reprocessBook,
     renameFolder,
     setBookFolder,
@@ -97,6 +99,16 @@
     if (pollTimer) clearInterval(pollTimer)
     pollTimer = null
   })
+
+  async function handleQueueMove(book: Book, direction: 'up' | 'down' | 'front') {
+    try {
+      if (direction === 'front') await moveToFrontOfQueue(book.id)
+      else await moveInQueue(book.id, direction)
+      await pollBooks()
+    } catch (e) {
+      toastStore.push({ tone: 'danger', title: 'Could not move in queue', message: toDetailMessage(e) })
+    }
+  }
 
   async function handleRetryRender(bookId: string) {
     try {
@@ -532,6 +544,7 @@
       {progress}
       onRetry={fetchLibrary}
       onRetryRender={handleRetryRender}
+      onQueueMove={handleQueueMove}
       onClick={(id) => goto(`/reader/${id}`)}
       onDelete={handleDelete}
       onMove={(book) => (movingBook = book)}

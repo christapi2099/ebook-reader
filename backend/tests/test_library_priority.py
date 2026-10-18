@@ -55,3 +55,45 @@ def test_cover_is_the_first_page_of_a_pdf(client, tmp_path, monkeypatch):
 def test_no_cover_for_text_books(client):
     _book("txt", "ready")
     assert client.get("/library/txt/cover").status_code == 404
+
+
+def _queued(bid, created_offset):
+    with Session(_db.engine) as s:
+        s.add(Book(id=bid, title=bid, file_path="x", file_type="text", page_count=1,
+                   created_at=T0.replace(day=1 + created_offset), job_status="pending",
+                   render_priority=0))
+        s.commit()
+
+
+def _queue_order():
+    from sqlmodel import select
+    from services import render_jobs as rj
+    with Session(_db.engine) as s:
+        rows = s.exec(select(Book).where(Book.job_status == "pending")).all()
+    return [b.id for b in sorted(rows, key=lambda b: (-b.render_priority, b.created_at))]
+
+
+def test_move_up_and_down_swap_with_the_neighbour(client):
+    for i, bid in enumerate(["a", "b", "c"]):
+        _queued(bid, i)
+    assert _queue_order() == ["a", "b", "c"]
+    assert client.post("/library/c/queue?direction=up").status_code == 200
+    assert _queue_order() == ["a", "c", "b"]
+    assert client.post("/library/a/queue?direction=down").status_code == 200
+    assert _queue_order() == ["c", "a", "b"]
+
+
+def test_move_at_the_edges_is_a_no_op(client):
+    for i, bid in enumerate(["a", "b"]):
+        _queued(bid, i)
+    client.post("/library/a/queue?direction=up")
+    assert _queue_order() == ["a", "b"]
+    client.post("/library/b/queue?direction=down")
+    assert _queue_order() == ["a", "b"]
+
+
+def test_queue_move_refuses_bad_direction_and_non_queued_books(client):
+    _queued("q", 0)
+    _book("done", "ready")
+    assert client.post("/library/q/queue?direction=sideways").status_code == 400
+    assert client.post("/library/done/queue?direction=up").status_code == 409

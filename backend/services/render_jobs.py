@@ -107,6 +107,34 @@ def bump_priority(book_id: str) -> bool:
     return res.rowcount == 1
 
 
+def move_in_queue(book_id: str, direction: str) -> bool:
+    """Move a queued book one place up or down the queue.
+
+    The queue is the pending books in order (priority, then creation time). The
+    whole queue is renumbered from that order, so a move works even when several
+    books share a priority. A book at the top moving up, or at the bottom moving
+    down, changes nothing. Only queued books take part.
+    """
+    if direction not in ("up", "down"):
+        raise ValueError(f"direction must be 'up' or 'down', not {direction!r}")
+    with _db.engine.begin() as conn:
+        ids = [r.id for r in conn.execute(select(_B.id).where(
+            _B.job_status == JOB_PENDING).order_by(
+            _B.render_priority.desc(), _B.created_at.asc())).all()]
+        if book_id not in ids:
+            return False
+        i = ids.index(book_id)
+        j = i - 1 if direction == "up" else i + 1
+        if j < 0 or j >= len(ids):
+            return False
+        ids[i], ids[j] = ids[j], ids[i]
+        top = len(ids)
+        for pos, bid in enumerate(ids):
+            conn.execute(update(Book.__table__).where(_B.id == bid)
+                         .values(render_priority=top - pos))
+    return True
+
+
 def request_render(book_id: str, target_fingerprint: str,
                    now: Optional[datetime] = None, debounce: bool = True) -> str:
     """Trigger: want ``target_fingerprint`` rendered. The book stays readable on

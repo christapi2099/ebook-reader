@@ -339,6 +339,20 @@ def move_to_front(book_id: str, session: Session = Depends(get_session)):
     return _serialize_one(session, book)
 
 
+@router.post("/{book_id}/queue")
+def move_in_queue(book_id: str, direction: str = Query(...),
+                  session: Session = Depends(get_session)):
+    """Move a queued render one place up or down the queue."""
+    book = require_book(session, book_id)
+    if direction not in ("up", "down"):
+        raise HTTPException(status_code=400, detail="direction must be 'up' or 'down'")
+    if book.job_status != "pending":
+        raise HTTPException(status_code=409, detail="Only queued books can be moved")
+    render_jobs.move_in_queue(book_id, direction)
+    session.refresh(book)
+    return _serialize_one(session, book)
+
+
 @router.post("/{book_id}/reprocess")
 def reprocess_book(book_id: str, cancel: bool = Query(False),
                    session: Session = Depends(get_session)):
