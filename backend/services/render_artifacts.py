@@ -82,11 +82,12 @@ def gap_after(chunk: dict, nxt: dict | None) -> int:
     return GAP_DEFAULT_MS
 
 
-def build_base(chunks: list[dict], work_dir, *, effective_speed: float = 1.0) -> dict:
+def build_base(chunks: list[dict], work_dir, *, effective_speed: float = 1.0,
+               on_step=None) -> dict:
     """Concatenate chunks losslessly into work_dir/base.flac.
 
     Returns {path, duration_ms, segments:[{index,start_ms,end_ms,gap_ms,words}]}
-    on the 1x timeline.
+    on the 1x timeline. ``on_step(fraction)`` reports 0..1 as chunks are written.
     """
     if effective_speed != 1.0:
         raise RenderError(f"base effective_speed {effective_speed} != 1.0",
@@ -97,6 +98,8 @@ def build_base(chunks: list[dict], work_dir, *, effective_speed: float = 1.0) ->
     (work / "chunks").mkdir(parents=True, exist_ok=True)
     pieces, segments, pos = [], [], 0  # pos in samples
     for i, c in enumerate(chunks):
+        if on_step:
+            on_step(i / len(chunks))
         a = np.asarray(c["audio"], dtype=np.float32)
         sf.write(work / "chunks" / f"{c['index']}.flac", a, SR, format="FLAC", subtype="PCM_16")
         gap = gap_after(c, chunks[i + 1] if i + 1 < len(chunks) else None)
@@ -114,6 +117,8 @@ def build_base(chunks: list[dict], work_dir, *, effective_speed: float = 1.0) ->
             pos += n
     path = work / "base.flac"
     sf.write(path, np.concatenate(pieces), SR, format="FLAC", subtype="PCM_16")
+    if on_step:
+        on_step(1.0)
     return {"path": path, "duration_ms": segments[-1]["end_ms"], "segments": segments}
 
 
@@ -125,7 +130,7 @@ def _encode(src: Path, dst: Path, factor: float) -> None:
     _run(cmd)
 
 
-def build_tiers(base_flac, segments: list[dict], tiers=None, work_dir=None) -> dict:
+def build_tiers(base_flac, segments: list[dict], tiers=None, work_dir=None, on_step=None) -> dict:
     """Encode audio_1.0.opus + one file per tier from base.flac.
 
     Returns {key: {requested_factor, actual_factor, max_drift_ms, duration_ms,
@@ -136,9 +141,12 @@ def build_tiers(base_flac, segments: list[dict], tiers=None, work_dir=None) -> d
     tiers = book_processor.TIERS if tiers is None else tiers
     base_ms = ffprobe_duration_ms(base)
     out = {}
-    for t in (1.0, *[float(x) for x in tiers if float(x) != 1.0]):
+    factors = (1.0, *[float(x) for x in tiers if float(x) != 1.0])
+    for done, t in enumerate(factors):
         key = tier_key(t)
         path = work / f"audio_{key}.opus"
+        if on_step:
+            on_step(done / len(factors))
         _encode(base, path, t)
         if t == 1.0:
             actual = 1.0
@@ -152,6 +160,8 @@ def build_tiers(base_flac, segments: list[dict], tiers=None, work_dir=None) -> d
                                      "end_ms": w["end_ms"] / actual} for w in s["words"]]}
                          for s in segments],
         }
+    if on_step:
+        on_step(1.0)
     return out
 
 
@@ -187,7 +197,8 @@ def _detect(y: np.ndarray, expected_ms: np.ndarray, half_ms: float = 150.0) -> n
     return np.array(found)
 
 
-def drift_audit(base_flac, segments: list[dict], tier_results: dict, work_dir=None) -> dict:
+def drift_audit(base_flac, segments: list[dict], tier_results: dict, work_dir=None,
+                on_step=None) -> dict:
     """Marker-tone drift audit; fills max_drift_ms per tier, raises RenderAuditError."""
     base = Path(base_flac)
     work = Path(work_dir) if work_dir else base.parent
@@ -206,7 +217,9 @@ def drift_audit(base_flac, segments: list[dict], tier_results: dict, work_dir=No
     exp = centers[pick]
     report = {}
     try:
-        for key, info in tier_results.items():
+        for done, (key, info) in enumerate(tier_results.items()):
+            if on_step:
+                on_step(done / len(tier_results))
             opus = work / f"audit_{key}.opus"
             wav = work / f"audit_{key}.wav"
             _encode(mbase, opus, info["requested_factor"])
@@ -224,6 +237,8 @@ def drift_audit(base_flac, segments: list[dict], tier_results: dict, work_dir=No
             report[key] = info["max_drift_ms"]
             opus.unlink(missing_ok=True)
             wav.unlink(missing_ok=True)
+        if on_step:
+            on_step(1.0)
     finally:
         mbase.unlink(missing_ok=True)
     return report

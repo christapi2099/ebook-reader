@@ -505,11 +505,15 @@ def _render(book_id, worker_id, synthesizer, aligner, fallback, extractor, box_p
         phase_stat("encode")
         progress(0.92, "encode")
         rj.renew_lease(book_id, worker_id, now(), lease_s)
-        base = ra.build_base(chunks, tmp, effective_speed=1.0)
-        tier_results = ra.build_tiers(base["path"], base["segments"], tiers, tmp)
+        # Encode and audit report inside their phases so the bar moves while they run.
+        base = ra.build_base(chunks, tmp, effective_speed=1.0,
+                             on_step=lambda f: progress(0.90 + 0.02 * f, "encode"))
+        tier_results = ra.build_tiers(base["path"], base["segments"], tiers, tmp,
+                                      on_step=lambda f: progress(0.92 + 0.03 * f, "encode"))
         phase_stat("drift_audit")
-        progress(0.96, "drift_audit")
-        ra.drift_audit(base["path"], base["segments"], tier_results, tmp)
+        progress(0.95, "drift_audit")
+        ra.drift_audit(base["path"], base["segments"], tier_results, tmp,
+                       on_step=lambda f: progress(0.95 + 0.03 * f, "drift_audit"))
         manifest = ra.write_manifest(
             tmp, base_segments=base["segments"], tier_results=tier_results,
             duration_ms=base["duration_ms"], voice=voice,

@@ -93,3 +93,19 @@ def test_timing_quality():
     assert ra._timing_quality(segs) == "aligned"
     segs[0]["words"].append({"timing_source": "estimated"})
     assert ra._timing_quality(segs) == "estimated"
+
+
+def test_encode_stages_report_increasing_progress(tmp_path):
+    """The UI bar moves during encode and audit, so each stage reports 0..1 in order."""
+    from services import render_artifacts as ra
+    steps = {"base": [], "tiers": [], "audit": []}
+    chunks = [{"index": i, "audio": np.zeros(2400, np.float32), "text": "t", "chapter": 0,
+               "words": [{"word": "a", "start_ms": 0.0, "end_ms": 100.0, "box": None,
+                          "timing_source": "estimated"}]} for i in range(3)]
+    base = ra.build_base(chunks, tmp_path, on_step=steps["base"].append)
+    tiers = ra.build_tiers(base["path"], base["segments"], (1.5,), tmp_path,
+                           on_step=steps["tiers"].append)
+    ra.drift_audit(base["path"], base["segments"], tiers, tmp_path, on_step=steps["audit"].append)
+    for name, values in steps.items():
+        assert values and values[-1] == 1.0, name
+        assert values == sorted(values), name
