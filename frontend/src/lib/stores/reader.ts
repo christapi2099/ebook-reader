@@ -18,12 +18,42 @@ export interface ReaderState {
   speed: number
 }
 
+// The playback speed is a per-viewer choice, so it lives in localStorage rather
+// than on the server. Every access is wrapped: storage can be blocked or full,
+// and a failure must only mean "start at 1x", never a broken reader.
+const SPEED_KEY = 'kokoro-playback-speed'
+const MIN_SPEED = 0.5
+const MAX_SPEED = 3.0
+
+function clampSpeed(speed: number): number {
+  return Math.max(MIN_SPEED, Math.min(speed, MAX_SPEED))
+}
+
+function readStoredSpeed(): number {
+  try {
+    const raw = localStorage.getItem(SPEED_KEY)
+    if (raw === null) return 1.0
+    const parsed = Number(raw)
+    return Number.isFinite(parsed) ? clampSpeed(parsed) : 1.0
+  } catch {
+    return 1.0
+  }
+}
+
+function writeStoredSpeed(speed: number): void {
+  try {
+    localStorage.setItem(SPEED_KEY, String(speed))
+  } catch {
+    // Storage unavailable: the speed still applies for this session.
+  }
+}
+
 const readerStore: Writable<ReaderState> = writable({
   bookId: null,
   sentences: [],
   currentIndex: 0,
   isPlaying: false,
-  speed: 1.0,
+  speed: readStoredSpeed(),
 })
 
 // ---------------------------------------------------------------------------
@@ -160,7 +190,7 @@ export const loadBook = async (bookId: string, generation?: number): Promise<voi
 export const resetReader = (): void => {
   clearSaveTimer()
   lastSavedAt = 0
-  readerStore.set({ bookId: null, sentences: [], currentIndex: 0, isPlaying: false, speed: 1.0 })
+  readerStore.set({ bookId: null, sentences: [], currentIndex: 0, isPlaying: false, speed: readStoredSpeed() })
 }
 
 export const seek = async (index: number): Promise<void> => {
@@ -196,7 +226,9 @@ export const mirrorPlaybackIndex = (index: number, isPlaying: boolean): void => 
 }
 
 export const setSpeed = (speed: number): void => {
-  readerStore.update(s => ({ ...s, speed: Math.max(0.5, Math.min(speed, 3.0)) }))
+  const clamped = clampSpeed(speed)
+  writeStoredSpeed(clamped)
+  readerStore.update(s => ({ ...s, speed: clamped }))
 }
 
 export const setPlaying = (val: boolean): void => {
