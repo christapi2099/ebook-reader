@@ -141,3 +141,19 @@ def test_sentence_count_mismatch(render):
         s.add(Sentence(book_id="b1", index=99, text="x", page=0, x0=0, y0=0, x1=1, y1=1))
         s.commit()
     _fails("unfiltered sentences")
+
+
+def test_cli_binds_engine_when_run_standalone(render, monkeypatch, tmp_path, capsys):
+    """Run as a script nothing has created the engine; main() must bind a read-only one."""
+    db_file = tmp_path / "t.db"
+    saved = _db.engine
+    saved.dispose()
+    monkeypatch.setattr(_db, "engine", None)
+    monkeypatch.setattr(_db, "_DEFAULT_DB", str(db_file))
+    assert vr.main(["b1"]) == 0
+    assert "OK" in capsys.readouterr().out
+    monkeypatch.setattr(_db, "engine", None)
+    monkeypatch.setattr(_db, "_DEFAULT_DB", str(tmp_path / "missing.db"))
+    assert vr.main(["b1"]) == 2
+    assert not (tmp_path / "missing.db").exists()
+    monkeypatch.setattr(_db, "engine", saved)

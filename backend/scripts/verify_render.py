@@ -201,12 +201,27 @@ def verify_render(book_id: str, generation: int | None = None) -> VerifyReport:
     return rep
 
 
+def _bind_engine() -> bool:
+    """Standalone runs have no app lifespan, so ``_db.engine`` is None. Bind a
+    plain engine to the existing DB (DB_PATH honoured); never create or migrate."""
+    if _db.engine is not None:
+        return True
+    if not Path(_db._DEFAULT_DB).is_file():
+        return False
+    from sqlmodel import create_engine
+    _db.engine = create_engine(f"sqlite:///{_db._DEFAULT_DB}")
+    return True
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("book_id")
     ap.add_argument("--generation", type=int, default=None)
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
+    if not _bind_engine():
+        print(f"database not found: {_db._DEFAULT_DB}", file=sys.stderr)
+        return 2
     rep = verify_render(args.book_id, args.generation)
     if args.json:
         print(json.dumps(rep.to_dict(), indent=2))
