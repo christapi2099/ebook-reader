@@ -25,6 +25,8 @@ from routers import folders as folders_router
 from routers import user as user_router
 from routers import system as system_router
 from routers import renders as renders_router
+from services.tts_engine import TTSEngine
+from services import tts_engine
 from services import audio_cache, engine_manager, kokoro_runtime, render_triggers, render_worker
 
 logger = logging.getLogger(__name__)
@@ -57,6 +59,9 @@ def _apply_kokoro(kokoro: Any) -> None:
     tts_router.set_kokoro(kokoro)
     voices_router.set_kokoro(kokoro)
     mp3_router.set_kokoro(kokoro)
+    # The render worker synthesizes with whatever engine is live, so it must
+    # follow every switch (and be cleared when there is none).
+    tts_engine.set_render_engine(TTSEngine(kokoro) if kokoro is not None else None)
 
 
 engine_manager.register_applier(_apply_kokoro)

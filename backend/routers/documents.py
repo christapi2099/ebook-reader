@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi.concurrency import run_in_threadpool
 import logging
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
 from sqlmodel import Session, select
 
 from db.database import get_session
@@ -24,13 +24,13 @@ UPLOAD_DIR = Path("uploads")
 logger = logging.getLogger(__name__)
 
 
-def _trigger_render(book_id: str) -> None:
+def _trigger_render(book_id: str, voice: str | None = None) -> None:
     """New book: target today's fingerprint and go pending immediately (no debounce).
 
     Failure to fingerprint must not lose the import; the startup sweep retries.
     """
     try:
-        render_triggers.request_for_book(book_id, None, debounce=False)
+        render_triggers.request_for_book(book_id, voice, debounce=False)
     except Exception:
         logger.exception("[render] could not request render for %s", book_id)
 
@@ -56,7 +56,11 @@ def _import_response(book_id: str, sentence_count: int, *, already_existed: bool
 async def upload_document(
     file: UploadFile = File(...),
     session: Session = Depends(get_session),
+    voice: str | None = Form(None),
 ):
+    """``voice`` is the user's globally selected voice (the frontend owns that
+    setting); omitted -> the default voice."""
+    voice = voice.strip() or None if isinstance(voice, str) else None  # direct calls pass the Form default object
     contents = await file.read()
     book_id = hashlib.sha256(contents).hexdigest()
 
@@ -113,11 +117,12 @@ async def upload_document(
         file_path=str(file_path),
         file_type=ext,
         page_count=page_count,
+        voice=voice,
         created_at=datetime.now(timezone.utc),
         last_opened=datetime.now(timezone.utc),
     ))
     session.commit()
-    _trigger_render(book_id)
+    _trigger_render(book_id, voice)
 
     return _import_response(book_id, len(sentence_objs), already_existed=False)
 

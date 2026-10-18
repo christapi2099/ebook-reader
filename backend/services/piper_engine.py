@@ -79,6 +79,38 @@ def _prevent_clipping(audio: np.ndarray, ceiling: float = 0.95) -> np.ndarray:
     return audio
 
 
+_PUNCT = set(",.;:!?\u2014\u2013-\"'()\u201c\u201d\u2018\u2019\u2026")
+
+
+def words_from_alignments(chunks, rate: int) -> list[tuple[float, float]]:
+    """Per-word (start_s, end_s) from phoneme durations: runs of phonemes between
+    spaces/punctuation, timed by the cumulative ``num_samples`` (same extraction
+    as scripts/spike_chapter.py)."""
+    t, words, cur_s, cur_e = 0, [], None, None
+    for ch in chunks:
+        for pa in getattr(ch, "phoneme_alignments", None) or []:
+            n = int(pa.num_samples)
+            ph = pa.phoneme
+            if ph in ("^", "$"):
+                pass
+            elif ph == " " or ph in _PUNCT:
+                if cur_s is not None:
+                    words.append((cur_s / rate, cur_e / rate))
+                    cur_s = cur_e = None
+            else:
+                if cur_s is None:
+                    cur_s = t
+                cur_e = t + n
+            t += n
+    if cur_s is not None:
+        words.append((cur_s / rate, cur_e / rate))
+    return words
+
+
+def is_piper(obj: Any) -> bool:
+    return isinstance(obj, PiperEngine)
+
+
 def _strip_prefix(voice: str) -> str:
     return voice.split(":", 1)[1] if voice.startswith("piper:") else voice
 
@@ -102,6 +134,7 @@ class PiperEngine:
         self._use_cuda = device == "gpu"
         self._loaded: dict[str, Any] = {}
         self._source_rates: dict[str, int] = {}
+        self._loaded_align: dict[str, Any] = {}
 
         if not self._dir.exists() or not any(self._dir.glob("*.onnx")):
             raise FileNotFoundError(
@@ -135,6 +168,44 @@ class PiperEngine:
         self._loaded[name] = voice
         self._source_rates[name] = int(getattr(voice.config, "sample_rate", 22050))
         return voice
+
+    def _load_aligned(self, name: str):
+        """Voice loaded with ``include_alignments=True`` (render path only; the live
+        path keeps its plain voice so playback is unaffected)."""
+        cached = self._loaded_align.get(name)
+        if cached is not None:
+            return cached
+        from piper.voice import PiperVoice
+
+        model_path = self._dir / f"{name}.onnx"
+        if not model_path.exists():
+            raise FileNotFoundError(f"Piper voice model not found: {model_path}")
+        voice = PiperVoice.load(str(model_path), use_cuda=self._use_cuda,
+                                include_alignments=True)
+        self._loaded_align[name] = voice
+        self._source_rates[name] = int(getattr(voice.config, "sample_rate", 22050))
+        return voice
+
+    def synthesize_for_render(self, text: str, voice: str = "") -> tuple[np.ndarray, list]:
+        """1.0x render synthesis: ``(audio at 24 kHz, native word (start_s, end_s))``
+        from ONE ``synthesize(..., include_alignments=True)`` call."""
+        from piper.config import SynthesisConfig
+
+        name = _strip_prefix(voice) if voice else self.default_voice()
+        try:
+            v = self._load_aligned(name)
+        except FileNotFoundError:
+            logger.warning("[piper] unknown voice %r, falling back to default", name)
+            name = self.default_voice()
+            v = self._load_aligned(name)
+        rate = self._source_rates[name]
+        chunks = list(v.synthesize(text, syn_config=SynthesisConfig(length_scale=1.0),
+                                   include_alignments=True))
+        if not chunks:
+            return np.zeros(0, dtype=np.float32), []
+        native = np.concatenate([c.audio_float_array for c in chunks]).astype(np.float32, copy=False)
+        words = words_from_alignments(chunks, rate)
+        return _resample(native, rate, TARGET_SAMPLE_RATE), words
 
     def __call__(self, text: str, voice: str = "", speed: float = 1.0) -> list[PiperResult]:
         from piper.config import SynthesisConfig

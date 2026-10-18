@@ -101,13 +101,25 @@ def engine_synthesizer(engine=None, speed: float = 1.0) -> Callable[[str, str], 
     from services import tts_engine
 
     def _synth(text: str, voice: str) -> SynthResult:
-        audio, eff = asyncio.run(
-            tts_engine.synthesize_sentence_for_render(text, voice, speed, engine=engine))
+        audio, eff, native, tokens = asyncio.run(
+            tts_engine.synthesize_render_result(text, voice, speed, engine=engine))
         if audio is None:
             raise ra.RenderError("synthesis produced no audio", phase="synthesize")
-        return SynthResult(np.asarray(audio, dtype=np.float32), eff)
+        return SynthResult(np.asarray(audio, dtype=np.float32), eff, native, tokens)
 
     return _synth
+
+
+STATS_EVERY = 10
+
+
+def _stats(book_id: str, **kw) -> None:
+    """Short, best-effort write to render_stats (never fails a render)."""
+    try:
+        from services import render_stats
+        render_stats.record(book_id, **kw)
+    except Exception:  # noqa: BLE001
+        logger.debug("[render] stats write failed", exc_info=True)
 
 
 def _row(s: Sentence) -> dict:
@@ -329,6 +341,7 @@ def render_book(book_id: str, worker_id: str, *, synthesizer, aligner=None,
             rj.requeue(book_id, worker_id)  # failed on a stale target: don't park it in error
             return REQUEUED
         phase = getattr(e, "phase", "render")
+        _stats(book_id, last_error=traceback.format_exc())
         _set_error(book_id, worker_id, phase, traceback.format_exc())
         return ERROR
 
@@ -368,9 +381,19 @@ def _render(book_id, worker_id, synthesizer, aligner, fallback, extractor, box_p
             _remove_book_dir(book_id)
             raise _Stop(GONE)
 
+    phase_t = {"name": "extract", "t": clock()}
+
+    def phase_stat(name: str) -> None:
+        """Close the running phase's wall time and open ``name``."""
+        t = clock()
+        _stats(book_id, phase_timings={phase_t["name"]: round(t - phase_t["t"], 3)})
+        phase_t["name"], phase_t["t"] = name, t
+
     progress(0.0, "extract")
     rows = (extractor or default_extractor)(book)
     todo = [r for r in rows if not r.get("filtered")]
+    phase_stat("synthesize")
+    _stats(book_id, sentences_done=0, sentences_total=len(todo), now=time.time())
     if not todo:
         raise ra.RenderError("book has no readable sentences", phase="extract")
 
@@ -432,12 +455,16 @@ def _render(book_id, worker_id, synthesizer, aligner, fallback, extractor, box_p
             chunks.append({"index": idx, "text": r["text"], "chapter": r.get("chapter", 0),
                            "audio": audio, "words": words})
             progress(0.9 * (k + 1) / n, "synthesize")
+            if (k + 1) % STATS_EVERY == 0 or k + 1 == n:
+                _stats(book_id, sentences_done=k + 1, sentences_total=n, now=time.time())
 
         checkpoint_job()
+        phase_stat("encode")
         progress(0.92, "encode")
         rj.renew_lease(book_id, worker_id, now(), lease_s)
         base = ra.build_base(chunks, tmp, effective_speed=1.0)
         tier_results = ra.build_tiers(base["path"], base["segments"], tiers, tmp)
+        phase_stat("drift_audit")
         progress(0.96, "drift_audit")
         ra.drift_audit(base["path"], base["segments"], tier_results, tmp)
         manifest = ra.write_manifest(
@@ -453,12 +480,14 @@ def _render(book_id, worker_id, synthesizer, aligner, fallback, extractor, box_p
         old_rows = db_sentences(book_id)
         remap = {i: v for i, v in enumerate(compute_remap(old_rows, rows))}
         checkpoint_job()
+        phase_stat("publish")
         progress(0.98, "publish")
         _publish(book_id, tmp, rows, remap, target, fail_at)
     finally:
         close = getattr(provider, "close", None)
         if close:
             close()
+    phase_stat("done")
     rj.release(book_id, worker_id)
     return READY
 

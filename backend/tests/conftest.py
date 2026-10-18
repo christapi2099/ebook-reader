@@ -946,3 +946,18 @@ def _no_startup_render_sweep(monkeypatch) -> None:
     captured at their module import."""
     from services import render_triggers
     monkeypatch.setattr(render_triggers, "startup_sweep", lambda: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_background_render_worker(monkeypatch) -> None:
+    """The app lifespan wires the live engine into the render worker and starts it;
+    a test app must not render seeded books in a background thread (real
+    aligner/ffmpeg there aborted the interpreter on teardown). Tests of the worker
+    use the real module, so only the lifespan's reference (``main.render_worker``)
+    is swapped for a stub. The module-level
+    render engine is restored so one test's engine never leaks into the next."""
+    import main
+    from services import tts_engine
+    monkeypatch.setattr(main, "render_worker", SimpleNamespace(
+        start_worker=lambda *a, **k: None, stop_worker=lambda *a, **k: None))
+    monkeypatch.setattr(tts_engine, "_render_engine", tts_engine._render_engine)

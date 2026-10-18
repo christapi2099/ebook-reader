@@ -25,9 +25,16 @@ DEFAULT_VOICE = "af_heart"
 ENGINE_FAMILY = "kokoro"
 
 
+def _active_piper():
+    """The live PiperEngine, or None (cpu/gpu/modal all run Kokoro)."""
+    from services import engine_manager, piper_engine
+    cur = engine_manager.manager.current()
+    return cur if piper_engine.is_piper(cur) else None
+
+
 def current_engine_family() -> str:
-    """cpu, gpu and modal all run Kokoro, so they share one family."""
-    return ENGINE_FAMILY
+    """'piper' when the live engine is Piper; cpu, gpu and modal share 'kokoro'."""
+    return "piper" if _active_piper() is not None else ENGINE_FAMILY
 
 
 @functools.lru_cache(maxsize=1)
@@ -41,8 +48,17 @@ def _ffmpeg_version() -> str:
 
 def target_fingerprint_for(voice: Optional[str]) -> str:
     """Fingerprint of a render of ``voice`` with today's pipeline and engine family."""
-    inputs = current_inputs(voice or DEFAULT_VOICE, current_engine_family(),
-                            ffmpeg_version=_ffmpeg_version())
+    family = current_engine_family()
+    extra = {}
+    eng = _active_piper() if family == "piper" else None
+    if eng is not None:
+        bare = (voice or "").split(":", 1)[-1] if voice else ""
+        if not bare or bare not in eng.available_voices():
+            bare = eng.default_voice()  # same fallback the synthesis path takes
+        voice = f"piper:{bare}"
+        extra["voice_path"] = str(eng._dir / f"{bare}.onnx")
+    inputs = current_inputs(voice or DEFAULT_VOICE, family,
+                            ffmpeg_version=_ffmpeg_version(), **extra)
     return fingerprint(inputs)
 
 

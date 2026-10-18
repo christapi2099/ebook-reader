@@ -240,6 +240,28 @@ async def synthesize_sentence_for_render(
     return await asyncio.wrap_future(_synthesis_pool.submit(_task, text, voice, speed))
 
 
+async def synthesize_render_result(
+    text: str, voice: str, speed: float = 1.0, *, engine: "TTSEngine | None" = None
+) -> tuple[np.ndarray | None, float, list | None, list | None]:
+    """Like :func:`synthesize_sentence_for_render` but also returns the native
+    word timings / Kokoro tokens of the same call."""
+    from services import render_throttle
+
+    engine = engine or _render_engine
+    if engine is None:
+        raise RuntimeError("no render engine configured")
+    await render_throttle.await_playback_idle()
+
+    def _task():
+        token = render_throttle.render_tasks.start()
+        try:
+            return engine.synthesize_for_render(text, voice, speed)
+        finally:
+            render_throttle.render_tasks.finish(token)
+
+    return await asyncio.wrap_future(_synthesis_pool.submit(_task))
+
+
 _render_engine: "TTSEngine | None" = None
 
 
@@ -490,6 +512,30 @@ class TTSEngine:
             voice,
         )
         return duration_ms / 1000.0
+
+    def synthesize_for_render(
+        self, text: str, voice: str, speed: float = 1.0
+    ) -> tuple[np.ndarray | None, float, list | None, list | None]:
+        """Render-time synthesis: ``(audio, effective_speed, native_words, kokoro_tokens)``.
+
+        Bypasses AudioCache on purpose: word timings must come from the SAME
+        synthesis call as the audio, and the cache stores neither Piper phoneme
+        durations nor raw tokens. Blocking; run it on the synthesis pool.
+        """
+        render_call = getattr(self.kokoro, "synthesize_for_render", None)
+        if render_call is not None:  # Piper: native phoneme durations
+            audio, words = render_call(text, voice)
+            return audio, 1.0, words, None
+        results, eff = self._call_kokoro(text, voice, speed)
+        parts: list[np.ndarray] = []
+        stamps: list[dict] = []
+        offset = 0.0
+        for result in results:
+            _, offset = self._collect_result(result, parts, stamps, offset)
+        if not parts:
+            return None, eff, None, None
+        tokens = [(w["word"], w["start"], w["end"]) for w in stamps] or None
+        return np.concatenate(parts), eff, None, tokens
 
     def synthesize_cached(
         self, text: str, voice: str, speed: float

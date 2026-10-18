@@ -264,7 +264,8 @@ def test_supersede_mid_job_yields_one_render_for_new_target(env, real_ffmpeg):
     assert run(synth, worker="w2") == rw.READY
     b = book(env)
     assert (b.ready_generation, b.ready_fingerprint, b.target_fingerprint) == (1, "fpB", "fpB")
-    assert sorted(p.name for p in (storage.RENDERS_DIR / "b1").iterdir()) == ["1"]
+    assert sorted(p.name for p in (storage.RENDERS_DIR / "b1").iterdir()
+                  if p.name != "processing.json") == ["1"]
     assert json.loads(gen_files("b1", 1)["manifest.json"])["fingerprint"] == "fpB"
     # the fpA checkpoint was discarded (different fingerprint), so work restarted
     assert len(synth.calls) == 3 + 6
