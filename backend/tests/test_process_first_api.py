@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 """Process-first API: triggers, status fields, the read gate, render audio serving."""
 import json
 import sys
@@ -149,7 +150,9 @@ def test_get_book_bumps_priority(client, db_engine, seed_book):
 
 
 def test_processing_endpoint(client, db_engine, seed_book, renders_dir):
-    seed_book(db_engine, ready_generation=None, job_status="processing", progress=0.5)
+    live = datetime.now(timezone.utc) + timedelta(hours=1)  # a worker really holds it
+    seed_book(db_engine, ready_generation=None, job_status="processing", progress=0.5,
+              lease_expires=live)
     render_stats.record(BID, sentences_done=0, sentences_total=3, now=100.0)
     render_stats.record(BID, sentences_done=10, phase_timings={"synth": 1.5}, now=105.0,
                         last_error="Traceback...")
@@ -159,7 +162,8 @@ def test_processing_endpoint(client, db_engine, seed_book, renders_dir):
     assert p["phase_timings"] == {"synth": 1.5} and p["last_error"] == "Traceback..."
     assert client.get("/library/nope/processing").status_code == 404
     # eta from the EWMA on the list/detail view
-    seed_book(db_engine, book_id="e", ready_generation=None, job_status="processing", progress=0.5)
+    seed_book(db_engine, book_id="e", ready_generation=None, job_status="processing", progress=0.5,
+              lease_expires=live)
     render_stats.record("e", sentences_done=0, sentences_total=100, now=0.0)
     render_stats.record("e", sentences_done=10, now=5.0)
     # 90 sentences left at 2 per second; the old progress-fraction formula gave 25

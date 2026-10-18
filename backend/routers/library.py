@@ -118,6 +118,9 @@ def _clean_author(raw: str | None) -> str | None:
 
 def _render_status(book: Book, queue_position: int | None = None) -> dict:
     """Render-state fields shared by the list and detail responses."""
+    if book.job_status == "processing" and not render_jobs.is_live(book):
+        # No worker holds this row any more (its process died): it is queued again.
+        book.job_status = "pending"
     stats = render_stats.read(book.id) if book.job_status in ("pending", "processing") else {}
     sps, total = stats.get("sps_ewma"), stats.get("sentences_total")
     done = stats.get("sentences_done") or 0

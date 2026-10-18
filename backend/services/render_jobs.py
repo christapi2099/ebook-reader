@@ -147,15 +147,28 @@ def cancel(book_id: str) -> bool:
 
 
 def expire_orphan_leases(now: Optional[datetime] = None) -> int:
-    """Startup only: every lease was taken by a process that no longer exists, so
-    expire them all and let claim_next take the jobs back. Safe because one backend
-    process runs the worker; do not call this while another worker is alive."""
+    """Startup only: every processing row was left by a process that no longer
+    exists. Put them back in the queue (progress is kept; the checkpoint resumes
+    them), so the UI does not show "processing" for work nobody is doing. Safe
+    because one backend process runs the worker; do not call this while another
+    worker is alive."""
     now = _now(now)
     with _db.engine.begin() as conn:
         res = conn.execute(update(Book.__table__).where(
-            _B.job_status == JOB_PROCESSING, _B.lease_expires > now).values(
-            lease_expires=now))
+            _B.job_status == JOB_PROCESSING).values(
+            job_status=JOB_PENDING, lease_owner=None, lease_expires=None,
+            pending_since=None))
     return res.rowcount
+
+
+def is_live(book) -> bool:
+    """A processing row whose lease has not expired: a worker really holds it."""
+    exp = book.lease_expires
+    if exp is None:
+        return False
+    if exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+    return exp > datetime.now(timezone.utc)
 
 
 def check_job(book_id: str, my_target: Optional[str]) -> str:

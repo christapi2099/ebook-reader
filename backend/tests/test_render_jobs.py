@@ -169,3 +169,19 @@ def test_startup_expires_leases_left_by_a_dead_worker(db_engine, monkeypatch):
         s.commit()
     assert rj.expire_orphan_leases(now=t0) == 1
     assert rj.claim_next("new-worker", t0 + timedelta(days=1), debounce_s=0) == "orphan"
+
+
+def test_processing_without_a_live_lease_is_reported_as_queued(db_engine, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from db.models import Book
+    from services import render_jobs as rj
+
+    now = datetime.now(timezone.utc)
+    live = Book(id="l", title="l", file_path="x", file_type="text", page_count=1,
+                created_at=now, job_status="processing", lease_expires=now + timedelta(minutes=5))
+    dead = Book(id="d", title="d", file_path="x", file_type="text", page_count=1,
+                created_at=now, job_status="processing", lease_expires=now - timedelta(minutes=5))
+    assert rj.is_live(live) is True
+    assert rj.is_live(dead) is False
+    assert rj.is_live(Book(id="n", title="n", file_path="x", file_type="text", page_count=1,
+                           created_at=now, job_status="processing", lease_expires=None)) is False
