@@ -146,6 +146,7 @@ async function loadGeneration(id: string, generation: number | null) {
   }
   settingsStore.loadFromServer().catch(() => {})
   audioStore.init(id)
+  if (generation !== null && manifest) audioStore.load(generation, manifest)
   audioStore.setSpeed((get(readerStore) as ReaderState).speed)
   audioStore.setCurrentIndex((get(readerStore) as ReaderState).currentIndex)
   audioStore.setVoice(get(settingsStore).voice)
@@ -499,6 +500,9 @@ function handleBackToLibrary() {
         buffering={audio.buffering}
         onSeek={handleSeek}
       />
+      {#if audio.unsupportedMessage}
+        <p role="alert" class="mt-2 rounded border border-red-500 p-2 text-sm">{audio.unsupportedMessage}</p>
+      {/if}
       <div class="mt-2">
         <MediaBar
           isPlaying={reader.isPlaying}

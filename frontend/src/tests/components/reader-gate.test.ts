@@ -17,7 +17,7 @@ vi.mock('$lib/stores/audio', async () => {
   return {
     audioStore: {
       subscribe: (fn: (v: unknown) => void) => { subs.add(fn); fn(state); return () => { subs.delete(fn) } },
-      init: vi.fn(), destroy: vi.fn(), play: vi.fn(), pause: vi.fn(), seek: vi.fn(),
+      init: vi.fn(), load: vi.fn(), destroy: vi.fn(), play: vi.fn(), pause: vi.fn(), seek: vi.fn(),
       setSpeed: vi.fn(), setCurrentIndex: vi.fn(), setVoice: vi.fn(),
       __set: (patch: object) => { state = { ...state, ...patch }; subs.forEach(f => f(state)) },
     },

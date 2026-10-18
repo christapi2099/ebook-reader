@@ -1,5 +1,5 @@
 import { writable, get } from 'svelte/store'
-import { TTSSocket, type WordTimestamp } from '$lib/api'
+import { renderAudioUrl, type RenderManifest, type ManifestSegment } from '$lib/api'
 
 export interface AudioState {
   isPlaying: boolean
@@ -8,42 +8,40 @@ export interface AudioState {
   currentWordIndex: number
   voice: string
   buffering: boolean
-  /**
-   * Real seconds of audio already played at the current position: the summed
-   * backend-reported duration of every earlier sentence plus the elapsed part of
-   * the sentence playing now. Derived from real clocks only — never estimated.
-   */
+  /** Real seconds of the active tier played so far (the active element's clock). */
   elapsedSeconds: number
-  /**
-   * Real per-sentence durations in seconds, keyed by sentence index, exactly as
-   * the backend reported them in `sentence_end.duration_ms`. Sentences the
-   * backend has not synthesised yet are absent rather than guessed at.
-   */
+  /** Real per-sentence durations in seconds of the active tier, keyed by sentence index. */
   sentenceDurations: Record<number, number>
+  /** Non-null when this browser cannot play the Opus render; shown instead of a dead player. */
+  unsupportedMessage: string | null
 }
 
 /**
- * A rate the engine refused, and the one it used instead — both as the backend
- * reported them in its `speed_unavailable` message.
+ * A rate the engine refused. Render-based playback never downgrades (every tier
+ * is pre-rendered), so nothing sets this any more; it stays because the MediaBar
+ * reads it.
  */
 export interface SpeedDowngrade {
   requested: number
   effective: number
 }
-
-/**
- * The engine's own answer when it cannot honour a requested playback rate.
- *
- * `null` means "the engine has not refused anything on this connection". It is
- * a plain store beside the playback state because the MediaBar has to override
- * its `speed` prop with it: the reader route passes the reader store's speed and
- * cannot be asked to thread this through, but the highlighted rate must not be
- * a rate the reader is not getting.
- */
 export const speedDowngradeStore = writable<SpeedDowngrade | null>(null)
 
-function createAudioStore() {
-  const { subscribe, set, update } = writable<AudioState>({
+export const UNSUPPORTED_MESSAGE =
+  'This browser cannot play Opus audio, so this book cannot be read aloud here. Please use Chrome, Edge or Firefox.'
+
+/** Audio that must be buffered past the playhead before play() starts. */
+export const START_GATE_S = 0.3
+const GATE_POLL_MS = 50
+
+interface TierInfo {
+  key: string
+  factor: number
+  segments: ManifestSegment[]
+}
+
+function initialState(): AudioState {
+  return {
     isPlaying: false,
     speed: 1.0,
     currentIndex: 0,
@@ -52,405 +50,324 @@ function createAudioStore() {
     buffering: false,
     elapsedSeconds: 0,
     sentenceDurations: {},
-  })
+    unsupportedMessage: null,
+  }
+}
 
-  let ctx: AudioContext | null = null
-  let socket: TTSSocket | null = null
-  let cancelled = false
+/** Last segment whose start_ms <= ms (binary search); -1 before the first. */
+function segmentAt(segments: ManifestSegment[], ms: number): number {
+  let lo = 0
+  let hi = segments.length - 1
+  let found = -1
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1
+    if (segments[mid].start_ms <= ms) { found = mid; lo = mid + 1 } else hi = mid - 1
+  }
+  return found
+}
 
-  // Generation counter — bumped on every stopAll(). Captured by scheduleChunk()
-  // closures so stale decode tails and onended callbacks from stopped sources
-  // become no-ops instead of advancing currentIndex (which would clobber a
-  // seek-backward target).
+function detectUnsupported(): boolean {
+  try {
+    if (typeof Audio === 'undefined') return true
+    const probe = new Audio()
+    if (probe.canPlayType('audio/ogg; codecs=opus') === '') return true
+  } catch {
+    return true
+  }
+  const ua = typeof navigator !== 'undefined' ? navigator.userAgent : ''
+  return /Safari\//.test(ua) && !/Chrome\/|Chromium\/|Edg\/|Firefox\/|Android/.test(ua) && /Version\//.test(ua)
+}
+
+function createAudioStore() {
+  const { subscribe, set, update } = writable<AudioState>(initialState())
+
+  let bookId: string | null = null
   let generation = 0
+  let manifest: RenderManifest | null = null
+  let tiers: TierInfo[] = []
+  let activeKey: string | null = null
+  let elements = new Map<string, HTMLAudioElement>()
 
-  // Session counter — bumped on every play/seek/resume/setSpeed. Sent with the
-  // action to the backend, which echoes it in every sentence_start/sentence_end/
-  // complete message. Also gates audio chunks via activeSessionId (see below).
-  // This is how we reject messages that are still draining from a previously
-  // cancelled session — neither the frontend reset nor backend cancellation can
-  // flush the WebSocket RX buffer, so we must filter by tag.
-  let sessionId = 0
-  // Set to the current sessionId when a sentence_start with a matching sessionId
-  // arrives — audio chunks (binary, untagged) are only accepted while this
-  // equals sessionId. Reset to -1 in stopAll() so we always require a fresh
-  // matching sentence_start before accepting chunks in a new session.
-  let activeSessionId = -1
-
-  // Serialized decode queue — each chunk waits for the previous to finish
-  // scheduling so nextStartTime updates in arrival order (no marble effect).
-  let decodeChain: Promise<void> = Promise.resolve()
-  let nextStartTime = 0
-
-  let activeNodes: { node: AudioBufferSourceNode; startAt: number; duration: number }[] = []
-
-  // Sentence timing: sentence index → AudioContext time when it starts playing.
-  // rAF polls this to advance currentIndex in audio-time, not receive-time.
-  let sentenceTimings: Map<number, number> = new Map()
-  let receivingSentenceIndex = -1
-  let wordTimings: Map<number, WordTimestamp[]> = new Map()
-
-  // Real per-sentence durations reported by the backend. These describe the book
-  // at the current speed, not the playback session, so they survive pause and
-  // seek — but they are discarded when the speed changes, because Kokoro's
-  // native `speed` parameter changes the rendered duration of every sentence.
-  let sentenceDurations: Map<number, number> = new Map()
-  let elapsedSeconds = 0
-
-  const SPEED_CHANGE_DEBOUNCE_MS = 200
-  const SENTENCE_TIMING_OFFSET_S = 0.016
-
-  let lastScheduledIndex = -1
-  let speedChangeTimer: ReturnType<typeof setTimeout> | null = null
-  let prefetchSpeedTimer: ReturnType<typeof setTimeout> | null = null
-  let pendingSpeed = 0
-
+  // Bumped on every tier swap and on destroy. Frames and gate waits capture it
+  // and drop out when it moved, so a stale element can never write state.
+  let swapGen = 0
+  // Bumped on every play/pause/seek; cancels a pending start gate.
+  let playToken = 0
   let rafId: number | null = null
 
-  function getCtx(): AudioContext {
-    if (!ctx || ctx.state === 'closed') ctx = new AudioContext()
-    return ctx
-  }
+  let primed = false
+  let primePromise: Promise<void> = Promise.resolve()
+  let volume = 1
+  let muted = false
 
-  function snapshotDurations(): Record<number, number> {
-    const out: Record<number, number> = {}
-    for (const [index, seconds] of sentenceDurations) out[index] = seconds
-    return out
-  }
+  const cur = () => get({ subscribe })
+  const activeTier = (): TierInfo | null => tiers.find(t => t.key === activeKey) ?? null
+  const activeEl = (): HTMLAudioElement | null => (activeKey ? elements.get(activeKey) ?? null : null)
 
-  /**
-   * Real elapsed audio at `index`: the summed backend-reported duration of every
-   * sentence before it, plus the part of `index` that has actually been played
-   * according to the AudioContext clock. Sentences whose duration has not been
-   * reported yet contribute 0 — unknown, never estimated.
-   */
-  function computeElapsedSeconds(index: number): number {
-    let elapsed = 0
-    for (const [i, duration] of sentenceDurations) {
-      if (i < index) elapsed += duration
+  function nearestTier(speed: number): TierInfo | null {
+    let best: TierInfo | null = null
+    for (const t of tiers) {
+      if (!best || Math.abs(t.factor - speed) < Math.abs(best.factor - speed)) best = t
     }
-    const ac = ctx
-    const startedAt = sentenceTimings.get(index)
-    const duration = sentenceDurations.get(index)
-    if (ac && startedAt !== undefined && duration !== undefined) {
-      elapsed += Math.min(Math.max(ac.currentTime - startedAt, 0), duration)
-    }
-    return elapsed
+    return best
   }
 
-  /**
-   * Publish elapsed audio for the sentence now playing. Called from the rAF tick,
-   * so a paused player stops advancing and a seek recomputes from the new
-   * position instead of interpolating from a stale value.
-   */
-  function publishElapsedSeconds(index: number): void {
-    const next = computeElapsedSeconds(index)
-    if (Math.abs(next - elapsedSeconds) < 0.1) return
-    elapsedSeconds = next
-    update(s => ({ ...s, elapsedSeconds }))
+  function ensureElement(key: string): HTMLAudioElement {
+    let el = elements.get(key)
+    if (el) return el
+    el = new Audio(renderAudioUrl(bookId as string, generation, key))
+    el.preload = 'auto'
+    el.volume = volume
+    el.muted = muted
+    const mine = el
+    el.addEventListener('waiting', () => {
+      if (elements.get(activeKey ?? '') === mine && cur().isPlaying) update(s => ({ ...s, buffering: true }))
+    })
+    el.addEventListener('playing', () => {
+      if (elements.get(activeKey ?? '') === mine) update(s => ({ ...s, buffering: false }))
+    })
+    el.addEventListener('ended', () => {
+      if (elements.get(activeKey ?? '') === mine) finishBook()
+    })
+    elements.set(key, el)
+    return el
   }
 
-  function startRaf() {
-    if (rafId !== null) return
-    function tick() {
-      const ac = ctx
-      if (!ac || cancelled) { rafId = null; return }
-      const s = get({ subscribe })
-      if (!s.isPlaying) { rafId = requestAnimationFrame(tick); return }
-      const now = ac.currentTime
-
-      // Find the latest sentence whose scheduled start is <= now.
-      // Taking the max (not the min) lets us catch up if several very short
-      // sentences elapsed within a single rAF frame — the alternative would
-      // show an even more visibly out-of-date highlight.
-      let latestReady = -1
-      for (const [idx, startTime] of sentenceTimings) {
-        if (startTime <= now && idx > latestReady) latestReady = idx
+  function bufferedAhead(el: HTMLAudioElement): number {
+    const t = el.currentTime
+    const b = el.buffered
+    for (let i = 0; i < (b?.length ?? 0); i++) {
+      if (b.start(i) <= t + 0.05 && b.end(i) >= t) {
+        const remaining = Number.isFinite(el.duration) ? el.duration - t : Infinity
+        return Math.min(b.end(i) - t, Math.max(remaining, 0) + START_GATE_S)
       }
-      
-      let newWordIndex = -1
-      if (latestReady >= 0) {
-        const sentenceStart = sentenceTimings.get(latestReady)
-        const words = wordTimings.get(latestReady)
-        if (sentenceStart !== undefined && words && words.length > 0) {
-          const elapsed = now - sentenceStart
-          // Find as last word where start <= elapsed (word spans from start to end)
-          for (let i = words.length - 1; i >= 0; i--) {
-            if (elapsed >= words[i].start) {
-              newWordIndex = i
-              break
-            }
-          }
-        }
-        // Clean up old sentenceTimings (keep current and future only)
-        for (const [idx] of sentenceTimings) {
-          if (idx < latestReady) sentenceTimings.delete(idx)
-        }
-        for (const [idx] of wordTimings) {
-          if (idx < latestReady) wordTimings.delete(idx)
-        }
-      }
-      
-      if (latestReady >= 0) {
-        update(s => {
-          let next = s
-          if (latestReady >= s.currentIndex) {
-            next = { ...next, currentIndex: latestReady }
-          }
-          if (next.currentWordIndex !== newWordIndex) {
-            next = { ...next, currentWordIndex: newWordIndex }
-          }
-          return next
-        })
-      }
-
-      publishElapsedSeconds(latestReady >= 0 ? latestReady : s.currentIndex)
-
-      rafId = requestAnimationFrame(tick)
     }
-    rafId = requestAnimationFrame(tick)
+    return 0
+  }
+
+  async function waitForGate(el: HTMLAudioElement, token: number): Promise<boolean> {
+    while (token === playToken) {
+      if (bufferedAhead(el) >= START_GATE_S) return true
+      await new Promise<void>(r => setTimeout(r, GATE_POLL_MS))
+    }
+    return false
   }
 
   function stopRaf() {
     if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null }
   }
 
-  function scheduleChunk(bytes: ArrayBuffer, idx: number) {
-    // Capture generation at schedule time. Both post-decode guard and
-    // onended callback check that generation hasn't advanced since -- without
-    // this, a seek-backward would see onended callbacks from the STOPPED nodes
-    // of the previous session fire and re-advance currentIndex forward past
-    // the seek target (onended runs even when source is stopped early).
-    const myGen = generation
-    decodeChain = decodeChain.then(async () => {
-      if (cancelled || myGen !== generation) return
-      const ac = getCtx()
-      let buffer: AudioBuffer
-      try {
-        buffer = await ac.decodeAudioData(bytes.slice(0))
-      } catch {
-        return // skip corrupt/partial chunks
+  function finishBook() {
+    playToken++
+    stopRaf()
+    activeEl()?.pause()
+    update(s => ({ ...s, isPlaying: false, buffering: false, currentWordIndex: -1 }))
+  }
+
+  /** Publish sentence/word for one element reading; ignores anything not active. */
+  function applyTime(el: HTMLAudioElement, gen: number) {
+    if (gen !== swapGen || el !== activeEl()) return
+    const tier = activeTier()
+    if (!tier || tier.segments.length === 0) return
+    const ms = el.currentTime * 1000
+    const segs = tier.segments
+    const last = segs[segs.length - 1]
+    if (ms >= last.end_ms && cur().isPlaying && (el.ended || ms >= last.end_ms + 50)) {
+      finishBook()
+      return
+    }
+    const si = Math.max(0, segmentAt(segs, ms))
+    const seg = segs[si]
+    let wi = -1
+    if (manifest && manifest.timing_quality !== 'estimated' && seg.words.length > 0 && ms < seg.end_ms) {
+      for (let i = seg.words.length - 1; i >= 0; i--) {
+        if (seg.words[i].start_ms <= ms) { wi = i; break }
       }
-      if (cancelled || myGen !== generation) return
-
-      const source = ac.createBufferSource()
-      source.buffer = buffer
-      source.playbackRate.value = 1.0 // backend handles speed via Kokoro native param
-      source.connect(ac.destination)
-
-      if (nextStartTime > 0 && nextStartTime < ac.currentTime - 0.5) nextStartTime = ac.currentTime
-      const startAt = Math.max(ac.currentTime, nextStartTime)
-
-      if (idx >= 0 && !sentenceTimings.has(idx)) {
-        sentenceTimings.set(idx, startAt + SENTENCE_TIMING_OFFSET_S)
-      }
-
-      if (idx >= 0) lastScheduledIndex = idx
-      source.start(startAt)
-      const entry = { node: source, startAt, duration: buffer.duration }
-      activeNodes.push(entry)
-      source.onended = () => {
-        activeNodes = activeNodes.filter(e => e !== entry)
-        // If we've stopped and restarted since this node was created, do NOT
-        // touch currentIndex — the new session owns that state now.
-        if (myGen !== generation) return
-        // Fallback: advance highlight if rAF missed this sentence's window
-        // (very short sentences that completed between two rAF ticks).
-        update(s => s.currentIndex <= idx ? { ...s, currentIndex: idx } : s)
-      }
-
-      nextStartTime = startAt + buffer.duration
-      const ahead = nextStartTime - ac.currentTime
-      update(s => ({ ...s, buffering: ahead < 0.3 }))
-
-      if (ac.state === 'suspended') ac.resume().catch(() => {})
+    }
+    update(s => {
+      if (s.currentIndex === seg.index && s.currentWordIndex === wi && Math.abs(s.elapsedSeconds - el.currentTime) < 0.1) return s
+      return { ...s, currentIndex: seg.index, currentWordIndex: wi, elapsedSeconds: el.currentTime }
     })
   }
 
-  function applyPendingSpeedChange() {
-    speedChangeTimer = null
-    const speed = pendingSpeed  // save before resetForPlay() clears it via stopAll()
-    const bestIdx = lastScheduledIndex >= 0
-      ? Math.max(lastScheduledIndex, get({ subscribe }).currentIndex)
-      : get({ subscribe }).currentIndex
-    resetForPlay()
-    update(s => ({ ...s, isPlaying: true, buffering: true, currentIndex: bestIdx }))
-    socket!.play(bestIdx, get({ subscribe }).voice, speed, sessionId)
-  }
-
-  function stopAll() {
-    generation++
-    cancelled = true
-    if (speedChangeTimer) { clearTimeout(speedChangeTimer); speedChangeTimer = null }
-    if (prefetchSpeedTimer) { clearTimeout(prefetchSpeedTimer); prefetchSpeedTimer = null }
-    pendingSpeed = 0
+  function startRaf() {
     stopRaf()
-    for (const { node } of activeNodes) {
-      try { node.stop(0) } catch {}
+    const gen = swapGen
+    const el = activeEl()
+    if (!el) return
+    function tick() {
+      if (gen !== swapGen || el !== activeEl()) { rafId = null; return }
+      applyTime(el!, gen)
+      if (gen !== swapGen) return
+      rafId = requestAnimationFrame(tick)
     }
-    activeNodes = []
-    lastScheduledIndex = -1
-    sentenceTimings.clear()
-    wordTimings.clear()
-    nextStartTime = 0
-    receivingSentenceIndex = -1
-    activeSessionId = -1
-    decodeChain = Promise.resolve()
+    rafId = requestAnimationFrame(tick)
   }
 
-  function resetForPlay() {
-    stopAll()
-    cancelled = false
-    update(s => ({ ...s, currentWordIndex: -1 }))
-    sessionId++
-    const ac = getCtx()
-    try { if (ac.state === 'suspended') void ac.resume() } catch (e) { console.warn('AudioContext resume failed:', e) }
+  function segmentStartMs(tier: TierInfo, index: number): number {
+    const seg = tier.segments.find(s => s.index === index) ?? tier.segments[Math.min(index, tier.segments.length - 1)]
+    return seg ? seg.start_ms : 0
+  }
+
+  /** Start of the word being heard, or the sentence start when it has no word times. */
+  function currentPositionMs(tier: TierInfo, index: number, wordIndex: number): number {
+    const seg = tier.segments.find(s => s.index === index)
+    if (!seg) return 0
+    if (manifest?.timing_quality !== 'estimated' && wordIndex >= 0 && seg.words[wordIndex]) return seg.words[wordIndex].start_ms
+    return seg.start_ms
+  }
+
+  function prime() {
+    if (primed || !activeKey || !bookId || get(unsupported)) return
+    primed = true
+    const el = ensureElement(activeKey)
+    const wasMuted = el.muted
+    el.muted = true
+    primePromise = Promise.resolve()
+      .then(() => el.play())
+      .then(() => { el.pause() })
+      .catch(() => { primed = false })
+      .finally(() => { el.muted = wasMuted })
+  }
+  const unsupported = writable(false)
+
+  async function startPlayback(el: HTMLAudioElement, token: number) {
+    update(s => ({ ...s, isPlaying: true, buffering: true }))
+    await primePromise
+    if (token !== playToken) return
+    if (!(await waitForGate(el, token))) return
+    try {
+      await el.play()
+    } catch {
+      if (token === playToken) update(s => ({ ...s, isPlaying: false, buffering: false }))
+      return
+    }
+    if (token !== playToken) return
     startRaf()
+  }
+
+  function sentenceDurations(tier: TierInfo): Record<number, number> {
+    const out: Record<number, number> = {}
+    for (const s of tier.segments) out[s.index] = (s.end_ms - s.start_ms) / 1000
+    return out
+  }
+
+  function teardownElements() {
+    for (const el of elements.values()) {
+      try { el.pause() } catch {}
+      try { el.removeAttribute('src'); el.load?.() } catch {}
+    }
+    elements = new Map()
+  }
+
+  function seekTo(index: number) {
+    const tier = activeTier()
+    const el = activeEl()
+    if (!tier || !el) return null
+    el.currentTime = segmentStartMs(tier, index) / 1000
+    return el
   }
 
   return {
     subscribe,
 
+    /** Opens a book. Nothing is fetched until a generation is loaded and play() is called. */
     init(bid: string) {
-      // Durations describe a book at a speed, so a new book starts from nothing.
-      sentenceDurations = new Map()
-      elapsedSeconds = 0
-      update(s => ({ ...s, elapsedSeconds: 0, sentenceDurations: {} }))
-      // A new connection means a new engine session: whatever rate the previous
-      // one refused says nothing about this one.
+      this.destroy()
+      bookId = bid
       speedDowngradeStore.set(null)
-
-      socket = new TTSSocket(bid)
-
-      socket.onAudioChunk = (bytes: ArrayBuffer) => {
-        // Binary chunks can't carry a session_id tag themselves — we gate them
-        // via activeSessionId, which only matches after a sentence_start from
-        // the current session has armed us.
-        if (activeSessionId !== sessionId) return
-        scheduleChunk(bytes, receivingSentenceIndex)
-      }
-
-      socket.onSentenceStart = (index: number, sid: number) => {
-        // A stale sentence_start from a cancelled session would otherwise arm
-        // activeSessionId and let stale chunks through — drop it here.
-        if (sid !== sessionId) return
-        activeSessionId = sid
-        receivingSentenceIndex = index
-      }
-
-      socket.onSentenceEnd = (index: number, durationMs: number, sid: number, wordTimestamps?: WordTimestamp[]) => {
-        if (sid !== sessionId) return
-        // Real rendered length of this sentence at the current speed. This is the
-        // only source of duration in the app — nothing extrapolates from it.
-        if (Number.isFinite(durationMs) && durationMs > 0) {
-          sentenceDurations.set(index, durationMs / 1000)
-          update(s => ({ ...s, sentenceDurations: snapshotDurations() }))
-        }
-        if (wordTimestamps) {
-          wordTimings.set(index, wordTimestamps)
-        }
-      }
-
-      socket.onComplete = (sid: number) => {
-        if (sid !== sessionId) return
-        update(s => ({ ...s, isPlaying: false, buffering: false }))
-        stopRaf()
-      }
-
-      // The engine cannot render at the requested rate and is producing
-      // `effectiveSpeed` instead. Playing 1.0x audio under a 1.5x highlight is
-      // the UI telling the reader something untrue, so the store takes the
-      // engine's word for it: the speed becomes the effective rate, and the
-      // refusal is published for the transport controls to explain.
-      socket.onSpeedUnavailable = (requested: number, effective: number, sid: number) => {
-        if (sid !== sessionId) return
-        // A queued speed change would re-request the rate the engine just
-        // refused, and would overwrite the effective speed below.
-        if (speedChangeTimer) { clearTimeout(speedChangeTimer); speedChangeTimer = null }
-        pendingSpeed = 0
-        const changed = effective !== get({ subscribe }).speed
-        update(s => ({ ...s, speed: effective }))
-        // Every duration measured so far describes the rate this engine was
-        // assumed to be rendering at; none of them describe `effective`.
-        if (changed) {
-          sentenceDurations = new Map()
-          elapsedSeconds = 0
-          update(s => ({ ...s, elapsedSeconds: 0, sentenceDurations: {} }))
-        }
-        speedDowngradeStore.set({ requested, effective })
-      }
-
-      socket.connect()
     },
 
+    /** Binds the ready generation's manifest; tier elements are created lazily. */
+    load(gen: number, m: RenderManifest) {
+      if (!bookId) return
+      teardownElements()
+      swapGen++
+      playToken++
+      generation = gen
+      manifest = m
+      tiers = Object.entries(m.tiers)
+        .map(([key, t]) => ({ key, factor: Number.parseFloat(key), segments: t.segments }))
+        .filter(t => Number.isFinite(t.factor))
+        .sort((a, b) => a.factor - b.factor)
+      primed = false
+      const bad = detectUnsupported()
+      unsupported.set(bad)
+      const speed = cur().speed
+      const tier = nearestTier(speed)
+      activeKey = tier?.key ?? null
+      update(s => ({
+        ...s,
+        unsupportedMessage: bad ? UNSUPPORTED_MESSAGE : null,
+        sentenceDurations: tier ? sentenceDurations(tier) : {},
+      }))
+    },
+
+    /** Call from the first user gesture so later (async) play() calls are allowed. */
+    prime,
+
     play(fromIndex: number) {
-      if (!socket) return
-      resetForPlay()
-      update(s => ({ ...s, currentWordIndex: -1, isPlaying: true, buffering: true, currentIndex: fromIndex }))
-      const state = get({ subscribe })
-      socket.play(fromIndex, state.voice, state.speed, sessionId)
+      if (!activeKey || get(unsupported)) return
+      prime()
+      const token = ++playToken
+      const el = ensureElement(activeKey)
+      el.pause()
+      update(s => ({ ...s, currentIndex: fromIndex, currentWordIndex: -1 }))
+      seekTo(fromIndex)
+      void startPlayback(el, token)
     },
 
     pause() {
-      if (!socket) return
-      socket.pause()
-      stopAll()
-      // Clear buffering too — otherwise the spinner can stay up forever if we
-      // paused mid-buffer.
+      playToken++
+      stopRaf()
+      activeEl()?.pause()
       update(s => ({ ...s, isPlaying: false, buffering: false, currentWordIndex: -1 }))
     },
 
     resume() {
-      const state = get({ subscribe })
-      if (!socket) return
-      resetForPlay()
-      update(s => ({ ...s, currentWordIndex: -1, isPlaying: true, buffering: true }))
-      socket.play(state.currentIndex, state.voice, state.speed, sessionId)
+      if (!activeKey || get(unsupported)) return
+      prime()
+      const token = ++playToken
+      void startPlayback(ensureElement(activeKey), token)
     },
 
     seek(index: number) {
-      if (!socket) return
-      resetForPlay()
-      update(s => ({ ...s, currentWordIndex: -1, isPlaying: true, currentIndex: index, buffering: true }))
-      const state = get({ subscribe })
-      socket.seek(index, state.voice, state.speed, sessionId)
+      if (!activeKey || get(unsupported)) return
+      prime()
+      const token = ++playToken
+      const el = ensureElement(activeKey)
+      el.pause()
+      update(s => ({ ...s, currentIndex: index, currentWordIndex: -1 }))
+      seekTo(index)
+      void startPlayback(el, token)
     },
 
     setSpeed(newSpeed: number) {
-      // Once the engine has said it cannot render anything but `effective`, any
-      // other request is accepted and then silently ignored — exactly the lie
-      // the notice exists to prevent. The transport's buttons are disabled, but
-      // the reader's ↑/↓ hotkeys reach this same method, so the refusal is
-      // enforced here too. A new connection (init) clears the refusal and asks
-      // the engine again.
-      if (get(speedDowngradeStore)) return
-      const state = get({ subscribe })
+      const state = cur()
       update(s => ({ ...s, speed: newSpeed }))
-      // Kokoro renders speed natively, so every measured duration describes the
-      // previous speed only. Drop them rather than reuse numbers that no longer
-      // describe what will be played.
-      if (newSpeed !== state.speed) {
-        sentenceDurations = new Map()
-        elapsedSeconds = 0
-        update(s => ({ ...s, elapsedSeconds: 0, sentenceDurations: {} }))
+      const next = nearestTier(newSpeed)
+      const oldTier = activeTier()
+      if (!next || !oldTier || next.key === activeKey) return
+
+      const oldEl = activeEl()
+      const wasPlaying = state.isPlaying
+            swapGen++
+      stopRaf()
+      const token = ++playToken
+      if (oldEl) {
+        volume = oldEl.volume
+        muted = oldEl.muted
+        oldEl.pause()
       }
-      if (!socket) return
-      // Debounced cache warm-up at new speed (100ms) — prevents rapid task
-      // cancellations when user drags a speed slider quickly.
-      if (prefetchSpeedTimer) clearTimeout(prefetchSpeedTimer)
-      prefetchSpeedTimer = setTimeout(() => {
-        prefetchSpeedTimer = null
-        if (!socket) return
-        const warmIdx = lastScheduledIndex >= 0
-          ? Math.max(lastScheduledIndex, get({ subscribe }).currentIndex)
-          : get({ subscribe }).currentIndex
-        socket.prefetchSpeed(warmIdx, get({ subscribe }).voice, newSpeed)
-      }, 100)
-      if (!state.isPlaying) return
-      pendingSpeed = newSpeed
-      update(s => ({ ...s, buffering: true }))
-      if (speedChangeTimer) clearTimeout(speedChangeTimer)
-      speedChangeTimer = setTimeout(applyPendingSpeedChange, SPEED_CHANGE_DEBOUNCE_MS)
+      activeKey = next.key
+      const posMs = currentPositionMs(next, state.currentIndex, state.currentWordIndex)
+      if (!bookId) return
+      const el = ensureElement(next.key)
+      el.volume = volume
+      el.muted = muted
+      el.currentTime = posMs / 1000
+      update(s => ({ ...s, sentenceDurations: sentenceDurations(next), elapsedSeconds: posMs / 1000 }))
+      if (wasPlaying) void startPlayback(el, token)
     },
 
     setCurrentIndex(idx: number) {
@@ -461,25 +378,32 @@ function createAudioStore() {
       update(s => ({ ...s, voice }))
     },
 
+    setVolume(v: number) {
+      volume = v
+      const el = activeEl()
+      if (el) el.volume = v
+    },
+
+    setMuted(m: boolean) {
+      muted = m
+      const el = activeEl()
+      if (el) el.muted = m
+    },
+
     destroy() {
-      stopAll()
-      socket?.disconnect()
-      socket = null
-      ctx?.close()
-      ctx = null
-      sentenceDurations = new Map()
-      elapsedSeconds = 0
+      swapGen++
+      playToken++
+      stopRaf()
+      teardownElements()
+      bookId = null
+      manifest = null
+      tiers = []
+      activeKey = null
+      primed = false
+      primePromise = Promise.resolve()
+      unsupported.set(false)
       speedDowngradeStore.set(null)
-      set({
-        isPlaying: false,
-        speed: 1.0,
-        currentIndex: 0,
-        currentWordIndex: -1,
-        voice: 'af_heart',
-        buffering: false,
-        elapsedSeconds: 0,
-        sentenceDurations: {},
-      })
+      set(initialState())
     },
   }
 }
