@@ -39,19 +39,26 @@ def read(book_id: str) -> dict:
 
 def record(book_id: str, *, sentences_done: Optional[int] = None,
            sentences_total: Optional[int] = None,
+           work_done: Optional[int] = None,
            phase_timings: Optional[dict] = None,
            last_error: Optional[str] = None, now: Optional[float] = None) -> dict:
-    """Merge new facts in; update the sentences/s EWMA from the done counter."""
+    """Merge new facts in; update the sentences/s EWMA from the work counter.
+
+    ``work_done`` counts only sentences synthesized in this run. Sentences reused
+    from a resume checkpoint finish instantly, so counting them made the rate, and
+    the ETA, far too optimistic. Defaults to ``sentences_done``.
+    """
     now = time.time() if now is None else now
     data = read(book_id)
     if sentences_done is not None:
+        work = sentences_done if work_done is None else work_done
         prev_done, prev_t = data.get("_last_done"), data.get("_last_t")
         if prev_done is not None and prev_t is not None and now > prev_t \
-                and sentences_done >= prev_done:
-            inst = (sentences_done - prev_done) / (now - prev_t)
+                and work >= prev_done:
+            inst = (work - prev_done) / (now - prev_t)
             old = data.get("sps_ewma")
             data["sps_ewma"] = inst if old is None else EWMA_ALPHA * inst + (1 - EWMA_ALPHA) * old
-        data["_last_done"], data["_last_t"] = sentences_done, now
+        data["_last_done"], data["_last_t"] = work, now
         data["sentences_done"] = sentences_done
     if sentences_total is not None:
         data["sentences_total"] = sentences_total

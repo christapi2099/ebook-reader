@@ -400,7 +400,8 @@ def _render(book_id, worker_id, synthesizer, aligner, fallback, extractor, box_p
     rows = (extractor or default_extractor)(book)
     todo = [r for r in rows if _speakable(r)]
     phase_stat("synthesize")
-    _stats(book_id, sentences_done=0, sentences_total=len(todo), now=time.time())
+    _stats(book_id, sentences_done=0, sentences_total=len(todo), work_done=0, now=time.time())
+    fresh = 0  # sentences synthesized in this run; resumed ones are not work
     if not todo:
         raise ra.RenderError("book has no readable sentences", phase="extract")
 
@@ -431,6 +432,7 @@ def _render(book_id, worker_id, synthesizer, aligner, fallback, extractor, box_p
             idx = r["index"]
             done = _load_done(tmp, idx)
             if done is None:
+                fresh += 1
                 res = synth(r["text"], voice)
                 audio = np.asarray(res.audio, dtype=np.float32)
                 if res.effective_speed != 1.0:
@@ -463,7 +465,8 @@ def _render(book_id, worker_id, synthesizer, aligner, fallback, extractor, box_p
                            "audio": audio, "words": words})
             progress(0.9 * (k + 1) / n, "synthesize")
             if (k + 1) % STATS_EVERY == 0 or k + 1 == n:
-                _stats(book_id, sentences_done=k + 1, sentences_total=n, now=time.time())
+                _stats(book_id, sentences_done=k + 1, sentences_total=n, work_done=fresh,
+                       now=time.time())
 
         checkpoint_job()
         phase_stat("encode")

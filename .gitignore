@@ -74,3 +74,6 @@ backend/voices/
 
 # Flake-hunt logs from the selective test runner
 backend/flake*.log
+
+# generated first-page covers (services/cover.py)
+backend/covers/

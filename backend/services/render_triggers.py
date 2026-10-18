@@ -72,6 +72,8 @@ def retarget_all() -> list[str]:
     it has (or is heading for). Used by the engine switch and at startup.
     Returns the ids touched."""
     touched: list[str] = []
+    # A finished render is never re-made on a switch: it stays readable, and it is
+    # re-rendered only when the user asks (reprocess) or opens a book that is stale.
     with Session(_db.engine) as s:
         books = [(b.id, b.voice, b.ready_generation, b.ready_fingerprint,
                   b.target_fingerprint, b.job_status) for b in s.exec(select(Book))]
@@ -85,11 +87,12 @@ def retarget_all() -> list[str]:
         in_flight = target_fp == fp and status in ("pending", "processing")
         if up_to_date or in_flight:
             continue
-        if gen is not None and ready_fp == fp:
-            # Ready and current, but a stale job lingers: this cancels it.
-            render_jobs.request_render(bid, fp)
-            touched.append(bid)
-            continue
+        if gen is not None:
+            if ready_fp == fp and status in ("pending", "processing"):
+                # Ready and current, but a stale job lingers: this cancels it.
+                render_jobs.request_render(bid, fp)
+                touched.append(bid)
+            continue  # a ready render of another engine stays as it is
         if status == "error" and target_fp == fp:
             continue  # same input already failed; only an explicit reprocess retries
         render_jobs.request_render(bid, fp)

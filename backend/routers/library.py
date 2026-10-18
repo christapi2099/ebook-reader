@@ -120,9 +120,10 @@ def _render_status(book: Book, queue_position: int | None = None) -> dict:
     """Render-state fields shared by the list and detail responses."""
     stats = render_stats.read(book.id) if book.job_status in ("pending", "processing") else {}
     sps, total = stats.get("sps_ewma"), stats.get("sentences_total")
+    done = stats.get("sentences_done") or 0
     eta = None
     if book.job_status == "processing" and sps and total:
-        eta = max(0, round((1.0 - (book.progress or 0.0)) * total / sps))
+        eta = max(0, round((total - done) / sps))
     needs = book.ready_generation is None or (
         book.target_fingerprint is not None
         and book.target_fingerprint != book.ready_fingerprint)

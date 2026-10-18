@@ -10,6 +10,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import db.database as _db  # noqa: E402
+from sqlmodel import Session  # noqa: E402
+from db.models import Book  # noqa: E402
 import storage  # noqa: E402
 from services import engine_manager, piper_engine, render_jobs as rj  # noqa: E402
 from services import render_stats, render_triggers, render_worker as rw, tts_engine  # noqa: E402
@@ -167,7 +169,10 @@ def test_family_switch_retargets_books(env, piper, monkeypatch):
     mk_book(env, "b1", target=fp, job_status="idle", ready_generation=1, ready_fingerprint=fp)
     assert render_triggers.retarget_all() == []
     _set_current(monkeypatch, piper)
-    assert render_triggers.retarget_all() == ["b1"]
+    # A finished render is kept: switching engine does not re-render it.
+    assert render_triggers.retarget_all() == []
+    with Session(env) as s:
+        assert s.get(Book, "b1").job_status == "idle"
 
 
 # --------------------------------------------------------------- 4. stats

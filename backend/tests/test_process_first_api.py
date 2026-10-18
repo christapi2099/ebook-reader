@@ -102,10 +102,10 @@ def test_engine_family_switch_marks_mismatched_books(client, db_engine, seed_boo
     ready_book(seed_book, db_engine)
     assert render_triggers.retarget_all() == []  # nothing stale
     monkeypatch.setattr(render_triggers, "current_engine_family", lambda: "piper")
-    assert render_triggers.retarget_all() == [BID]
+    # The finished render is kept; it is not re-made just because the engine changed.
+    assert render_triggers.retarget_all() == []
     b = get(db_engine)
-    assert b.job_status == "pending" and b.ready_generation == 1
-    assert render_triggers.retarget_all() == []  # idempotent
+    assert b.job_status == "idle" and b.ready_generation == 1
 
 
 def test_engine_endpoint_hooks_retarget(client, db_engine, seed_book, monkeypatch):
@@ -114,7 +114,7 @@ def test_engine_endpoint_hooks_retarget(client, db_engine, seed_book, monkeypatc
     monkeypatch.setattr(engine_manager.manager, "switch", lambda e: None)
     monkeypatch.setattr(render_triggers, "current_engine_family", lambda: "piper")
     assert client.post("/api/system/engine", json={"engine": "cpu"}).status_code == 200
-    assert get(db_engine).job_status == "pending"
+    assert get(db_engine).job_status == "idle"  # the finished render is not re-made
 
 
 def test_startup_sweep_requeues_and_reconciles(db_engine, seed_book, renders_dir, monkeypatch):
@@ -162,7 +162,8 @@ def test_processing_endpoint(client, db_engine, seed_book, renders_dir):
     seed_book(db_engine, book_id="e", ready_generation=None, job_status="processing", progress=0.5)
     render_stats.record("e", sentences_done=0, sentences_total=100, now=0.0)
     render_stats.record("e", sentences_done=10, now=5.0)
-    assert client.get("/library/e").json()["eta_seconds"] == 25
+    # 90 sentences left at 2 per second; the old progress-fraction formula gave 25
+    assert client.get("/library/e").json()["eta_seconds"] == 45
 
 
 # --- the read gate -------------------------------------------------------------
