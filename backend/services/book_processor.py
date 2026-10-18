@@ -12,6 +12,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
 
+from services.aligner import ALIGNER_MODEL_ID
+
 _SERVICES_DIR = Path(__file__).resolve().parent
 
 # Modules whose source defines text processing. The sentence splitter lives in
@@ -78,6 +80,14 @@ def _pymupdf_version() -> str:
     return pymupdf.VersionBind
 
 
+def _aligner_version(name: str) -> str:
+    from importlib import metadata
+    try:
+        return metadata.version(name)
+    except metadata.PackageNotFoundError:
+        return "unknown"
+
+
 def _ffmpeg_version() -> str:
     out = subprocess.run(["ffmpeg", "-version"], capture_output=True,
                          text=True, timeout=10).stdout
@@ -103,9 +113,9 @@ def current_inputs(
     voice_path: Optional[str] = None,
     voices_dir: Optional[str] = None,
     model_revision: str = "unknown",
-    aligner_name: str = "faster-whisper",
-    aligner_version: str = "unknown",
-    aligner_model: str = "small.en",
+    aligner_name: str = "ctc-forced-aligner",
+    aligner_version: Optional[str] = None,
+    aligner_model: str = ALIGNER_MODEL_ID,
     ffmpeg_version: Optional[str] = None,
     **overrides,
 ) -> FingerprintInputs:
@@ -113,6 +123,8 @@ def current_inputs(
     explicit ``voice_path`` is given."""
     if voice_path is None and voices_dir:
         voice_path = str(Path(voices_dir) / f"{voice}.onnx")
+    if aligner_version is None:
+        aligner_version = _aligner_version(aligner_name)
     return FingerprintInputs(
         voice_name=voice,
         voice_file_sha256=_voice_hash(voice, voice_path),

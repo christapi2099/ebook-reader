@@ -40,8 +40,8 @@ dependencies = [
     # requirements.txt, so it is declared here to make `uv sync` self-sufficient.
     "en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
     "modal>=1.5.5",
-    "faster-whisper>=1.2.1",
     "onnx>=1.23.2",
+    "ctc-forced-aligner>=1.0.2",
 ]
 
 [dependency-groups]
@@ -52,7 +52,7 @@ dev = [
     "pytest-cov",
     # Required by starlette/fastapi TestClient, used only by backend/tests/.
     "httpx",
-    "ctc-forced-aligner>=1.0.2",
+    "faster-whisper>=1.2.1",
 ]
 
 [tool.uv]

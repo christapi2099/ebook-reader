@@ -98,3 +98,11 @@ def test_current_inputs_pymupdf_version_flows(monkeypatch):
 @pytest.mark.skip(reason="needs Modal + local Kokoro; run manually after Checkpoint 2")
 def test_local_vs_modal_word_timestamps_agree():
     pass
+
+
+def test_current_inputs_aligner_defaults_are_real():
+    from importlib import metadata
+    i = bp.current_inputs("af_heart", "kokoro", ffmpeg_version="7.0", voices_dir="/nonexistent")
+    assert i.aligner_name == "ctc-forced-aligner"
+    assert i.aligner_version == metadata.version("ctc-forced-aligner") != "unknown"
+    assert "MMS" in i.aligner_model
