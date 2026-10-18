@@ -267,7 +267,7 @@
       sentenceElements.set(s.index, div)
       overlay.appendChild(div)
       if (s.index === currentIndex && highlightEnabled) {
-        div.style.backgroundColor = hexToRgba(highlightColor, 0.6)
+        div.style.backgroundColor = `color-mix(in oklab, ${highlightColor} calc(var(--highlight-alpha) * 100%), transparent)`
       }
       if (s.words) {
         for (let wi = 0; wi < s.words.length; wi++) {
@@ -363,7 +363,7 @@
     }
     const curr = sentenceElements.get(idx)
     if (curr) {
-      curr.style.backgroundColor = highlightEnabled ? hexToRgba(highlightColor, 0.6) : ''
+      curr.style.backgroundColor = highlightEnabled ? `color-mix(in oklab, ${highlightColor} calc(var(--highlight-alpha) * 100%), transparent)` : ''
       curr.setAttribute('data-highlighted', highlightEnabled ? 'true' : 'false')
     }
     prevHighlightIndex = idx
@@ -374,7 +374,7 @@
     const prev = wordElements.get(prevWordKey)
     if (prev) prev.style.backgroundColor = ''
     const curr = wordElements.get(newKey)
-    if (curr) curr.style.backgroundColor = hexToRgba(highlightColor, WORD_HIGHLIGHT_ALPHA)
+    if (curr) curr.style.backgroundColor = `color-mix(in oklab, ${highlightColor} calc(var(--word-alpha) * 100%), transparent)`
     prevWordKey = newKey
   })
 

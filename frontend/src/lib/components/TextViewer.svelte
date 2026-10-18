@@ -93,7 +93,7 @@
       class:animate-pulse={sentence.index === currentIndex && highlightEnabled && buffering && isPlaying}
       data-sentence-index={sentence.index}
       data-highlighted={sentence.index === currentIndex}
-      style={sentence.index === currentIndex && highlightEnabled ? `background-color: ${highlightColor}` : ''}
+      style={sentence.index === currentIndex && highlightEnabled ? `background-color: color-mix(in oklab, ${highlightColor} calc(var(--highlight-alpha) * 100%), transparent)` : ''}
       onclick={() => handleSentenceClick(sentence.index)}
       role="listitem"
       aria-current={sentence.index === currentIndex ? 'true' : 'false'}
