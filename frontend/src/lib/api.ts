@@ -179,7 +179,7 @@ export async function getRenderManifest(bookId: string): Promise<RenderManifest>
 
 /** URL of one immutable tier file; the browser fetches it itself. */
 export function renderAudioUrl(bookId: string, generation: number, tier: string): string {
-  return `${API_BASE}/renders/${encodeURIComponent(bookId)}/${generation}/audio_${encodeURIComponent(tier)}.opus`
+  return `${API_BASE}/api/renders/${encodeURIComponent(bookId)}/${generation}/audio_${encodeURIComponent(tier)}.opus`
 }
 
 /** Queue a fresh render of the book (new generation; the old one keeps serving). */

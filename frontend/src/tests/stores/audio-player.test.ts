@@ -4,7 +4,7 @@ import { get } from 'svelte/store'
 const { socketCtor } = vi.hoisted(() => ({ socketCtor: vi.fn() }))
 vi.mock('$lib/api', () => ({
   TTSSocket: class { constructor() { socketCtor() } },
-  renderAudioUrl: (b: string, g: number, t: string) => `/renders/${b}/${g}/audio_${t}.opus`,
+  renderAudioUrl: (b: string, g: number, t: string) => `/api/renders/${b}/${g}/audio_${t}.opus`,
 }))
 
 import { audioStore } from '$lib/stores/audio'
@@ -52,7 +52,7 @@ function manifest(quality = 'aligned', noWords = false): any {
 }
 
 let rafQueue: (() => void)[] = []
-const url = (t: string) => `/renders/b/1/audio_${t}.opus`
+const url = (t: string) => `/api/renders/b/1/audio_${t}.opus`
 const el = (t: string) => made.find(m => m.src === url(t))!
 const flush = () => vi.advanceTimersByTimeAsync(100)
 

@@ -17,7 +17,7 @@ describe('render api', () => {
   afterEach(() => { globalThis.fetch = original })
 
   it('builds the immutable tier url', () => {
-    expect(renderAudioUrl('b-1', 3, '1.5x')).toBe(`${API_BASE}/renders/b-1/3/audio_1.5x.opus`)
+    expect(renderAudioUrl('b-1', 3, '1.5x')).toBe(`${API_BASE}/api/renders/b-1/3/audio_1.5x.opus`)
   })
 
   it('getSentences pins the generation when given', async () => {
