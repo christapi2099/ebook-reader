@@ -81,6 +81,9 @@
   const BIONIC_CANVAS_OPACITY = 0.3
 
   let containerWidth = $state(0)
+  // Bumped whenever the overlays are rebuilt, so the highlight effects re-apply.
+  let layoutVersion = $state(0)
+  const RESIZE_SETTLE_MS = 150
   let effectiveScale = $state(BASE_SCALE)
   let zoomLevel = $state(1.0)
   let finalScale = $derived(effectiveScale * zoomLevel)
@@ -105,31 +108,38 @@
     }, new Map<number, Sentence[]>())
   )
 
+  // Fit to width once the resize settles: a drag fires many width changes, and each
+  // one that re-renders every page makes the window feel slow.
   $effect(() => {
-    if (pdfDoc && containerWidth > 0) {
-      // Get natural page width from the first page's viewport with BASE_SCALE
-      const firstPageViewport = renderedPages.get(0)?.viewport || pdfDoc.getPage(1).then((p: any) => p.getViewport({ scale: BASE_SCALE }))
-      Promise.resolve(firstPageViewport).then(viewport => {
-        const naturalPageWidth = viewport.width
-        let newScale = BASE_SCALE
-
-        if (containerWidth < naturalPageWidth) {
-          // Scale down to fit narrow screens
-          newScale = containerWidth / naturalPageWidth * BASE_SCALE
-        } else if (containerWidth > MAX_WIDTH_PX) {
-          // Cap width on ultrawide screens
-          newScale = MAX_WIDTH_PX / naturalPageWidth * BASE_SCALE
-        }
-
-        if (Math.abs(newScale - effectiveScale) / effectiveScale > SCALE_CHANGE_THRESHOLD) {
-          effectiveScale = newScale
-          // Re-render all pages when scale changes significantly
-          clearRenderedPages()
-          renderAllPages()
-        }
-      })
-    }
+    if (!pdfDoc || containerWidth <= 0) return
+    const width = containerWidth
+    const timer = setTimeout(() => fitToWidth(width), RESIZE_SETTLE_MS)
+    return () => clearTimeout(timer)
   })
+
+  function fitToWidth(width: number) {
+    // Get natural page width from the first page's viewport with BASE_SCALE
+    const firstPageViewport = renderedPages.get(0)?.viewport || pdfDoc.getPage(1).then((p: any) => p.getViewport({ scale: BASE_SCALE }))
+    Promise.resolve(firstPageViewport).then(viewport => {
+      const naturalPageWidth = viewport.width
+      let newScale = BASE_SCALE
+
+      if (width < naturalPageWidth) {
+        // Scale down to fit narrow screens
+        newScale = width / naturalPageWidth * BASE_SCALE
+      } else if (width > MAX_WIDTH_PX) {
+        // Cap width on ultrawide screens
+        newScale = MAX_WIDTH_PX / naturalPageWidth * BASE_SCALE
+      }
+
+      if (Math.abs(newScale - effectiveScale) / effectiveScale > SCALE_CHANGE_THRESHOLD) {
+        effectiveScale = newScale
+        // Re-render all pages when scale changes significantly
+        clearRenderedPages()
+        renderAllPages()
+      }
+    })
+  }
 
   function clearRenderedPages() {
     pagesEl.innerHTML = ''
@@ -160,6 +170,8 @@
       if (!pdfDoc) break
       await renderPage(i)
     }
+    // The highlight effects re-run against the rebuilt overlays.
+    layoutVersion++
   }
 
   async function renderPage(pageNum: number) {
@@ -356,6 +368,7 @@
   // O(1) style toggle — no DOM rebuild on each currentIndex change
   $effect(() => {
     const idx = currentIndex
+    void layoutVersion
     const prev = sentenceElements.get(prevHighlightIndex)
     if (prev) {
       prev.style.backgroundColor = ''
@@ -371,6 +384,7 @@
 
   $effect(() => {
     const newKey = currentWordIndex >= 0 ? wordKey(currentIndex, currentWordIndex) : ''
+    void layoutVersion
     const prev = wordElements.get(prevWordKey)
     if (prev) prev.style.backgroundColor = ''
     const curr = wordElements.get(newKey)
