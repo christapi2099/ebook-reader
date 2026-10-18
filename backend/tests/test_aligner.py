@@ -75,3 +75,34 @@ def test_real_ctc_model():
     t = np.linspace(0, 1, 24000, dtype=np.float32)
     r = al.align_sentence(np.sin(2 * np.pi * 200 * t), 24000, "hello world")
     assert len(r) == 2
+
+
+class _Session:
+    """Stands in for the ONNX session: returns ``frames`` frames of 32 logits."""
+
+    def __init__(self, frames):
+        self.frames = frames
+
+    def run(self, names, feed):
+        return [np.zeros((1, self.frames, 32), np.float32)]
+
+
+def test_ctc_refuses_audio_too_short_for_the_words_instead_of_aborting():
+    """The library aborts the process (C++ terminate) when targets exceed frames,
+    so the guard must raise before it is called."""
+    a = al.CtcOnnxAligner()
+    a._sess = _Session(frames=5)  # 100 ms of frames for a sentence of many words
+    a._tok = None
+    with pytest.raises(ValueError, match="too short"):
+        a.align(np.zeros(1600, np.float32), 16000, "a long sentence with many words here".split())
+
+
+def test_too_short_audio_falls_back_to_syllable_estimate():
+    class Refuses:
+        def align(self, audio, sr, words):
+            raise ValueError("audio too short for CTC")
+
+    words = "a long sentence with many words here".split()
+    out = al.align_sentence(AUD, 24000, " ".join(words), aligner=Refuses())
+    assert [w.word for w in out] == words
+    assert {w.timing_source for w in out} == {"estimated"}

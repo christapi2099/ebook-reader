@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Protocol, Sequence
 
+import logging
+
 import numpy as np
 
 from services.word_boxes import match_words
@@ -17,6 +19,8 @@ CTC_SCORE_GATE = 0.50
 MIN_WORD_MS = 20           # one 20 ms CTC frame: minimal positive span
 ALIGNER_MODEL_ID = "MMS-300m-1130 forced aligner (ONNX, deskpai/ctc_forced_aligner)"
 _CTC_RATE = 16000
+logger = logging.getLogger(__name__)
+
 _STRIDE_MS = 20.0
 
 
@@ -107,6 +111,12 @@ class CtcOnnxAligner:
         em = np.concatenate([lp, np.zeros((lp.shape[0], 1))], 1).astype(np.float32)
         norm = [re.sub(r"[^a-z']", "", c.text_normalize(w, "eng").lower()) for w in words]
         toks = [" ".join(ch for ch in n if ch in c.VOCAB_DICT) for n in norm]
+        # CTC needs at least one frame per target. The library's native check aborts
+        # the whole process instead of raising, so refuse here and let the caller
+        # fall back to syllable timing. Each word adds a <star> plus its characters.
+        targets = sum(len(t.split()) for t in toks) + 2 * len(words)
+        if lp.shape[0] < targets:
+            raise ValueError(f"audio too short for CTC: {lp.shape[0]} frames, {targets} targets")
         starred, text_starred = [], []
         for w, t in zip(words, toks):
             starred += ["<star>", t]
@@ -142,7 +152,11 @@ def align_sentence(audio: np.ndarray, sr: int, text: str, *, native_words=None,
     if native_words and len(native_words) == len(words):
         return _build(words, [(ms(s), ms(e)) for s, e in native_words], "piper")
     duration_ms = int(round(len(audio) / sr * 1000))
-    res = (aligner or default_aligner()).align(audio, sr, words)
+    try:
+        res = (aligner or default_aligner()).align(audio, sr, words)
+    except ValueError:  # too little audio for the words: estimate instead
+        logger.warning("[align] CTC skipped for %r", text[:60], exc_info=True)
+        return distribute_by_syllables(duration_ms, words)
     if len(res) == len(words):
         score = sum(r[2] for r in res) / len(res)
         if score >= CTC_SCORE_GATE:
