@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { settingsStore, BIONIC_MIN_WORD_LENGTH_RANGE, type SettingsState } from '$lib/stores/settings'
+import { settingsStore, reconcileVoiceForEngine, BIONIC_MIN_WORD_LENGTH_RANGE, type SettingsState } from '$lib/stores/settings'
 import { DEFAULT_BIONIC_OPTIONS } from '$lib/utils/bionic-reading'
 import { get } from 'svelte/store'
 
@@ -241,5 +241,27 @@ describe('settingsStore', () => {
       settingsStore.reloadFromStorage()
       expect(get(settingsStore).bionicMinWordLength).toBe(DEFAULTS.bionicMinWordLength)
     })
+  })
+})
+
+describe('reconcileVoiceForEngine', () => {
+  const piperList = [{ id: 'af_heart' }, { id: 'piper:en_US-joe-medium' }, { id: 'piper:en_GB-alba-low' }]
+  const kokoroList = [{ id: 'af_heart' }, { id: 'af_bella' }]
+
+  it('moves a Kokoro voice to the first Piper voice when Piper is live', () => {
+    expect(reconcileVoiceForEngine('af_heart', piperList)).toBe('piper:en_US-joe-medium')
+    expect(reconcileVoiceForEngine('bm_george', piperList)).toBe('piper:en_US-joe-medium')
+  })
+
+  it('leaves a Kokoro voice alone when Kokoro is live', () => {
+    expect(reconcileVoiceForEngine('af_bella', kokoroList)).toBe('af_bella')
+  })
+
+  it('falls back to the Kokoro default for a Piper voice when Piper is not live', () => {
+    expect(reconcileVoiceForEngine('piper:en_US-joe-medium', kokoroList)).toBe('af_heart')
+  })
+
+  it('keeps a Piper voice while Piper is live', () => {
+    expect(reconcileVoiceForEngine('piper:en_GB-alba-low', piperList)).toBe('piper:en_GB-alba-low')
   })
 })

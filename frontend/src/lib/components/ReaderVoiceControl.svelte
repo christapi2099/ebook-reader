@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { getVoices, setBookVoice, type Voice } from '$lib/api'
+  import { reconcileVoiceForEngine, settingsStore } from '$lib/stores/settings'
+  import { get } from 'svelte/store'
   import { toDetailMessage } from '$lib/utils/errors'
 
   /**
@@ -16,9 +18,30 @@
 
   let voices = $state<Voice[]>([])
 
-  onMount(async () => {
-    try { voices = await getVoices() } catch { /* the control just stays empty */ }
-  })
+  /**
+   * The list follows the live engine, which can change after this page has
+   * mounted (Piper starts up after the page loads). Reload on mount and whenever
+   * the window regains focus, then reconcile the stored voice setting with the
+   * list that came back.
+   */
+  async function loadVoices() {
+    try {
+      const list = await getVoices()
+      voices = list
+      if (list.length > 0) {
+        const stored = get(settingsStore).voice
+        const next = reconcileVoiceForEngine(stored, list)
+        if (next !== stored) settingsStore.setVoice(next)
+      }
+    } catch { /* the control just keeps what it had */ }
+  }
+
+  onMount(loadVoices)
+
+  /** Piper ids are opaque, so show the quality next to the name. */
+  function labelFor(v: Voice): string {
+    return v.id.startsWith('piper:') && v.quality !== 'unknown' ? `${v.name} (${v.quality})` : v.name
+  }
 
   async function handleChange(event: Event) {
     const select = event.currentTarget as HTMLSelectElement
@@ -41,6 +64,8 @@
   }
 </script>
 
+<svelte:window onfocus={loadVoices} />
+
 {#if voices.length > 0}
   <label class="flex items-center gap-1 text-sm text-fg-muted">
     <span class="sr-only">Book voice</span>
@@ -50,7 +75,7 @@
       onchange={handleChange}
     >
       {#each voices as v (v.id)}
-        <option value={v.id}>{v.name}</option>
+        <option value={v.id}>{labelFor(v)}</option>
       {/each}
     </select>
   </label>

@@ -52,6 +52,23 @@ const DEFAULTS: SettingsState = {
   theme: 'system',
 }
 
+const KOKORO_VOICE_ID = /^(af|am|bf|bm)_/
+const DEFAULT_KOKORO_VOICE = 'af_heart'
+
+/**
+ * The voice setting is stored apart from the engine, so it can name a voice the
+ * live engine cannot speak. Map it onto the live engine's list: a Kokoro id while
+ * Piper is live becomes the first Piper voice, and a Piper id while Piper is not
+ * live falls back to the Kokoro default. Anything else is left untouched, so a
+ * Kokoro user's stored voice never changes.
+ */
+export function reconcileVoiceForEngine(voice: string, voices: { id: string }[]): string {
+  const piper = voices.find(v => v.id.startsWith('piper:'))
+  if (KOKORO_VOICE_ID.test(voice) && piper) return piper.id
+  if (voice.startsWith('piper:') && !piper) return DEFAULT_KOKORO_VOICE
+  return voice
+}
+
 function isValidColor(c: string): boolean {
   return VALID_COLORS.has(c) || /^#[0-9a-fA-F]{6}$/.test(c)
 }
