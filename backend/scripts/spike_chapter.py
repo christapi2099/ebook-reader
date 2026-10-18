@@ -534,6 +534,23 @@ def cmd_compare(a) -> None:
            "native_vs_whisper": st(diffs_nf) if diffs_nf else None,
            "native_vs_ctc": st(diffs_nc) if diffs_nc else None,
            "native_word_count_match_rate": float(np.mean(native_ok)) if native_ok else None}
+    # CTC structural gate, corrected: the library gives single-frame (one-letter) words a zero-length span, so
+    # only words of >=2 letters must have non-zero duration; order must be monotonic.
+    ok = []
+    for w in ct:
+        mono = all(w[k]["s"] <= w[k + 1]["s"] + 1e-6 for k in range(len(w) - 1))
+        ok.append(bool(w) and mono and all((x["e"] - x["s"]) > 0 for x in w if len(norm_words(x["w"]) and norm_words(x["w"])[0]) >= 2))
+    out["ctc_structural_gate_pass_rate_corrected"] = float(np.mean(ok))
+    out["ctc_zero_len_words_total"] = int(sum(1 for w in ct for x in w if x["e"] - x["s"] <= 0))
+    out["ctc_words_total"] = int(sum(len(w) for w in ct))
+    if "piper_native" in meta:
+        pn = meta["piper_native"]
+        out["piper_native"] = {
+            "sum_equals_audio_exact_rate": float(np.mean([p["aligned_samples"] == p["audio_samples"] for p in pn])),
+            "all_chunks_aligned_rate": float(np.mean([p["all_chunks_aligned"] for p in pn])),
+            "max_abs_sample_diff": int(max(abs(p["aligned_samples"] - p["audio_samples"]) for p in pn)),
+            "word_count_match_rate": out.get("native_word_count_match_rate"),
+        }
     (d / "compare.json").write_text(json.dumps(out, indent=1))
     print(json.dumps(out, indent=1))
 
