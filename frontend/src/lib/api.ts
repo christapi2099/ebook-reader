@@ -552,6 +552,16 @@ export interface EngineOption {
   available: boolean
   /** Why it is unavailable. `null` when it is available. */
   reason: string | null
+  /** True when only the model download is missing (`installKokoroOnnx` fetches it). */
+  installable?: boolean
+}
+
+export interface ModelInstallState {
+  status: 'idle' | 'running' | 'done' | 'error'
+  file: string | null
+  downloaded: number
+  total: number
+  error: string | null
 }
 
 export interface EngineState {
@@ -622,6 +632,70 @@ export async function setEngine(engineId: string): Promise<EngineState> {
   return fetchApi<EngineState>('/api/system/engine', {
     method: 'POST',
     body: JSON.stringify({ engine: engineId }),
+  })
+}
+
+/** Start downloading the Kokoro ONNX model (~325 MB) on the server; poll `getKokoroOnnxInstall`. */
+export async function installKokoroOnnx(): Promise<ModelInstallState> {
+  return fetchApi<ModelInstallState>('/api/system/engine/kokoro-onnx/install', { method: 'POST' })
+}
+
+/** Progress of the Kokoro ONNX model download. */
+export async function getKokoroOnnxInstall(): Promise<ModelInstallState> {
+  return fetchApi<ModelInstallState>('/api/system/engine/kokoro-onnx/install')
+}
+
+/** One detected GPU. `usable` is `null` while the backend is still validating. */
+export interface GpuDevice {
+  id: string
+  vendor: 'nvidia' | 'amd' | 'intel'
+  /** "NVIDIA" | "AMD" | "Intel" */
+  vendor_label: string
+  name: string
+  /** The torch build kind that drives it: "cuda" | "rocm" | "xpu". */
+  backend: 'cuda' | 'rocm' | 'xpu'
+  usable: boolean | null
+  /** Why it cannot be used (or "validating"). `null` when usable. */
+  reason: string | null
+  vram_mb: number | null
+}
+
+export type GpuInventoryState = 'ready' | 'validating' | 'timed_out' | 'error'
+
+export interface GpuInventory {
+  devices: GpuDevice[]
+  /** The persisted choice; `null` means the legacy default. */
+  selected: string | null
+  default: string | null
+  /** True only when more than one device is usable. */
+  needs_choice: boolean
+  torch_build: 'cuda' | 'rocm' | 'xpu' | 'cpu' | null
+  state: GpuInventoryState
+}
+
+/** `selectGpu` reply: the new state plus the restart notice. */
+export interface GpuSelection extends GpuInventory {
+  restart_required: boolean
+}
+
+/** Detected GPUs. Poll while `state === "validating"`. Never blocks on torch. */
+export async function getGpus(): Promise<GpuInventory> {
+  return fetchApi<GpuInventory>('/api/system/gpus')
+}
+
+/** Drop the cached inventory and re-probe in the background (reply is `validating`). */
+export async function refreshGpus(): Promise<GpuInventory> {
+  return fetchApi<GpuInventory>('/api/system/gpus/refresh', { method: 'POST' })
+}
+
+/**
+ * Save which GPU the GPU engine uses (`null` = legacy default). Takes effect on
+ * the next backend start. Rejects with 400 (unknown id) or 409 (not usable).
+ */
+export async function selectGpu(deviceId: string | null): Promise<GpuSelection> {
+  return fetchApi<GpuSelection>('/api/system/gpus', {
+    method: 'PUT',
+    body: JSON.stringify({ device_id: deviceId }),
   })
 }
 

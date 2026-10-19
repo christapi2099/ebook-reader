@@ -513,6 +513,20 @@ class TTSEngine:
         )
         return duration_ms / 1000.0
 
+    @property
+    def parallel_safe(self) -> bool:
+        """True when the underlying engine can be cloned per render thread (Piper).
+        Torch Kokoro, the Modal client and anything unlabelled stay serial."""
+        return bool(getattr(self.kokoro, "parallel_safe", False)) and callable(
+            getattr(self.kokoro, "clone_for_worker", None))
+
+    def clone_for_render_worker(self, threads: int | None = None) -> Any:
+        """An independent engine for ONE render thread; its ``synthesize_for_render``
+        runs off ``_synthesis_pool`` so live playback is unaffected."""
+        if not self.parallel_safe:
+            raise RuntimeError("engine is not parallel-safe")
+        return self.kokoro.clone_for_worker(threads)
+
     def synthesize_for_render(
         self, text: str, voice: str, speed: float = 1.0
     ) -> tuple[np.ndarray | None, float, list | None, list | None]:

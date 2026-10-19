@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte'
+  import { onDestroy, onMount } from 'svelte'
   import { get } from 'svelte/store'
   import {
     settingsStore,
@@ -9,12 +9,16 @@
   import {
     getCapabilities,
     getEngineState,
+    getKokoroOnnxInstall,
     getLibrary,
+    installKokoroOnnx,
     getVoices,
     setEngine,
     type EngineState,
+    type ModelInstallState,
     type SystemCapabilities,
   } from '$lib/api'
+  import GpuDevices from '$lib/components/GpuDevices.svelte'
   import { toDetailMessage } from '$lib/utils/errors'
   import Dialog from '$lib/ui/Dialog.svelte'
   import Switch from '$lib/ui/Switch.svelte'
@@ -107,6 +111,41 @@
       engineLoading = false
     }
   }
+
+  /** Model download for an installable engine (Kokoro ONNX): null until started. */
+  let installState = $state<ModelInstallState | null>(null)
+  let installTimer: ReturnType<typeof setTimeout> | undefined
+
+  function installPercent(st: ModelInstallState | null): string {
+    if (!st || st.total <= 0) return ''
+    return ` ${Math.round((st.downloaded / st.total) * 100)}%`
+  }
+
+  async function pollInstall() {
+    try {
+      installState = await getKokoroOnnxInstall()
+    } catch (e) {
+      installState = { status: 'error', file: null, downloaded: 0, total: 0, error: toDetailMessage(e) }
+    }
+    if (installState.status === 'running') {
+      installTimer = setTimeout(pollInstall, 1500)
+    } else if (installState.status === 'done') {
+      await loadEngineInfo() // the probe now says "available"
+    }
+  }
+
+  async function installEngine() {
+    if (installState?.status === 'running') return
+    try {
+      installState = await installKokoroOnnx()
+    } catch (e) {
+      installState = { status: 'error', file: null, downloaded: 0, total: 0, error: toDetailMessage(e) }
+      return
+    }
+    await pollInstall()
+  }
+
+  onDestroy(() => clearTimeout(installTimer))
 
   async function chooseEngine(engineId: string) {
     if (switchingTo || engineState?.active === engineId) return
@@ -395,12 +434,29 @@
                       </span>
                     {:else}
                       <span class="block text-xs text-danger">{option.reason ?? 'Unavailable'}</span>
+                      {#if option.installable}
+                        <button
+                          type="button"
+                          class="mt-1 min-h-11 rounded-md border border-border px-3 text-xs text-fg hover:bg-accent-soft disabled:opacity-60"
+                          disabled={installState?.status === 'running'}
+                          onclick={installEngine}
+                        >
+                          {installState?.status === 'running'
+                            ? `Downloading…${installPercent(installState)}`
+                            : 'Install (about 325 MB)'}
+                        </button>
+                        {#if installState?.status === 'error'}
+                          <span class="block text-xs text-danger" role="alert">{installState.error}</span>
+                        {/if}
+                      {/if}
                     {/if}
                   </span>
                 </label>
               {/each}
             </div>
           </fieldset>
+
+          <GpuDevices />
 
           {#if switchingTo}
             <p class="mt-2 flex items-center gap-2 text-xs text-fg-muted" role="status">

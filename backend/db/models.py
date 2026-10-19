@@ -153,3 +153,6 @@ class UserSettings(SQLModel, table=True):
     # The synthesis engine the user last chose in Settings ("cpu" | "gpu" |
     # "modal"). NULL means "never chosen", in which case KOKORO_BACKEND decides.
     tts_engine: str | None = None
+    # Stable id (``pci:<bus id>``) of the GPU the user picked. NULL keeps the
+    # legacy behaviour: torch device "cuda".
+    gpu_device: str | None = None

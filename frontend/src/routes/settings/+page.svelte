@@ -16,6 +16,7 @@
     type EngineState,
     type SystemCapabilities,
   } from '$lib/api'
+  import GpuDevices from '$lib/components/GpuDevices.svelte'
   import { toDetailMessage } from '$lib/utils/errors'
   import Switch from '$lib/ui/Switch.svelte'
 
@@ -297,6 +298,8 @@
                 {/each}
               </div>
             </fieldset>
+
+            <GpuDevices />
 
             {#if switchingTo}
               <p class="mt-3 flex items-center gap-2 text-sm text-fg-muted" role="status">
