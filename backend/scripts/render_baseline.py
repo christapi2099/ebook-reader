@@ -104,7 +104,13 @@ TOL = {
 # book stayed within 1%. Kokoro CPU lengths were identical. The per-sentence bound is therefore
 # loose for Piper; the word-count, order and containment checks are what protect highlighting.
 # Word position inside a sentence moved 0.063 on unchanged Piper code (Kokoro: 0.003).
-ENGINE_TOL = {"piper": {"segment_frac": 0.25, "total_frac": 0.02, "word_pos_frac": 0.12}}
+# Even so, one captured Piper sample cannot gate word position reliably (it flaked in ~1 of 3 runs on
+# unchanged code, bimodally: one word at 0.67 vs 0.54), so for live Piper it is ADVISORY: reported as
+# a note, never a failure (per-sentence duration too: a 2-word sentence moved 27%). Word text, counts,
+# ordering, containment and the whole-book duration stay hard gates, and
+# `piper-replay` gates the real aligner path exactly.
+ENGINE_TOL = {"piper": {"segment_frac": 0.25, "total_frac": 0.02, "word_pos_frac": 0.12,
+                        "word_pos_advisory": True, "segment_advisory": True}}
 
 
 def tol_for(engine: str) -> dict:
@@ -426,13 +432,22 @@ def _check_aligned(golden: dict, fresh: dict, rep: Report, *, exact: bool, tol: 
             if g != f:
                 rep.fail(f"word timings/sources differ for {text[:40]!r}")
             continue
-        gd, fd = (g[-1][2] or 1), (f[-1][2] or 1)
+        # Position within the SPOKEN span (first word start -> last word end), so a different
+        # amount of leading silence (VITS varies it run to run) cannot register as words moving.
+        g0, f0 = g[0][1], f[0][1]
+        gd, fd = max(g[-1][2] - g0, 1), max(f[-1][2] - f0, 1)
+        if len(g) < 2:
+            continue  # a single word has no internal position to compare
         for i, (a, b) in enumerate(zip(g, f)):
-            shift = abs(a[1] / gd - b[1] / fd)
-            shifts.append(shift)
-            if shift > tol["word_pos_frac"]:
-                rep.fail(f"{text[:40]!r} word {i} {a[0]!r}: relative start "
-                         f"{a[1] / gd:.2f} -> {b[1] / fd:.2f}")
+            ra, rb_ = (a[1] - g0) / gd, (b[1] - f0) / fd
+            shifts.append(abs(ra - rb_))
+            if abs(ra - rb_) > tol["word_pos_frac"]:
+                msg = (f"{text[:40]!r} word {i} {a[0]!r}: relative start "
+                       f"{ra:.2f} -> {rb_:.2f}")
+                if tol.get("word_pos_advisory"):
+                    rep.notes.append("advisory: " + msg)
+                else:
+                    rep.fail(msg)
     if shifts:
         rep.notes.append(f"worst relative word-position shift {max(shifts):.3f} "
                          f"(limit {tol['word_pos_frac']})")
