@@ -15,6 +15,7 @@ from services.engine_manager import (
     GPU,
     MODAL,
     PIPER,
+    KOKORO_ONNX,
     EngineBuildError,
     EngineManager,
     EngineUnavailable,
@@ -227,7 +228,7 @@ class TestOptions:
         assert state["selected"] == MODAL
         assert state["active"] == CPU
         assert state["switching"] is False
-        assert {o["id"] for o in state["options"]} == {CPU, GPU, MODAL, PIPER}
+        assert {o["id"] for o in state["options"]} == {CPU, GPU, MODAL, PIPER, KOKORO_ONNX}
 
     def test_piper_switch_builds_piper_and_reports_why_when_unavailable(self, builders):
         manager = make_manager(builders, piper=(True, None))
@@ -476,7 +477,7 @@ class TestEngineEndpoints:
     def test_get_engine_lists_the_three_engines(self, engine_client):
         test_client, _ = engine_client
         body = test_client.get("/api/system/engine").json()
-        assert [o["id"] for o in body["options"]] == [CPU, GPU, MODAL, PIPER]
+        assert [o["id"] for o in body["options"]] == [CPU, GPU, MODAL, PIPER, KOKORO_ONNX]
         assert body["active"] is None
 
     def test_post_saves_the_choice_and_asks_for_a_restart(self, engine_client, monkeypatch):

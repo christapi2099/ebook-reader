@@ -552,6 +552,16 @@ export interface EngineOption {
   available: boolean
   /** Why it is unavailable. `null` when it is available. */
   reason: string | null
+  /** True when only the model download is missing (`installKokoroOnnx` fetches it). */
+  installable?: boolean
+}
+
+export interface ModelInstallState {
+  status: 'idle' | 'running' | 'done' | 'error'
+  file: string | null
+  downloaded: number
+  total: number
+  error: string | null
 }
 
 export interface EngineState {
@@ -623,6 +633,16 @@ export async function setEngine(engineId: string): Promise<EngineState> {
     method: 'POST',
     body: JSON.stringify({ engine: engineId }),
   })
+}
+
+/** Start downloading the Kokoro ONNX model (~325 MB) on the server; poll `getKokoroOnnxInstall`. */
+export async function installKokoroOnnx(): Promise<ModelInstallState> {
+  return fetchApi<ModelInstallState>('/api/system/engine/kokoro-onnx/install', { method: 'POST' })
+}
+
+/** Progress of the Kokoro ONNX model download. */
+export async function getKokoroOnnxInstall(): Promise<ModelInstallState> {
+  return fetchApi<ModelInstallState>('/api/system/engine/kokoro-onnx/install')
 }
 
 /** One detected GPU. `usable` is `null` while the backend is still validating. */

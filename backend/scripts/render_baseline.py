@@ -83,10 +83,11 @@ FILTERED = {"Page 14", "Copyright 2024 All rights reserved."}
 CHAPTER_SIZE = 8  # sentences per chapter, so chapter breaks (extra gap) are exercised
 
 VOICES = {"piper": "en_US-lessac-medium", "kokoro-cpu": "af_heart", "fake": "af_heart",
-          "piper-replay": "en_US-lessac-medium", "kokoro-cpu-replay": "af_heart"}
+          "piper-replay": "en_US-lessac-medium", "kokoro-cpu-replay": "af_heart",
+          "kokoro-onnx": "af_heart", "kokoro-onnx-replay": "af_heart"}
 # ``*-replay`` engines feed the PCM recorded at capture time back through the REAL aligner and
 # pipeline, so everything downstream of synthesis is deterministic and compared exactly.
-EXACT_ENGINES = {"fake", "piper-replay", "kokoro-cpu-replay"}
+EXACT_ENGINES = {"fake", "piper-replay", "kokoro-cpu-replay", "kokoro-onnx-replay"}
 PCM_ROOT = Path(__file__).resolve().parent.parent / ".baseline" / "pcm"
 
 # Tolerances for compare. CPU engines on one machine are expected to be exact; the
@@ -110,7 +111,11 @@ TOL = {
 # ordering, containment and the whole-book duration stay hard gates, and
 # `piper-replay` gates the real aligner path exactly.
 ENGINE_TOL = {"piper": {"segment_frac": 0.25, "total_frac": 0.02, "word_pos_frac": 0.12,
-                        "word_pos_advisory": True, "segment_advisory": True}}
+                        "word_pos_advisory": True, "segment_advisory": True},
+              # Kokoro ONNX fp32 is deterministic on one machine/thread count, but thread
+              # count changes float summation order, so live runs get a small statistical
+              # tolerance; `kokoro-onnx-replay` gates the aligner path exactly.
+              "kokoro-onnx": {"segment_frac": 0.05, "total_frac": 0.02, "word_pos_frac": 0.08}}
 
 
 def tol_for(engine: str) -> dict:
@@ -223,6 +228,8 @@ def build_engine(name: str) -> Any:
         built, err = engine_manager.build_piper()
     elif name == "kokoro-cpu":
         built, err = engine_manager.build_local("cpu")
+    elif name == "kokoro-onnx":
+        built, err = engine_manager.build_kokoro_onnx()
     else:
         raise SystemExit(f"unknown engine {name!r}; expected one of {', '.join(VOICES)}")
     if built is None:
@@ -335,7 +342,7 @@ def _meta() -> dict:
                               cwd=Path(__file__).parent).stdout.strip() or None
     except OSError:
         head = None
-    return {"git_head": head, "torch": ver("torch"), "piper_tts": ver("piper-tts"),
+    return {"git_head": head, "torch": ver("torch"), "piper_tts": ver("piper-tts"), "onnxruntime": ver("onnxruntime"),
             "onnxruntime": ver("onnxruntime"), "kokoro": ver("kokoro")}
 
 

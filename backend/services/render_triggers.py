@@ -32,9 +32,22 @@ def _active_piper():
     return cur if piper_engine.is_piper(cur) else None
 
 
+def _active_kokoro_onnx():
+    """The live KokoroOnnxEngine, or None."""
+    from services import engine_manager, kokoro_onnx_engine
+    cur = engine_manager.manager.current()
+    return cur if isinstance(cur, kokoro_onnx_engine.KokoroOnnxEngine) else None
+
+
 def current_engine_family() -> str:
-    """'piper' when the live engine is Piper; cpu, gpu and modal share 'kokoro'."""
-    return "piper" if _active_piper() is not None else ENGINE_FAMILY
+    """'piper' / 'kokoro-onnx' when that engine is live; cpu, gpu and modal share 'kokoro'.
+    The ONNX export is a different numerical pipeline from torch Kokoro, so it is its own
+    family (a switch re-renders); the compute device it runs on is not part of it."""
+    if _active_piper() is not None:
+        return "piper"
+    if _active_kokoro_onnx() is not None:
+        return "kokoro-onnx"
+    return ENGINE_FAMILY
 
 
 @functools.lru_cache(maxsize=1)
@@ -57,6 +70,14 @@ def target_fingerprint_for(voice: Optional[str]) -> str:
             bare = eng.default_voice()  # same fallback the synthesis path takes
         voice = f"piper:{bare}"
         extra["voice_path"] = str(eng._dir / f"{bare}.onnx")
+    if family == "kokoro-onnx":
+        eng = _active_kokoro_onnx()
+        if eng is not None:
+            bare = (voice or "").strip()
+            if bare not in eng.available_voices():
+                bare = eng.default_voice()  # same fallback the synthesis path takes
+            voice = bare
+            extra["model_revision"] = "kokoro-onnx-v1.0-fp32"
     inputs = current_inputs(voice or DEFAULT_VOICE, family,
                             ffmpeg_version=_ffmpeg_version(), **extra)
     return fingerprint(inputs)

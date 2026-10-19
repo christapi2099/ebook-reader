@@ -20,6 +20,7 @@ from starlette.concurrency import run_in_threadpool
 
 import logging
 
+import storage
 from services import engine_manager, gpu_inventory, kokoro_runtime, render_pause, render_triggers
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,56 @@ async def set_engine(body: SwitchRequest) -> dict[str, Any]:
     except engine_manager.EngineUnavailable as exc:
         raise HTTPException(status_code=409, detail=exc.reason)
     return engine_manager.manager.state()
+
+
+# --------------------------------------------------------------------------
+# Kokoro ONNX model install (like Piper voices, the files are fetched on demand)
+
+_install_lock = threading.Lock()
+_install_state: dict[str, Any] = {"status": "idle", "file": None, "downloaded": 0,
+                                  "total": 0, "error": None}
+
+
+def _run_kokoro_onnx_install() -> None:
+    from services import kokoro_onnx_engine
+
+    def progress(name: str, done: int, total: int) -> None:
+        _install_state.update(file=name, downloaded=done, total=total)
+
+    try:
+        kokoro_onnx_engine.install(storage.KOKORO_ONNX_DIR, progress=progress)
+        _install_state.update(status="done", error=None)
+    except Exception as exc:  # noqa: BLE001 - reported to the UI
+        logger.exception("[kokoro-onnx] model download failed")
+        _install_state.update(status="error", error=f"{type(exc).__name__}: {exc}")
+
+
+@router.get("/engine/kokoro-onnx/install")
+def get_kokoro_onnx_install() -> dict[str, Any]:
+    """Progress of the model download (``idle|running|done|error``)."""
+    from services import kokoro_onnx_engine
+
+    state = dict(_install_state)
+    if state["status"] == "idle" and kokoro_onnx_engine.is_installed(storage.KOKORO_ONNX_DIR):
+        state["status"] = "done"
+    return state
+
+
+@router.post("/engine/kokoro-onnx/install", status_code=202)
+def install_kokoro_onnx() -> dict[str, Any]:
+    """Start downloading the ~325 MB Kokoro ONNX model in the background (idempotent)."""
+    from services import kokoro_onnx_engine
+
+    with _install_lock:
+        if _install_state["status"] == "running":
+            return dict(_install_state)
+        if kokoro_onnx_engine.is_installed(storage.KOKORO_ONNX_DIR):
+            _install_state.update(status="done", error=None)
+            return dict(_install_state)
+        _install_state.update(status="running", file=None, downloaded=0, total=0, error=None)
+    threading.Thread(target=_run_kokoro_onnx_install, name="kokoro-onnx-install",
+                     daemon=True).start()
+    return dict(_install_state)
 
 
 # --------------------------------------------------------------------------
