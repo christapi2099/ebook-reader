@@ -71,12 +71,14 @@ export interface Folder {
   book_count: number
 }
 
-// In dev (`npm run dev`), the SvelteKit dev server has no proxy to the
+// In dev (`pnpm run dev`), the SvelteKit dev server has no proxy to the
 // backend, so we hit it directly on its dev port. In a production build
-// (the Docker image), nginx proxies API/WS routes on the same origin the
-// page was served from — a hardcoded absolute URL here would bypass that
-// proxy and silently try to reach a port nothing publishes.
-export const API_BASE = import.meta.env.PROD ? '/api' : 'http://localhost:8000'
+// (the Docker image, or `pnpm run preview`), the page's own origin proxies the
+// backend routes (nginx.conf / vite.config.ts `preview.proxy`), so requests are
+// same-origin and keep the backend's own paths. Several of those already start
+// with `/api/` (`/api/system`, `/api/renders`), so adding a prefix here would
+// double it.
+export const API_BASE = import.meta.env.PROD ? '' : 'http://localhost:8000'
 
 /**
  * Turn a failed response into an `ApiError` carrying the server's own
@@ -647,7 +649,8 @@ export class TTSSocket {
 
   connect(): void {
     if (this.ws?.readyState === WebSocket.OPEN) return
-    const wsUrl = `${API_BASE.replace(/^http/, 'ws')}/ws/tts/${this.bookId}`
+    const wsBase = API_BASE || location.origin
+    const wsUrl = `${wsBase.replace(/^http/, 'ws')}/ws/tts/${this.bookId}`
     this.ws = new WebSocket(wsUrl)
     this.ws.binaryType = 'arraybuffer'
     this.ws.onopen = () => {
