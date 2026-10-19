@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { getCapabilities, getEngineState, setEngine, TTSSocket } from '$lib/api'
+import { getCapabilities, getEngineState, getGpus, refreshGpus, selectGpu, setEngine, TTSSocket } from '$lib/api'
 
 const ENGINE_STATE = {
   selected: 'cpu',
@@ -66,6 +66,53 @@ describe('system capabilities + engine API', () => {
     })
 
     await expect(setEngine('gpu')).rejects.toThrow('No CUDA GPU detected')
+  })
+})
+
+describe('GPU inventory API', () => {
+  const INVENTORY = {
+    devices: [], selected: null, default: null, needs_choice: false, torch_build: 'cpu', state: 'ready',
+  }
+
+  beforeEach(() => {
+    global.fetch = vi.fn()
+    ;(global.fetch as any).mockResolvedValue({ ok: true, json: async () => INVENTORY })
+  })
+
+  it('reads the inventory', async () => {
+    expect(await getGpus()).toEqual(INVENTORY)
+    expect(global.fetch).toHaveBeenCalledWith(
+      'http://localhost:8000/api/system/gpus',
+      { headers: { 'Content-Type': 'application/json' } },
+    )
+  })
+
+  it('asks for a re-scan with POST', async () => {
+    await refreshGpus()
+    expect(global.fetch).toHaveBeenCalledWith(
+      'http://localhost:8000/api/system/gpus/refresh',
+      { method: 'POST', headers: { 'Content-Type': 'application/json' } },
+    )
+  })
+
+  it('selects a device, or null to clear', async () => {
+    await selectGpu('pci:0000:03:00.0')
+    await selectGpu(null)
+    const calls = (global.fetch as any).mock.calls
+    expect(calls[0]).toEqual(['http://localhost:8000/api/system/gpus', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ device_id: 'pci:0000:03:00.0' }),
+    }])
+    expect(JSON.parse(calls[1][1].body)).toEqual({ device_id: null })
+  })
+
+  it('surfaces the server reason when a device is refused', async () => {
+    ;(global.fetch as any).mockResolvedValueOnce({
+      ok: false, status: 409, statusText: 'Conflict',
+      json: async () => ({ detail: 'needs the ROCm torch environment' }),
+    })
+    await expect(selectGpu('pci:x')).rejects.toThrow('needs the ROCm torch environment')
   })
 })
 
