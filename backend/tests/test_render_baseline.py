@@ -230,3 +230,16 @@ def test_resumed_render_equals_an_uninterrupted_one(tmp_path, monkeypatch):
     resumed["aligned"] = clean["aligned"]  # the spy only saw the post-resume sentences
     rep = rb.diff_snapshots(clean, resumed, exact=True)
     assert rep.ok, rep.failures
+
+
+def test_kokoro_onnx_engines_are_registered_with_tolerances():
+    assert rb.VOICES["kokoro-onnx"] == rb.VOICES["kokoro-onnx-replay"] == "af_heart"
+    assert "kokoro-onnx-replay" in rb.EXACT_ENGINES and "kokoro-onnx" not in rb.EXACT_ENGINES
+    assert rb._base_engine("kokoro-onnx-replay") == "kokoro-onnx"
+    fresh = copy.deepcopy(_snap("kokoro-onnx"))
+    for tier in fresh["manifest"]["tiers"].values():
+        seg = tier["segments"][0]
+        seg["end_ms"] += 16  # +4%: inside the ONNX tolerance, outside torch Kokoro's
+        seg["words"][-1]["end_ms"] = seg["end_ms"]
+    assert rb.diff_snapshots(_snap("kokoro-onnx"), fresh, engine="kokoro-onnx").ok
+    assert not rb.diff_snapshots(_snap("kokoro-onnx"), fresh, engine="kokoro-cpu").ok

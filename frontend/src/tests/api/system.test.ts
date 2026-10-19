@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { getCapabilities, getEngineState, getGpus, refreshGpus, selectGpu, setEngine, TTSSocket } from '$lib/api'
+import { getCapabilities, getEngineState, getKokoroOnnxInstall, installKokoroOnnx, getGpus, refreshGpus, selectGpu, setEngine, TTSSocket } from '$lib/api'
 
 const ENGINE_STATE = {
   selected: 'cpu',
@@ -66,6 +66,28 @@ describe('system capabilities + engine API', () => {
     })
 
     await expect(setEngine('gpu')).rejects.toThrow('No CUDA GPU detected')
+  })
+})
+
+describe('Kokoro ONNX install API', () => {
+  beforeEach(() => {
+    global.fetch = vi.fn()
+  })
+
+  it('starts the download with a POST and reads progress with a GET', async () => {
+    const running = { status: 'running', file: 'kokoro-v1.0.onnx', downloaded: 5, total: 10, error: null }
+    ;(global.fetch as any).mockResolvedValue({ ok: true, json: async () => running })
+
+    expect(await installKokoroOnnx()).toEqual(running)
+    expect(global.fetch).toHaveBeenLastCalledWith(
+      'http://localhost:8000/api/system/engine/kokoro-onnx/install',
+      { method: 'POST', headers: { 'Content-Type': 'application/json' } },
+    )
+    await getKokoroOnnxInstall()
+    expect(global.fetch).toHaveBeenLastCalledWith(
+      'http://localhost:8000/api/system/engine/kokoro-onnx/install',
+      { headers: { 'Content-Type': 'application/json' } },
+    )
   })
 })
 

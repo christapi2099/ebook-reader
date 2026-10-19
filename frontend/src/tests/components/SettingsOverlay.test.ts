@@ -13,6 +13,8 @@ vi.mock('$lib/api', async (importOriginal) => {
     getCapabilities: vi.fn(),
     setEngine: vi.fn(),
     getLibrary: vi.fn(),
+    installKokoroOnnx: vi.fn(),
+    getKokoroOnnxInstall: vi.fn(),
   }
 })
 
@@ -150,6 +152,60 @@ describe('SettingsOverlay', () => {
   })
 
   describe('processing engine', () => {
+    const ONNX_MISSING: EngineState = {
+      ...ENGINE_STATE,
+      options: [
+        ...ENGINE_STATE.options,
+        {
+          id: 'kokoro-onnx',
+          label: 'This device · Kokoro ONNX',
+          available: false,
+          reason: 'Kokoro ONNX model not installed (kokoro-v1.0.onnx missing)',
+          installable: true,
+        },
+      ],
+    }
+    const idle = { status: 'idle', file: null, downloaded: 0, total: 0, error: null } as const
+
+    it('offers an install button for a missing Kokoro ONNX model, then refreshes the probe', async () => {
+      const ready: EngineState = {
+        ...ENGINE_STATE,
+        options: [...ENGINE_STATE.options,
+          { id: 'kokoro-onnx', label: 'This device · Kokoro ONNX', available: true, reason: null }],
+      }
+      vi.mocked(api.getEngineState).mockResolvedValueOnce(ONNX_MISSING).mockResolvedValue(ready)
+      vi.mocked(api.installKokoroOnnx).mockResolvedValue({ ...idle, status: 'running' })
+      vi.mocked(api.getKokoroOnnxInstall).mockResolvedValue({ ...idle, status: 'done' })
+      renderSettings()
+      await waitForEngine()
+
+      expect(screen.getByText(/Kokoro ONNX model not installed/)).toBeTruthy()
+      expect((screen.getByRole('radio', { name: /Kokoro ONNX/ }) as HTMLInputElement).disabled).toBe(true)
+      await fireEvent.click(screen.getByRole('button', { name: /Install/ }))
+
+      await waitFor(() =>
+        expect((screen.getByRole('radio', { name: /Kokoro ONNX/ }) as HTMLInputElement).disabled).toBe(false))
+      expect(api.installKokoroOnnx).toHaveBeenCalledTimes(1)
+      expect(screen.queryByRole('button', { name: /Install/ })).toBeNull()
+    })
+
+    it('shows the failure when the model download fails', async () => {
+      vi.mocked(api.getEngineState).mockResolvedValue(ONNX_MISSING)
+      vi.mocked(api.installKokoroOnnx).mockResolvedValue({ ...idle, status: 'running' })
+      vi.mocked(api.getKokoroOnnxInstall).mockResolvedValue({ ...idle, status: 'error', error: 'URLError: offline' })
+      renderSettings()
+      await waitForEngine()
+
+      await fireEvent.click(screen.getByRole('button', { name: /Install/ }))
+      await waitFor(() => expect(screen.getByText('URLError: offline')).toBeTruthy())
+    })
+
+    it('does not offer install for an engine that is merely unavailable', async () => {
+      renderSettings()
+      await waitForEngine()
+      expect(screen.queryByRole('button', { name: /Install/ })).toBeNull()
+    })
+
     it('lists every engine with the probe verdict', async () => {
       renderSettings()
       await waitForEngine()
