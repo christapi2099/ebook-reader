@@ -88,6 +88,11 @@ def _migrate(engine):
         if 'tts_engine' not in us_cols:
             conn.execute(text("ALTER TABLE usersettings ADD COLUMN tts_engine TEXT DEFAULT NULL"))
             conn.commit()
+        # The GPU chosen for the gpu engine (services/gpu_inventory.py id).
+        # NULL = legacy behaviour (torch device "cuda").
+        if 'gpu_device' not in us_cols:
+            conn.execute(text("ALTER TABLE usersettings ADD COLUMN gpu_device TEXT DEFAULT NULL"))
+            conn.commit()
 
         # MP3 exports record the rate actually rendered alongside the rate that
         # was requested, so the exports list cannot claim a tempo the file does

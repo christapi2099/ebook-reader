@@ -98,6 +98,9 @@ def probe_local_torch() -> dict[str, Any]:
         "cuda_device_count": 0,
         "gpu_name": None,
         "error": None,
+        # New keys (the legacy ones above keep their meaning).
+        "gpu_backend": "cpu",
+        "hip_version": None,
     }
     try:
         import torch
@@ -107,6 +110,18 @@ def probe_local_torch() -> dict[str, Any]:
 
     info["torch_version"] = getattr(torch, "__version__", None)
     info["torch_cuda_version"] = getattr(getattr(torch, "version", None), "cuda", None)
+    info["hip_version"] = getattr(getattr(torch, "version", None), "hip", None)
+    # hip before cuda: a ROCm build can also expose a (None) cuda version.
+    if info["hip_version"]:
+        info["gpu_backend"] = "rocm"
+    elif info["torch_cuda_version"]:
+        info["gpu_backend"] = "cuda"
+    else:
+        try:
+            if getattr(torch, "xpu", None) is not None and torch.xpu.is_available():
+                info["gpu_backend"] = "xpu"
+        except Exception:
+            pass
     try:
         available = bool(torch.cuda.is_available())
         info["cuda_available"] = available

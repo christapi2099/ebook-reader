@@ -165,7 +165,7 @@ def _schema_snapshot(engine) -> dict[str, list[str]]:
 MIGRATED_COLUMNS = {
     "audiocache": {"word_timestamps"},
     "sentence": {"words", "chapter", "chapter_title"},
-    "usersettings": {"highlight_enabled", "tts_engine"},
+    "usersettings": {"highlight_enabled", "tts_engine", "gpu_device"},
     "mp3export": {
         "effective_speed",
         "phase",

@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 import storage
-from services import env_config, kokoro_runtime, modal_remote
+from services import env_config, gpu_inventory, kokoro_runtime, modal_remote
 
 logger = logging.getLogger(__name__)
 
@@ -256,6 +256,52 @@ def save_persisted_engine(engine_id: str) -> None:
         logger.warning("[kokoro] could not persist the engine choice", exc_info=True)
 
 
+def load_persisted_gpu_device() -> str | None:
+    """The GPU id the user last selected, or ``None`` (legacy "cuda"). Never raises."""
+    try:
+        import db.database as _db
+        from db.models import UserSettings
+        from sqlmodel import Session
+
+        with Session(_db.engine) as session:
+            settings = session.get(UserSettings, 1)
+            value = getattr(settings, "gpu_device", None) if settings else None
+    except Exception:
+        logger.debug("[gpu] could not read the persisted GPU choice", exc_info=True)
+        return None
+    return value if isinstance(value, str) and value else None
+
+
+def save_persisted_gpu_device(device_id: str | None) -> None:
+    """Remember the GPU choice (``None`` restores legacy behaviour). Never raises."""
+    try:
+        import db.database as _db
+        from db.models import UserSettings
+        from sqlmodel import Session
+
+        with Session(_db.engine) as session:
+            settings = session.get(UserSettings, 1)
+            if settings is None:
+                settings = UserSettings(id=1)
+                session.add(settings)
+            settings.gpu_device = device_id
+            session.commit()
+    except Exception:
+        logger.warning("[gpu] could not persist the GPU choice", exc_info=True)
+
+
+def gpu_torch_device() -> str:
+    """Torch device string for the ``gpu`` engine, via the single mapper.
+
+    No persisted choice -> "cuda" without consulting the inventory at all.
+    """
+    selected = load_persisted_gpu_device()
+    if selected is None:
+        return gpu_inventory.resolve_torch_device(None, None)
+    inv = gpu_inventory.snapshot()
+    return gpu_inventory.resolve_torch_device(selected, inv.devices if inv else [])
+
+
 # --------------------------------------------------------------------------
 # The manager
 # --------------------------------------------------------------------------
@@ -382,7 +428,7 @@ class EngineManager:
             elif not torch_ok:
                 reason = f"PyTorch unavailable: {info.get('error')}"
             else:
-                reason = "No CUDA GPU detected"
+                reason = gpu_inventory.unavailable_reason(gpu_inventory.snapshot()) or "No CUDA GPU detected"
         return EngineOption(engine_id, ENGINE_LABELS[engine_id], available, reason)
 
     def _modal_availability(self) -> EngineOption:
@@ -469,7 +515,7 @@ class EngineManager:
         elif engine_id == PIPER:
             client, error = self._piper_builder()
         else:
-            device = "cuda" if engine_id == GPU else "cpu"
+            device = gpu_torch_device() if engine_id == GPU else "cpu"
             client, error = self._local_builder(device)
         if client is None:
             raise EngineBuildError(error or f"could not build the {engine_id} engine")
@@ -511,7 +557,7 @@ class EngineManager:
             state.record_local(device="cpu", model_repo="piper")
         else:
             state.record_local(
-                device="cuda" if engine_id == GPU else "cpu",
+                device=gpu_torch_device() if engine_id == GPU else "cpu",
                 model_repo=KOKORO_MODEL_REPO,
             )
 
