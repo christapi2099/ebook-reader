@@ -25,6 +25,7 @@ Seams (all injectable for hermetic tests):
 """
 from __future__ import annotations
 
+import concurrent.futures as cf
 import json
 import logging
 import os
@@ -51,6 +52,7 @@ from services import (
     book_processor, render_artifacts as ra, render_jobs as rj, render_store as rs,
 )
 from services.aligner import align_sentence
+from services.env_config import positive_int
 from services.remap import compute_remap
 from services.render_state import JOB_ERROR, JOB_PENDING
 from services.word_boxes import map_words_to_boxes
@@ -98,21 +100,163 @@ class _Stop(Exception):
 
 
 # ----------------------------------------------------------------- defaults
-def engine_synthesizer(engine=None, speed: float = 1.0) -> Callable[[str, str], SynthResult]:
-    """Adapt ``tts_engine.synthesize_sentence_for_render`` (async, one sentence per
-    pool task) to the blocking seam. Carries no tokens, so words are CTC-aligned."""
-    import asyncio
+class _EngineSynth:
+    """Blocking one-sentence seam over ``tts_engine.synthesize_render_result`` (one task
+    on the shared ``_synthesis_pool``). Carries no tokens, so words are CTC-aligned.
 
-    from services import tts_engine
+    ``parallel_safe``/``for_worker`` let the render fan out over independent engine
+    clones when the engine allows it (Piper); live playback keeps the shared pool."""
 
-    def _synth(text: str, voice: str) -> SynthResult:
+    def __init__(self, engine=None, speed: float = 1.0):
+        self.engine, self.speed = engine, speed
+
+    def _engine(self):
+        from services import tts_engine
+        return self.engine or tts_engine._render_engine
+
+    @property
+    def parallel_safe(self) -> bool:
+        eng = self._engine()
+        return bool(eng is not None and getattr(eng, "parallel_safe", False))
+
+    def __call__(self, text: str, voice: str) -> SynthResult:
+        import asyncio
+
+        from services import tts_engine
+
         audio, eff, native, tokens = asyncio.run(
-            tts_engine.synthesize_render_result(text, voice, speed, engine=engine))
+            tts_engine.synthesize_render_result(text, voice, self.speed, engine=self.engine))
         if audio is None:
             raise ra.RenderError("synthesis produced no audio", phase="synthesize")
         return SynthResult(np.asarray(audio, dtype=np.float32), eff, native, tokens)
 
-    return _synth
+    def for_worker(self, threads: Optional[int] = None) -> Callable[[str, str], SynthResult]:
+        """A synthesizer for ONE render thread: its own engine clone, off the shared pool."""
+        import asyncio
+
+        from services import render_throttle
+
+        clone = self._engine().clone_for_render_worker(threads)
+
+        def _synth(text: str, voice: str) -> SynthResult:
+            asyncio.run(render_throttle.await_playback_idle())  # still yield to playback
+            audio, native = clone.synthesize_for_render(text, voice)
+            if audio is None:
+                raise ra.RenderError("synthesis produced no audio", phase="synthesize")
+            return SynthResult(np.asarray(audio, dtype=np.float32), 1.0, native, None)
+
+        return _synth
+
+
+def engine_synthesizer(engine=None, speed: float = 1.0) -> _EngineSynth:
+    """Adapt ``tts_engine.synthesize_sentence_for_render`` (async, one sentence per
+    pool task) to the blocking seam."""
+    return _EngineSynth(engine, speed)
+
+
+# --------------------------------------------------------- parallel synthesis
+def synth_workers_setting() -> int:
+    """``RENDER_SYNTH_WORKERS`` (default 1 = today's serial loop)."""
+    return positive_int("RENDER_SYNTH_WORKERS", 1)
+
+
+def synth_threads_total() -> int:
+    """``RENDER_THREADS_TOTAL`` (default: cpu count), split across synthesis workers."""
+    return positive_int("RENDER_THREADS_TOTAL", os.cpu_count() or 1)
+
+
+# ORT intra-op threads beyond this did not help a Piper/CTC session (measured: 8 threads
+# 2.16 s vs 112 threads 3.28 s for 23 sentences) and only burn cores spinning.
+MAX_THREADS_PER_WORKER = 8
+_warned_serial = False
+
+
+def resolve_synth_workers(synthesizer) -> int:
+    """Workers actually used: the setting, but 1 unless the synthesizer is parallel-safe."""
+    global _warned_serial
+    n = synth_workers_setting()
+    if n <= 1:
+        return 1
+    if not (getattr(synthesizer, "parallel_safe", False)
+            and callable(getattr(synthesizer, "for_worker", None))):
+        if not _warned_serial:
+            _warned_serial = True
+            logger.warning("[render] RENDER_SYNTH_WORKERS=%d ignored: this engine is not "
+                           "parallel-safe; rendering serially", n)
+        return 1
+    return n
+
+
+def _shared_aligner(workers: int):
+    """ONE CTC aligner shared by all synthesis workers. The model is ~1.3 GB, so a session
+    per worker would cost gigabytes; ORT ``run`` is thread-safe and the native alignment is
+    reentrant (locals only), and a shared session measured as fast as per-worker ones.
+    Threads scale with the workers (2 each, at least the default 8, within the budget)."""
+    from services import aligner as al
+
+    default = al.default_aligner()
+    want = min(max(synth_threads_total(), 1), max(default.threads, 2 * workers))
+    return default if want == default.threads else al.CtcOnnxAligner(threads=want)
+
+
+class _SynthWindow:
+    """Bounded look-ahead of one-sentence syntheses on a private thread pool.
+
+    The consumer asks for results strictly in order; ``prepare(k)`` keeps positions
+    ``k .. k+window-1`` scheduled (skipping positions whose chunk already exists).
+    Each pool thread owns one synthesizer (``factory(threads)``, built lazily on that
+    thread). Nothing here touches the job, DB, stats or files."""
+
+    def __init__(self, todo, voice, synth, factory, workers, threads, is_done, touch,
+                 aligner=None):
+        self._todo, self._voice, self._synth = todo, voice, synth
+        self._aligner = aligner
+        self._factory, self._threads = factory, threads
+        self._is_done, self._touch = is_done, touch
+        self._window = 2 * workers
+        self._pool = cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="render-synth")
+        self._tls = threading.local()
+        self._futs: dict[int, cf.Future] = {}
+        self._next = 0
+        self._closed = False
+
+    def _run(self, text: str):
+        """-> ``(SynthResult, word timings or None)``. Alignment (CTC, ~2x the cost of a
+        Piper synthesis) runs here, on the worker, with a per-thread aligner, because left
+        in the ordered consumer it would be the serial bottleneck. ``None`` timings means
+        the result failed a check the consumer must raise in the serial path's order."""
+        prim = getattr(self._tls, "primary", None)
+        if prim is None:  # lazy, once per thread, on that thread
+            prim = self._tls.primary = self._factory(self._threads)
+        try:
+            res = self._synth(text, self._voice, primary=prim)
+            audio = np.asarray(res.audio, dtype=np.float32)
+            if res.effective_speed != 1.0 or audio.size == 0:
+                return res, None
+            return res, align_sentence(audio, SR, text, native_words=res.native_words,
+                                       kokoro_tokens=res.kokoro_tokens, aligner=self._aligner)
+        finally:
+            self._touch()
+
+    def prepare(self, k: int) -> None:
+        stop = min(len(self._todo), k + self._window)
+        self._next = max(self._next, k)
+        while self._next < stop and not self._closed:
+            j = self._next
+            self._next += 1
+            if not self._is_done(self._todo[j]["index"]):
+                self._futs[j] = self._pool.submit(self._run, self._todo[j]["text"])
+
+    def future(self, k: int) -> Optional[cf.Future]:
+        return self._futs.pop(k, None)
+
+    def close(self) -> None:
+        """Cancel queued work and wait for the (at most ``workers``) running calls."""
+        self._closed = True
+        for f in self._futs.values():
+            f.cancel()
+        self._futs.clear()
+        self._pool.shutdown(wait=True)
 
 
 STATS_EVERY = 10
@@ -266,6 +410,11 @@ def _find_or_make_tmp(book_id: str, target: str) -> tuple[Path, dict]:
     return d, cp
 
 
+def _chunk_done(tmp: Path, index: int) -> bool:
+    """Cheap existence check of a finished chunk (sidecar is written last)."""
+    return (tmp / "chunks" / f"{index}.flac").is_file() and (tmp / "chunks" / f"{index}.json").is_file()
+
+
 def _load_done(tmp: Path, index: int) -> Optional[tuple[np.ndarray, list]]:
     flac, meta = tmp / "chunks" / f"{index}.flac", tmp / "chunks" / f"{index}.json"
     if not (flac.is_file() and meta.is_file()):
@@ -287,25 +436,33 @@ class _Synth:
         self.retries, self.sleep = retries, sleep
         self.mixed = mixed
         self.on_fallback: Callable[[], None] = lambda: None
+        # Parallel synthesis calls this from several threads: the sticky flip and the
+        # checkpoint write happen once, and the (single, possibly non-reentrant) fallback
+        # engine is never entered concurrently.
+        self._lock = threading.Lock()
 
-    def __call__(self, text: str, voice: str) -> SynthResult:
+    def __call__(self, text: str, voice: str, primary=None) -> SynthResult:
+        primary = primary or self.primary
         if not self.mixed:
             attempts = 1 + (self.retries if self.fallback else 0)
             last: Optional[Exception] = None
             for n in range(attempts):
                 try:
-                    return self.primary(text, voice)
+                    return primary(text, voice)
                 except Exception as e:  # noqa: BLE001 - any backend failure is retryable
                     last = e
                     if self.fallback is None:
                         raise
                     if n < attempts - 1:
                         self.sleep(min(2.0 ** n, 30.0))
-            logger.warning("[render] primary backend failed %d times (%s); using fallback",
-                           attempts, last)
-            self.mixed = True
-            self.on_fallback()
-        return self.fallback(text, voice)
+            with self._lock:
+                if not self.mixed:
+                    logger.warning("[render] primary backend failed %d times (%s); using "
+                                   "fallback", attempts, last)
+                    self.mixed = True
+                    self.on_fallback()
+        with self._lock:
+            return self.fallback(text, voice)
 
 
 def _estimate_bytes(rows: list[dict]) -> int:
@@ -504,6 +661,21 @@ def _render(book_id, worker_id, synthesizer, aligner, fallback, extractor, box_p
     provider = box_provider if box_provider is not None else pdf_box_provider(book)
     last_renew = clock()
     chunks: list[dict] = []
+    window: Optional[_SynthWindow] = None
+    workers = resolve_synth_workers(synthesizer)
+    if workers > 1:
+        threads = max(1, min(MAX_THREADS_PER_WORKER, synth_threads_total() // workers))
+        logger.info("[render] %s: %d synthesis workers x %d threads", book_id, workers, threads)
+        window = _SynthWindow(todo, voice, synth, synthesizer.for_worker, workers, threads,
+                              lambda i: _chunk_done(tmp, i), heartbeat.touch,
+                              aligner or _shared_aligner(workers))
+
+    def await_synth(fut: cf.Future):
+        """Wait for a window result, still honouring pause/cancel/supersede promptly."""
+        while not cf.wait([fut], timeout=0.25).done:
+            checkpoint_job()
+        return fut.result()
+
     try:
         n = len(todo)
         for k, r in enumerate(todo):
@@ -512,11 +684,18 @@ def _render(book_id, worker_id, synthesizer, aligner, fallback, extractor, box_p
                 if not rj.renew_lease(book_id, worker_id, now(), lease_s):
                     raise _Stop(LOST)
                 last_renew = clock()
+            if window is not None:
+                window.prepare(k)
             idx = r["index"]
             done = _load_done(tmp, idx)
             if done is None:
                 fresh += 1
-                res = synth(r["text"], voice)
+                fut = window.future(k) if window is not None else None
+                timings = None  # set by a window worker that already aligned this sentence
+                if fut is not None:
+                    res, timings = await_synth(fut)
+                else:
+                    res = synth(r["text"], voice)
                 audio = np.asarray(res.audio, dtype=np.float32)
                 if res.effective_speed != 1.0:
                     raise ra.RenderError(
@@ -526,8 +705,10 @@ def _render(book_id, worker_id, synthesizer, aligner, fallback, extractor, box_p
                     raise ra.RenderError(f"sentence {idx} synthesized no audio",
                                          phase="synthesize")
                 dur_ms = len(audio) * 1000.0 / SR
-                timings = align_sentence(audio, SR, r["text"], native_words=res.native_words,
-                                         kokoro_tokens=res.kokoro_tokens, aligner=aligner)
+                if timings is None:
+                    timings = align_sentence(audio, SR, r["text"],
+                                             native_words=res.native_words,
+                                             kokoro_tokens=res.kokoro_tokens, aligner=aligner)
                 if not timings:
                     raise ra.RenderError(f"sentence {idx} produced no word entries",
                                          phase="align")
@@ -551,6 +732,8 @@ def _render(book_id, worker_id, synthesizer, aligner, fallback, extractor, box_p
                 _stats(book_id, sentences_done=k + 1, sentences_total=n, work_done=fresh,
                        now=time.time())
 
+        if window is not None:
+            window.close()
         checkpoint_job()
         phase_stat("encode")
         progress(0.92, "encode")
@@ -581,6 +764,8 @@ def _render(book_id, worker_id, synthesizer, aligner, fallback, extractor, box_p
         progress(0.98, "publish")
         _publish(book_id, tmp, rows, remap, target, fail_at)
     finally:
+        if window is not None:
+            window.close()
         close = getattr(provider, "close", None)
         if close:
             close()

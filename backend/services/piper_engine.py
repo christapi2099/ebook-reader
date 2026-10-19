@@ -22,6 +22,7 @@ resampled here before it ever reaches ``tts_engine.py``.
 from __future__ import annotations
 
 import logging
+import threading
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -126,6 +127,44 @@ def is_piper(obj: Any) -> bool:
     return isinstance(obj, PiperEngine)
 
 
+_patched_lock = threading.Lock()
+_patched: dict[tuple[str, int, int], Any] = {}
+
+
+def _alignment_model(model_path: Path) -> Any:
+    """The voice model patched in memory to expose phoneme alignments (what
+    ``PiperVoice.load(include_alignments=True)`` does), computed ONCE per file and shared
+    by every worker: the protobuf parse/patch/serialise holds the GIL for ~2 s, so N
+    workers doing it each would serialise into N x 2 s of start-up."""
+    st = model_path.stat()
+    key = (str(model_path), st.st_mtime_ns, st.st_size)
+    with _patched_lock:
+        if key not in _patched:
+            try:
+                import onnx
+                from piper.patch_voice_with_alignment import add_alignment_output
+
+                proto = onnx.load(str(model_path))
+                add_alignment_output(proto)
+                _patched.clear()  # keep one patched model (tens of MB) per process
+                _patched[key] = proto.SerializeToString()
+            except (ImportError, ValueError):
+                _patched[key] = str(model_path)  # unpatched: same fallback as PiperVoice.load
+        return _patched[key]
+
+
+def _capped_session(model_path: Path, include_alignments: bool, threads: int):
+    """A new CPU InferenceSession for ``voice`` limited to ``threads`` intra-op threads."""
+    import onnxruntime
+
+    model: Any = _alignment_model(model_path) if include_alignments else str(model_path)
+    opts = onnxruntime.SessionOptions()
+    opts.intra_op_num_threads = max(1, int(threads))
+    opts.inter_op_num_threads = 1
+    return onnxruntime.InferenceSession(model, sess_options=opts,
+                                        providers=["CPUExecutionProvider"])
+
+
 def _strip_prefix(voice: str) -> str:
     return voice.split(":", 1)[1] if voice.startswith("piper:") else voice
 
@@ -143,10 +182,20 @@ class PiperEngine:
     both ``"piper:<name>"`` and a bare ``"<name>"``).
     """
 
-    def __init__(self, voices_dir: str, device: str = "cpu") -> None:
+    # Safe to run several instances (one per thread) side by side: every instance owns
+    # its voices/sessions and nothing else is shared except Piper's own locked espeak
+    # phonemizer. The render worker reads this to decide whether it may parallelise.
+    parallel_safe = True
+
+    def __init__(self, voices_dir: str, device: str = "cpu", *, warm: bool = True,
+                 intra_op_threads: int | None = None) -> None:
         self._dir = Path(voices_dir)
         self._device = device
         self._use_cuda = device == "gpu"
+        # ``None`` keeps PiperVoice.load's defaults (onnxruntime picks all cores).
+        self._threads = intra_op_threads
+        # Voice caches are check-then-set; the lock makes concurrent first use load once.
+        self._load_lock = threading.RLock()
         self._loaded: dict[str, Any] = {}
         self._source_rates: dict[str, int] = {}
         self._loaded_align: dict[str, Any] = {}
@@ -162,27 +211,57 @@ class PiperEngine:
         # a multi-second stall far past the frontend's ~0.3s startup buffer.
         # Warm the default voice now, while the engine build is still gated
         # behind the "switching" state in the UI.
-        try:
-            self._load(self.default_voice())
-        except Exception:
-            logger.warning("[piper] eager warm-up of default voice failed", exc_info=True)
+        if warm:
+            try:
+                self._load(self.default_voice())
+            except Exception:
+                logger.warning("[piper] eager warm-up of default voice failed", exc_info=True)
+
+    def clone_for_worker(self, intra_op_threads: int | None = None) -> "PiperEngine":
+        """An independent engine over the same voices for ONE render thread: its own
+        sessions (loaded lazily, no warm-up) capped to ``intra_op_threads``."""
+        return PiperEngine(str(self._dir), device=self._device, warm=False,
+                           intra_op_threads=intra_op_threads)
+
+    def _load_voice(self, model_path: Path, include_alignments: bool):
+        from piper.voice import PiperVoice
+
+        if self._threads is None or self._use_cuda:
+            if include_alignments:
+                return PiperVoice.load(str(model_path), use_cuda=self._use_cuda,
+                                       include_alignments=True)
+            return PiperVoice.load(str(model_path), use_cuda=self._use_cuda)
+        # PiperVoice.load hardcodes onnxruntime.SessionOptions(), so N sessions would each
+        # spawn one thread per core. Build the voice the way load() does (config + session +
+        # espeak data) but with a capped session.
+        import json
+
+        from piper.config import PiperConfig
+        from piper.phonemize_espeak import ESPEAK_DATA_DIR
+
+        with open(f"{model_path}.json", "r", encoding="utf-8") as fh:
+            config = PiperConfig.from_dict(json.load(fh))
+        return PiperVoice(config=config,
+                          session=_capped_session(model_path, include_alignments, self._threads),
+                          espeak_data_dir=Path(ESPEAK_DATA_DIR), download_dir=Path.cwd())
 
     def _load(self, name: str):
         cached = self._loaded.get(name)
         if cached is not None:
             return cached
+        with self._load_lock:
+            cached = self._loaded.get(name)
+            if cached is not None:
+                return cached
+            model_path = self._dir / f"{name}.onnx"
+            if not model_path.exists():
+                raise FileNotFoundError(f"Piper voice model not found: {model_path}")
 
-        from piper.voice import PiperVoice
-
-        model_path = self._dir / f"{name}.onnx"
-        if not model_path.exists():
-            raise FileNotFoundError(f"Piper voice model not found: {model_path}")
-
-        logger.info("[piper] loading voice %s (cuda=%s)", name, self._use_cuda)
-        voice = PiperVoice.load(str(model_path), use_cuda=self._use_cuda)
-        self._loaded[name] = voice
-        self._source_rates[name] = int(getattr(voice.config, "sample_rate", 22050))
-        return voice
+            logger.info("[piper] loading voice %s (cuda=%s)", name, self._use_cuda)
+            voice = self._load_voice(model_path, False)
+            self._source_rates[name] = int(getattr(voice.config, "sample_rate", 22050))
+            self._loaded[name] = voice  # publish last: readers see a complete voice
+            return voice
 
     def _load_aligned(self, name: str):
         """Voice loaded with ``include_alignments=True`` (render path only; the live
@@ -190,16 +269,17 @@ class PiperEngine:
         cached = self._loaded_align.get(name)
         if cached is not None:
             return cached
-        from piper.voice import PiperVoice
-
-        model_path = self._dir / f"{name}.onnx"
-        if not model_path.exists():
-            raise FileNotFoundError(f"Piper voice model not found: {model_path}")
-        voice = PiperVoice.load(str(model_path), use_cuda=self._use_cuda,
-                                include_alignments=True)
-        self._loaded_align[name] = voice
-        self._source_rates[name] = int(getattr(voice.config, "sample_rate", 22050))
-        return voice
+        with self._load_lock:
+            cached = self._loaded_align.get(name)
+            if cached is not None:
+                return cached
+            model_path = self._dir / f"{name}.onnx"
+            if not model_path.exists():
+                raise FileNotFoundError(f"Piper voice model not found: {model_path}")
+            voice = self._load_voice(model_path, True)
+            self._source_rates[name] = int(getattr(voice.config, "sample_rate", 22050))
+            self._loaded_align[name] = voice
+            return voice
 
     def synthesize_for_render(self, text: str, voice: str = "") -> tuple[np.ndarray, list]:
         """1.0x render synthesis: ``(audio at 24 kHz, native word (start_s, end_s))``
