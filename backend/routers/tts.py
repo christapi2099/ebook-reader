@@ -14,7 +14,13 @@ import db.database as _db
 from db.models import Book
 from services import engine_manager
 from services.sentence_source import load_sentences
-from services.tts_engine import SAMPLE_RATE, TTSEngine, SynthJob, normalize_speed
+from services.tts_engine import (
+    PREFETCH_TARGET_AUDIO_SECONDS,
+    SAMPLE_RATE,
+    SynthJob,
+    TTSEngine,
+    normalize_speed,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +34,24 @@ def _requested_speed(msg: dict) -> float:
     rather than letting a bad value reach Kokoro.
     """
     return normalize_speed(msg.get("speed", 1.0))
+
+
+def _prefetch_budget() -> tuple[int, float]:
+    """Sentence-count cap and audio-seconds budget for one prefetch burst.
+
+    ``PREFETCH_TARGET_AUDIO_SECONDS`` (60s) was tuned for Kokoro on CPU, which
+    is *slower* than real time (~1.77x RTF per the constant's own comment in
+    tts_engine.py) -- prefetching further than that is wasted work it can
+    never finish before being overtaken. Piper is the opposite: on CPU it
+    synthesizes roughly 8x faster than real time. Nothing re-triggers prefetch
+    after the initial burst at `play`/`prefetch_speed` (see below), so the
+    same conservative cap starves a Piper listener the moment they play past
+    the first minute -- audible stalls deep into playback, not just at the
+    start. Piper gets a much larger one-shot budget instead.
+    """
+    if engine_manager.manager.active() == engine_manager.PIPER:
+        return 500, 600.0
+    return 50, PREFETCH_TARGET_AUDIO_SECONDS
 
 
 def _start_warmup(engine: Any) -> None:
@@ -340,13 +364,15 @@ async def tts_websocket(websocket: WebSocket, book_id: str):
                 await _report_engine_phase(session_id, force=True)
                 producer_task = asyncio.create_task(_producer(from_index, voice, speed))
                 consumer_task = asyncio.create_task(_consumer_with_events(session_id))
-                # Warm the cache ahead of the current position. The bound that
-                # matters is the audio-time budget inside prefetch (60 s by
-                # default); the 50 here is only a hard safety cap, and this
-                # comment used to claim 25.
+                # Warm the cache ahead of the current position. See
+                # `_prefetch_budget` for why the cap varies by engine.
                 prefetch_cancel.clear()
+                pf_count, pf_seconds = _prefetch_budget()
                 prefetch_task = asyncio.create_task(
-                    engine_tts.prefetch(sentence_data, from_index + 1, 50, voice, speed, prefetch_cancel)
+                    engine_tts.prefetch(
+                        sentence_data, from_index + 1, pf_count, voice, speed,
+                        prefetch_cancel, target_audio_seconds=pf_seconds,
+                    )
                 )
 
             elif action == "prefetch_speed":
@@ -368,8 +394,12 @@ async def tts_websocket(websocket: WebSocket, book_id: str):
                     except BaseException:
                         pass
                 prefetch_cancel.clear()
+                pf_count, pf_seconds = _prefetch_budget()
                 prefetch_task = asyncio.create_task(
-                    engine_tts.prefetch(sentence_data, pf_from, 50, pf_voice, pf_speed, prefetch_cancel)
+                    engine_tts.prefetch(
+                        sentence_data, pf_from, pf_count, pf_voice, pf_speed,
+                        prefetch_cancel, target_audio_seconds=pf_seconds,
+                    )
                 )
 
             elif action == "pause":

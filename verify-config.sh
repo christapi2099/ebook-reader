@@ -36,7 +36,7 @@ docker-compose ps 2>/dev/null || echo "Docker Compose not running or not availab
 
 echo ""
 echo "✨ Configuration Summary:"
-echo "   - Backend API: http://localhost:3001"
+echo "   - Backend API: http://localhost:3002"
 echo "   - Frontend Dev: http://localhost:5173"
 echo "   - Frontend Prod: http://localhost:80"
 echo ""

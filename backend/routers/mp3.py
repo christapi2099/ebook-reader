@@ -296,12 +296,23 @@ def _render_with_modal(
         audio = finished[batch.batch_index].audio
         parts.append(audio)
         lengths = finished[batch.batch_index].sentence_samples
+        batch_cursor = 0
         for position, sentence in enumerate(batch.sentences):
             length = lengths[position] if position < len(lengths) else 0
             if length <= 0:
                 continue
             offsets[int(sentence["index"])] = (cursor, cursor + length)
+            # Modal renders on a GPU the reader never touches, so without this
+            # the export and a later live read of the same book/voice/speed
+            # would each pay for synthesis separately — the whole point of
+            # AudioCache being keyed by (text, voice, speed) and not by which
+            # engine produced it.
+            if _engine is not None:
+                sentence_audio = audio[batch_cursor:batch_cursor + length]
+                cache_key = _engine._cache_key(sentence["text"], voice, speed)
+                _engine._write_cache_entry([sentence_audio], [], cache_key, voice)
             cursor += length
+            batch_cursor += length
     return parts, offsets, len(batches)
 
 

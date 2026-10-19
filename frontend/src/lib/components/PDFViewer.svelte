@@ -597,7 +597,7 @@
     </div>
   {/if}
   <div class="mx-auto flex flex-col items-center py-6" bind:this={pagesEl}></div>
-  <div class="fixed bottom-4 right-4 flex items-center gap-1 bg-surface-raised/90 backdrop-blur rounded-lg shadow-2 border border-border px-2 py-1.5 z-panel">
+  <div class="fixed bottom-32 right-4 flex items-center gap-1 bg-surface-raised/90 backdrop-blur rounded-lg shadow-2 border border-border px-2 py-1.5 z-40">
     <button
       onclick={zoomOut}
       class="p-1 rounded hover:bg-surface-sunken text-fg-muted"

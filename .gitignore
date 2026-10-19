@@ -77,3 +77,6 @@ backend/flake*.log
 
 # generated first-page covers (services/cover.py)
 backend/covers/
+
+# Spike output: precompiled sample audio/manifest (backend/scripts/precompile_sample.py)
+backend/scripts/output/

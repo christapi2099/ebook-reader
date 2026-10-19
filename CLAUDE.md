@@ -21,6 +21,9 @@ cd frontend && npm run dev
 | `frontend/src/lib/components/PDFViewer.svelte` | PDF.js canvas + sentence overlay |
 | `frontend/src/lib/api.ts` | TTSSocket + all HTTP calls |
 
+## Active Plan: process-first architecture
+`docs/plans/process-first-architecture.md` (not started yet). In this plan, a book is read only from a complete, immutable render: sentences plus 1x Opus audio, atempo speed tiers and a sync manifest. The plan supersedes ADR-5 and, once implemented, replaces the Audio rules below. Read it before changing playback, caching, upload or reprocess code, and don't add new on-demand-synthesis features to the reader path.
+
 ## Hard Rules
 
 **Backend**

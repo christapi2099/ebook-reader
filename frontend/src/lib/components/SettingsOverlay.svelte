@@ -10,6 +10,7 @@
     getCapabilities,
     getEngineState,
     getLibrary,
+    getVoices,
     setEngine,
     type EngineState,
     type SystemCapabilities,
@@ -131,6 +132,22 @@
     try {
       engineState = await setEngine(engineId)
       capabilities = await getCapabilities().catch(() => capabilities)
+      // Voice selection is stored independently of engine choice, and
+      // GET /voices only returns voices valid for the now-active engine. A
+      // voice id from the previous engine (e.g. a Kokoro id like "af_heart"
+      // left over from before switching to Piper) is meaningless to the new
+      // one and would fail synthesis silently mid-playback -- so re-validate
+      // and fall back to the new engine's first voice if it doesn't match.
+      try {
+        const voices = await getVoices()
+        const current = get(settingsStore).voice
+        if (voices.length > 0 && !voices.some(v => v.id === current)) {
+          settingsStore.setVoice(voices[0].id)
+        }
+      } catch {
+        // Non-fatal: worst case the existing voice id is stale until the
+        // voice picker page is next visited.
+      }
     } catch (e) {
       switchError = toDetailMessage(e)
     } finally {

@@ -214,7 +214,7 @@ uvicorn on 8000, `EXPOSE 8000`) and the frontend (nginx serving the static build
 
 Two consequences, both **Verified**:
 
-1. `docker-compose.yml:11` publishes the backend as `"3001:8000"` — host port 3001. But
+1. `docker-compose.yml:11` publishes the backend as `"3002:8000"` — host port 3002. But
    `frontend/src/lib/api.ts:45` hard-codes `http://localhost:8000`. In the browser, `localhost:8000`
    is the *user's own machine*, not the container. The stack as committed cannot work in a browser
    without editing `api.ts`.
@@ -222,7 +222,7 @@ Two consequences, both **Verified**:
    the backend's `/health` are **not in the nginx proxy regex**, so those requests would hit the SPA
    fallback (`nginx.conf:50-52` `try_files ... /index.html`) and return HTML instead of JSON.
 
-`docker-compose.dev.yml` has the same 3001 mapping for the backend and runs the frontend as
+`docker-compose.dev.yml` has the same 3002 mapping for the backend and runs the frontend as
 `node:18-alpine` on 5173, so the dev stack has the same mismatch. See §10 R6.
 
 ---
@@ -1921,7 +1921,7 @@ This was a cluster of related gaps rather than one bug. Current state of each:
   It is not read from any environment variable. `implementation-handoff.md` §8 flags exactly this ("fine
   for dev, must be env-driven before any deploy") and it has not been done.
 * **Verified.** The deployment mismatch, three ways:
-  1. `docker-compose.yml:11` publishes the backend as `"3001:8000"`. The browser's
+  1. `docker-compose.yml:11` publishes the backend as `"3002:8000"`. The browser's
      `localhost:8000` is the host, where nothing is listening on 8000. `docker-compose.dev.yml:8` has
      the same mapping.
   2. `frontend/nginx.conf:21` proxies `location ~ ^/(documents|library|ws)/`. **`/voices`, `/mp3`,
