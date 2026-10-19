@@ -568,6 +568,8 @@ ${C_BOLD}TIMEOUTS (seconds, override via environment)${C_OFF}
 ${C_BOLD}ENVIRONMENT${C_OFF}
   TEST_PY                  python to use. Default: backend/.venv/bin/python,
                            else backend/venv/bin/python, else \`uv run python\`.
+                           To test against the AMD ROCm env (docs/AMD_ROCM.md):
+                             TEST_PY=backend/.venv-rocm/bin/python ./scripts/test.sh fast
 
 ${C_BOLD}NOTES${C_OFF}
   * e2e needs the dev server on :5173 (playwright starts it) and, for the spec's
