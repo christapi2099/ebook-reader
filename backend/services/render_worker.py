@@ -59,6 +59,10 @@ logger = logging.getLogger(__name__)
 
 SR = ra.SR
 LEASE_RENEW_S = 30.0
+# A render that reports no progress for this long is hung (a stuck ffmpeg or
+# CUDA call), not slow: the heartbeat keeps renewing its lease, so only progress
+# tells the two apart. Generous, because one encode step can run for minutes.
+STALL_TIMEOUT_S = float(os.environ.get("RENDER_STALL_TIMEOUT_S", "900"))
 MODAL_RETRIES = 3
 # Rough bytes of base FLAC + all Opus tiers per hour of speech (spike, ~141 MB/h)
 # and speech rate (chars per second) used to size the disk guard.
@@ -326,13 +330,14 @@ def render_book(book_id: str, worker_id: str, *, synthesizer, aligner=None,
                 disk_usage: Callable = shutil.disk_usage,
                 renew_every_s: float = LEASE_RENEW_S, lease_s: int = 120,
                 retries: int = MODAL_RETRIES, fail_at=None,
-                raise_errors: bool = False) -> str:
+                raise_errors: bool = False, stall_s: float = STALL_TIMEOUT_S) -> str:
     """Render a CLAIMED book. Returns READY | REQUEUED | CANCELLED | GONE | ERROR |
     BLOCKED | LOST. Failures become ``job_status='error'`` (traceback in
     ``error_message``, ``phase`` = the failing phase) unless ``raise_errors``."""
     now = now or _utcnow
     ctx: dict = {}
-    heartbeat = _Heartbeat(book_id, worker_id, now, lease_s, renew_every_s)
+    heartbeat = _Heartbeat(book_id, worker_id, now, lease_s, renew_every_s, stall_s)
+    ctx["heartbeat"] = heartbeat
     heartbeat.start()
     try:
         return _render(book_id, worker_id, synthesizer, aligner, fallback_synthesizer,
@@ -361,11 +366,25 @@ def render_book(book_id: str, worker_id: str, *, synthesizer, aligner=None,
 class _Heartbeat:
     """Renews the lease on a timer for the whole render, including the encode and
     audit phases that do not reach the per-sentence renewal. A lease that lapses
-    shows the book as queued and lets another worker claim it."""
+    shows the book as queued and lets another worker claim it.
 
-    def __init__(self, book_id, worker_id, now, lease_s, every_s):
+    It is also the stall watchdog. Renewing a lease only shows the process is
+    alive, so a synthesis call that hangs would hold the lease for ever. The render
+    calls :meth:`touch` whenever it makes progress; if that stops for ``stall_s``
+    the book is marked ``error`` and the lease is no longer renewed. The hung call
+    itself cannot be killed, so the worker thread stays blocked until it returns
+    (or the process restarts), but the failure is visible instead of a bar frozen
+    on "processing"."""
+
+    def __init__(self, book_id, worker_id, now, lease_s, every_s,
+                 stall_s: float = STALL_TIMEOUT_S, clock: Callable[[], float] = time.monotonic):
         self._args = (book_id, worker_id, now, lease_s)
         self._every = every_s
+        self._stall_s = stall_s
+        self._clock = clock
+        self._last_progress = clock()
+        self._phase = "extract"
+        self.stalled = False
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name=f"lease-{book_id[:8]}",
                                         daemon=True)
@@ -377,9 +396,28 @@ class _Heartbeat:
         self._stop.set()
         self._thread.join(timeout=5)
 
+    def touch(self, phase: Optional[str] = None) -> None:
+        """The render made progress."""
+        self._last_progress = self._clock()
+        if phase:
+            self._phase = phase
+
     def _run(self) -> None:
         book_id, worker_id, now, lease_s = self._args
         while not self._stop.wait(self._every):
+            idle = self._clock() - self._last_progress
+            if idle >= self._stall_s:
+                self.stalled = True
+                logger.error("[render] %s made no progress for %.0fs in phase %s; "
+                             "marking it stalled", book_id, idle, self._phase)
+                try:
+                    _set_error(book_id, worker_id, self._phase,
+                               f"Render stalled: no progress for {int(idle)}s in the "
+                               f"{self._phase} phase. The synthesis or encode call is "
+                               "probably hung; restart the backend, then retry.")
+                except Exception:  # noqa: BLE001
+                    logger.exception("[render] could not record the stall for %s", book_id)
+                return
             try:
                 if not rj.renew_lease(book_id, worker_id, now(), lease_s):
                     return  # lease lost: the main loop sees it at its next checkpoint
@@ -401,8 +439,12 @@ def _render(book_id, worker_id, synthesizer, aligner, fallback, extractor, box_p
     voice = book.voice or "af_heart"
     ctx["target"] = target
 
+    heartbeat = ctx["heartbeat"]
+
     def checkpoint_job(drop_tmp=False) -> None:
         """Between-step supersede/cancel/delete/pause check."""
+        if heartbeat.stalled:  # a hung call came back after the watchdog gave up
+            raise _Stop(ERROR)
         verdict = rj.check_job(book_id, target)
         if verdict == rj.CONTINUE:
             if render_pause.is_paused():
@@ -422,6 +464,9 @@ def _render(book_id, worker_id, synthesizer, aligner, fallback, extractor, box_p
         raise _Stop(REQUEUED)
 
     def progress(frac: float, phase: str) -> None:
+        if heartbeat.stalled:
+            raise _Stop(ERROR)
+        heartbeat.touch(phase)
         if not rj.mark_progress(book_id, frac, phase):
             _remove_book_dir(book_id)
             raise _Stop(GONE)

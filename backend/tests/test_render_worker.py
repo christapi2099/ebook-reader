@@ -554,3 +554,43 @@ def test_worker_loop_claims_nothing_while_paused(env, monkeypatch):
     stop.set()
     t.join(2)
     assert calls == []
+
+
+# ------------------------------------------------------- stall watchdog
+def test_heartbeat_marks_a_render_with_no_progress_as_stalled(env):
+    mk_book(env)
+    assert rj.claim_next("w1", T0 + timedelta(days=1), debounce_s=0) == "b1"
+    hb = rw._Heartbeat("b1", "w1", lambda: T0 + timedelta(days=1), 120, 0.01, stall_s=0.05)
+    hb.touch("synthesize")
+    hb.start()
+    deadline = time.time() + 2
+    while not hb.stalled and time.time() < deadline:
+        time.sleep(0.01)
+    hb.stop()
+    b = book(env)
+    assert hb.stalled
+    assert b.job_status == "error" and b.phase == "synthesize"
+    assert "stalled" in b.error_message and b.lease_owner is None
+
+
+def test_heartbeat_does_not_stall_while_progress_is_reported(env):
+    mk_book(env)
+    assert rj.claim_next("w1", T0 + timedelta(days=1), debounce_s=0) == "b1"
+    hb = rw._Heartbeat("b1", "w1", lambda: T0 + timedelta(days=1), 120, 0.01, stall_s=0.2)
+    hb.start()
+    for _ in range(15):
+        time.sleep(0.02)
+        hb.touch("synthesize")
+    hb.stop()
+    assert not hb.stalled
+    assert book(env).job_status == "processing"
+
+
+def test_a_hung_synthesis_call_surfaces_as_an_error_not_a_frozen_bar(env):
+    mk_book(env)
+    synth = FakeSynth(hook=lambda n, t: time.sleep(0.4) if n == 1 else None)
+    assert run(synth, renew_every_s=0.01, stall_s=0.1) == rw.ERROR
+    b = book(env)
+    assert b.job_status == "error" and "stalled" in b.error_message
+    assert b.ready_generation is None
+    assert len(synth.calls) == 1  # the render bailed out once the call came back
