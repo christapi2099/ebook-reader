@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Protocol, Sequence
@@ -84,15 +85,22 @@ class CtcOnnxAligner:
 
     def __init__(self, threads: int = 8, model_path: Optional[Path] = None):
         self.threads, self.model_path, self._sess, self._tok = threads, model_path, None, None
+        self._load_lock = threading.Lock()
 
     def _load(self):
+        with self._load_lock:
+            if self._sess is None:
+                self._load_locked()
+
+    def _load_locked(self):
         import onnxruntime as ort
         import ctc_forced_aligner as c
         p = self.model_path or Path.home() / "ctc_forced_aligner" / "model.onnx"
         c.ensure_onnx_model(str(p), c.MODEL_URL)
         so = ort.SessionOptions()
         so.intra_op_num_threads = self.threads
-        self._sess, self._tok = ort.InferenceSession(str(p), so), c.Tokenizer()
+        self._tok = c.Tokenizer()
+        self._sess = ort.InferenceSession(str(p), so)  # published last: _sess gates use
 
     def align(self, audio, sr, words):
         import ctc_forced_aligner as c
@@ -130,10 +138,15 @@ class CtcOnnxAligner:
 _default: Optional[CtcOnnxAligner] = None
 
 
+_default_lock = threading.Lock()
+
+
 def default_aligner() -> CtcOnnxAligner:
     global _default
     if _default is None:
-        _default = CtcOnnxAligner()
+        with _default_lock:
+            if _default is None:
+                _default = CtcOnnxAligner()
     return _default
 
 

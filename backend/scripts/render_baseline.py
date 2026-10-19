@@ -162,6 +162,11 @@ class RecordingSynth:
 class ReplaySynth:
     """Replays recorded PCM: deterministic input for the real aligner and encoder."""
 
+    parallel_safe = True  # stateless: lets RENDER_SYNTH_WORKERS>1 exercise the parallel path
+
+    def for_worker(self, threads=None):
+        return self
+
     def __init__(self, src_dir: Path):
         if not src_dir.is_dir():
             raise RuntimeError(f"no recorded PCM in {src_dir}; run capture for the base engine first")
@@ -178,6 +183,11 @@ class ReplaySynth:
 
 class FakeSynth:
     """Deterministic: a 220 Hz tone, 20 ms per character, with a text-dependent onset."""
+
+    parallel_safe = True  # stateless: lets RENDER_SYNTH_WORKERS>1 exercise the parallel path
+
+    def for_worker(self, threads=None):
+        return self
 
     def __call__(self, text: str, voice: str):
         from services import render_worker as rw
