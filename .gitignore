@@ -73,3 +73,6 @@ backend/voices/
 
 # Flake-hunt logs from the selective test runner
 backend/flake*.log
+
+# Spike output: precompiled sample audio/manifest (backend/scripts/precompile_sample.py)
+backend/scripts/output/

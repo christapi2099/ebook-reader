@@ -99,6 +99,7 @@ function createAudioStore() {
 
   const SPEED_CHANGE_DEBOUNCE_MS = 200
   const SENTENCE_TIMING_OFFSET_S = 0.016
+  const INITIAL_BUFFER_LEAD_S = 0.3
 
   let lastScheduledIndex = -1
   let speedChangeTimer: ReturnType<typeof setTimeout> | null = null
@@ -158,6 +159,18 @@ function createAudioStore() {
       const s = get({ subscribe })
       if (!s.isPlaying) { rafId = requestAnimationFrame(tick); return }
       const now = ac.currentTime
+
+      // Recompute `buffering` every frame, not just when a chunk arrives —
+      // otherwise a stall that never sends another chunk (synthesis falling
+      // behind real-time, e.g. 2x on a slow GPU) latches `buffering: true`
+      // forever, even after synthesis catches back up, because nothing else
+      // ever re-evaluates it.
+      if (nextStartTime > 0) {
+        const ahead = nextStartTime - now
+        if (ahead < 0.3 !== s.buffering) {
+          update(st => ({ ...st, buffering: ahead < 0.3 }))
+        }
+      }
 
       // Find the latest sentence whose scheduled start is <= now.
       // Taking the max (not the min) lets us catch up if several very short
@@ -238,8 +251,19 @@ function createAudioStore() {
       source.playbackRate.value = 1.0 // backend handles speed via Kokoro native param
       source.connect(ac.destination)
 
+      // The first chunk of a session (nextStartTime still 0, reset by stopAll)
+      // gets a short lead-in instead of starting the instant it decodes. With
+      // no lead-in, a slow synth engine (e.g. Piper on CPU, or Kokoro's first
+      // cold call) can lose the race to produce the *second* chunk before the
+      // first one finishes, producing an audible gap right as playback starts
+      // -- while the buffering spinner is still showing. This costs a fixed,
+      // barely-perceptible 0.3s of silence up front in exchange for giving
+      // the next chunk a head start.
+      const isSessionStart = nextStartTime === 0
       if (nextStartTime > 0 && nextStartTime < ac.currentTime - 0.5) nextStartTime = ac.currentTime
-      const startAt = Math.max(ac.currentTime, nextStartTime)
+      const startAt = isSessionStart
+        ? ac.currentTime + INITIAL_BUFFER_LEAD_S
+        : Math.max(ac.currentTime, nextStartTime)
 
       if (idx >= 0 && !sentenceTimings.has(idx)) {
         sentenceTimings.set(idx, startAt + SENTENCE_TIMING_OFFSET_S)

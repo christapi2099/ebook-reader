@@ -53,6 +53,20 @@ class PDFEngine(BaseEngine):
                 if not block_list:
                     continue
                 words_sorted = sorted(block_list, key=lambda w: (w[1], w[0]))
+
+                # Faux-bold/emphasis is sometimes rendered as the same glyph
+                # run painted twice at (near-)identical coordinates, which
+                # PyMuPDF reports as two separate words — collapse those
+                # before they reach TTS as "the the green green".
+                deduped: List[Tuple[float, float, float, float, str]] = []
+                for w in words_sorted:
+                    if deduped:
+                        pw = deduped[-1]
+                        if w[4] == pw[4] and abs(w[0] - pw[0]) < 1.0 and abs(w[1] - pw[1]) < 1.0:
+                            continue
+                    deduped.append(w)
+                words_sorted = deduped
+
                 block_text_parts = [w[4] for w in words_sorted]
                 block_text = " ".join(block_text_parts)
                 if not block_text.strip():

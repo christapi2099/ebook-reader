@@ -54,7 +54,12 @@ export interface Folder {
   book_count: number
 }
 
-export const API_BASE = 'http://localhost:8000'
+// In dev (`npm run dev`), the SvelteKit dev server has no proxy to the
+// backend, so we hit it directly on its dev port. In a production build
+// (the Docker image), nginx proxies API/WS routes on the same origin the
+// page was served from — a hardcoded absolute URL here would bypass that
+// proxy and silently try to reach a port nothing publishes.
+export const API_BASE = import.meta.env.PROD ? '/api' : 'http://localhost:8000'
 
 /**
  * Turn a failed response into an `ApiError` carrying the server's own

@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Precompiled audio sync spike</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+  h1 { font-size: 1.1rem; }
+  audio { width: 100%; margin: 1rem 0; }
+  #controls { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem; font-size: 0.9rem; }
+  #readout { font-family: ui-monospace, monospace; font-size: 0.85rem; background: #8883; padding: 0.5rem 0.75rem; border-radius: 6px; margin-bottom: 1rem; }
+  #sentences { border-top: 1px solid #8885; }
+  .sentence { padding: 0.6rem 0.4rem; border-bottom: 1px solid #8882; cursor: pointer; }
+  .sentence.active { background: #ffe08a55; }
+  .word { }
+  .word.active { background: #4ea1ff88; border-radius: 3px; }
+  .meta { color: #888; font-size: 0.75rem; }
+</style>
+</head>
+<body>
+  <h1>Precompiled audio + sync manifest — spike verification page</h1>
+  <p class="meta">Point this at the output of <code>backend/scripts/precompile_sample.py</code>, e.g.
+    serve <code>backend/scripts/output/</code> with <code>python -m http.server 8899</code> and open
+    <code>?base=http://127.0.0.1:8899/</code>.</p>
+
+  <div id="controls">
+    <label for="speedSelect">Speed tier:</label>
+    <select id="speedSelect"></select>
+  </div>
+
+  <audio id="player" controls></audio>
+  <div id="readout">loading…</div>
+  <div id="sentences"></div>
+
+<script>
+const params = new URLSearchParams(location.search);
+const base = params.get('base') || './';
+
+const player = document.getElementById('player');
+const readout = document.getElementById('readout');
+const sentencesEl = document.getElementById('sentences');
+const speedSelect = document.getElementById('speedSelect');
+
+let tiersIndex = null;
+let manifest = null;
+let sentenceEls = [];
+let wordEls = []; // flat list of {el, sentenceIndex, start_ms, end_ms}
+
+// Which sentence/word were playing right before a tier switch, so we can
+// resume at the SAME logical position in the new tier's timeline rather than
+// the same raw second (each tier has a different duration).
+let pendingResumeSentence = null;
+let wasPlaying = false;
+
+async function loadTiersIndex() {
+  const res = await fetch(base + 'tiers.json');
+  if (!res.ok) throw new Error(`tiers.json: HTTP ${res.status}`);
+  tiersIndex = await res.json();
+
+  speedSelect.innerHTML = '';
+  tiersIndex.tiers.forEach((tier) => {
+    const opt = document.createElement('option');
+    opt.value = tier.manifest_url;
+    const note = tier.effective_speed !== tier.requested_speed
+      ? ` (effective ${tier.effective_speed}x — engine couldn't honor request)`
+      : '';
+    const method = tier.method === 'atempo' ? ' — atempo (audio-stretched)' : ' — native (Kokoro speed=)';
+    opt.textContent = `${tier.requested_speed}x${method}${note}`;
+    speedSelect.appendChild(opt);
+  });
+}
+
+async function loadManifest(manifestUrl) {
+  const res = await fetch(base + manifestUrl);
+  if (!res.ok) throw new Error(`${manifestUrl}: HTTP ${res.status}`);
+  manifest = await res.json();
+
+  sentencesEl.innerHTML = '';
+  sentenceEls = [];
+  wordEls = [];
+  lastSentence = -1;
+  lastWord = -1;
+
+  manifest.segments.forEach((seg, i) => {
+    const div = document.createElement('div');
+    div.className = 'sentence';
+    div.dataset.index = i;
+
+    if (seg.words && seg.words.length) {
+      seg.words.forEach((w) => {
+        const span = document.createElement('span');
+        span.className = 'word';
+        span.textContent = w.text + ' ';
+        div.appendChild(span);
+        wordEls.push({ el: span, sentenceIndex: i, start_ms: w.start_ms, end_ms: w.end_ms });
+      });
+    } else {
+      div.textContent = seg.text;
+    }
+
+    div.addEventListener('click', () => {
+      player.currentTime = seg.start_ms / 1000;
+      player.play();
+    });
+
+    sentencesEl.appendChild(div);
+    sentenceEls.push(div);
+  });
+
+  const requested = manifest.requested_speed;
+  const effective = manifest.effective_speed;
+  const speedNote = effective !== requested ? ` (effective ${effective}x)` : '';
+  readout.textContent = `loaded ${manifest.segments.length} segments, ` +
+    `${manifest.duration_ms.toFixed(0)}ms total @ ${requested}x${speedNote}`;
+
+  player.src = base + manifest.audio_url;
+
+  // Resume at the equivalent sentence in the new tier's timeline.
+  if (pendingResumeSentence !== null && manifest.segments[pendingResumeSentence]) {
+    const seg = manifest.segments[pendingResumeSentence];
+    player.addEventListener('loadedmetadata', () => {
+      player.currentTime = seg.start_ms / 1000;
+      if (wasPlaying) player.play();
+    }, { once: true });
+  }
+  pendingResumeSentence = null;
+}
+
+speedSelect.addEventListener('change', async () => {
+  pendingResumeSentence = lastSentence >= 0 ? lastSentence : null;
+  wasPlaying = !player.paused;
+  player.pause();
+  try {
+    await loadManifest(speedSelect.value);
+  } catch (err) {
+    readout.textContent = 'failed to load manifest: ' + err;
+  }
+});
+
+// Binary search: last segment whose start_ms <= t.
+function findSentenceIndex(t_ms) {
+  const segs = manifest.segments;
+  let lo = 0, hi = segs.length - 1, ans = 0;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (segs[mid].start_ms <= t_ms) { ans = mid; lo = mid + 1; }
+    else { hi = mid - 1; }
+  }
+  return ans;
+}
+
+let lastSentence = -1;
+let lastWord = -1;
+
+// requestAnimationFrame instead of `timeupdate`: the browser throttles
+// timeupdate (commonly ~4-15Hz, sometimes as sparse as 250ms apart), which is
+// fine for sentence-granularity but skips right over word boundaries once
+// words get short — e.g. at 1.5x+ speech, words compress toward 100-200ms and
+// timeupdate starts missing them entirely (visible as jumpy/broken word
+// highlighting). rAF polls ~60Hz against the same currentTime clock, same
+// trick frontend/src/lib/stores/audio.ts uses for the live-streamed path.
+function tick() {
+  requestAnimationFrame(tick);
+  if (!manifest || player.paused) return;
+
+  const t_ms = player.currentTime * 1000;
+  const si = findSentenceIndex(t_ms);
+
+  if (si !== lastSentence) {
+    if (lastSentence >= 0 && sentenceEls[lastSentence]) sentenceEls[lastSentence].classList.remove('active');
+    sentenceEls[si].classList.add('active');
+    sentenceEls[si].scrollIntoView({ block: 'center', behavior: 'smooth' });
+    lastSentence = si;
+  }
+
+  // Active word: last word in this sentence whose start_ms <= t_ms < end_ms (or just started).
+  let activeWordEl = -1;
+  for (let i = 0; i < wordEls.length; i++) {
+    const w = wordEls[i];
+    if (w.sentenceIndex !== si) continue;
+    if (w.start_ms <= t_ms) activeWordEl = i;
+    if (w.start_ms > t_ms) break;
+  }
+  if (activeWordEl !== lastWord) {
+    if (lastWord >= 0) wordEls[lastWord].el.classList.remove('active');
+    if (activeWordEl >= 0) wordEls[activeWordEl].el.classList.add('active');
+    lastWord = activeWordEl;
+  }
+
+  const word = activeWordEl >= 0 ? wordEls[activeWordEl].el.textContent.trim() : '(none)';
+  readout.textContent = `t=${t_ms.toFixed(0)}ms  sentence=${si}  word="${word}"  speed=${manifest.requested_speed}x`;
+}
+requestAnimationFrame(tick);
+
+(async () => {
+  try {
+    await loadTiersIndex();
+    await loadManifest(speedSelect.value);
+  } catch (err) {
+    readout.textContent = 'failed to load: ' + err;
+  }
+})();
+</script>
+</body>
+</html>

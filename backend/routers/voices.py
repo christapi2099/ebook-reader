@@ -5,6 +5,7 @@ import numpy as np
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import Response
 
+from services import engine_manager
 from services.tts_engine import SAMPLE_RATE
 
 VOICES_DIR = Path("voices")
@@ -38,36 +39,55 @@ def _resolve_custom_voice_path(name: str) -> Path:
 
 ENGLISH_VOICE_CATALOG = [
     # American English
-    {"id": "af_heart",   "name": "Heart",   "lang": "en-US", "gender": "female", "quality": "A",  "built_in": True},
-    {"id": "af_bella",   "name": "Bella",   "lang": "en-US", "gender": "female", "quality": "A-", "built_in": True},
-    {"id": "af_nicole",  "name": "Nicole",  "lang": "en-US", "gender": "female", "quality": "B-", "built_in": True},
-    {"id": "af_nova",    "name": "Nova",    "lang": "en-US", "gender": "female", "quality": "C",  "built_in": True},
-    {"id": "af_sky",     "name": "Sky",     "lang": "en-US", "gender": "female", "quality": "C-", "built_in": True},
-    {"id": "af_sarah",   "name": "Sarah",   "lang": "en-US", "gender": "female", "quality": "C+", "built_in": True},
-    {"id": "af_alloy",   "name": "Alloy",   "lang": "en-US", "gender": "female", "quality": "C",  "built_in": True},
-    {"id": "af_aoede",   "name": "Aoede",   "lang": "en-US", "gender": "female", "quality": "C+", "built_in": True},
-    {"id": "af_kore",    "name": "Kore",    "lang": "en-US", "gender": "female", "quality": "C+", "built_in": True},
-    {"id": "af_jessica", "name": "Jessica", "lang": "en-US", "gender": "female", "quality": "D",  "built_in": True},
-    {"id": "af_river",   "name": "River",   "lang": "en-US", "gender": "female", "quality": "D",  "built_in": True},
-    {"id": "am_adam",    "name": "Adam",    "lang": "en-US", "gender": "male",   "quality": "F+", "built_in": True},
-    {"id": "am_michael", "name": "Michael", "lang": "en-US", "gender": "male",   "quality": "C+", "built_in": True},
-    {"id": "am_fenrir",  "name": "Fenrir",  "lang": "en-US", "gender": "male",   "quality": "C+", "built_in": True},
-    {"id": "am_puck",    "name": "Puck",    "lang": "en-US", "gender": "male",   "quality": "C+", "built_in": True},
-    {"id": "am_onyx",    "name": "Onyx",    "lang": "en-US", "gender": "male",   "quality": "D",  "built_in": True},
-    {"id": "am_echo",    "name": "Echo",    "lang": "en-US", "gender": "male",   "quality": "D",  "built_in": True},
-    {"id": "am_eric",    "name": "Eric",    "lang": "en-US", "gender": "male",   "quality": "D",  "built_in": True},
-    {"id": "am_liam",    "name": "Liam",    "lang": "en-US", "gender": "male",   "quality": "D",  "built_in": True},
-    {"id": "am_santa",   "name": "Santa",   "lang": "en-US", "gender": "male",   "quality": "D-", "built_in": True},
+    {"id": "af_heart",   "name": "Heart",   "lang": "en-US", "gender": "female", "quality": "A",  "built_in": True, "engine": "kokoro"},
+    {"id": "af_bella",   "name": "Bella",   "lang": "en-US", "gender": "female", "quality": "A-", "built_in": True, "engine": "kokoro"},
+    {"id": "af_nicole",  "name": "Nicole",  "lang": "en-US", "gender": "female", "quality": "B-", "built_in": True, "engine": "kokoro"},
+    {"id": "af_nova",    "name": "Nova",    "lang": "en-US", "gender": "female", "quality": "C",  "built_in": True, "engine": "kokoro"},
+    {"id": "af_sky",     "name": "Sky",     "lang": "en-US", "gender": "female", "quality": "C-", "built_in": True, "engine": "kokoro"},
+    {"id": "af_sarah",   "name": "Sarah",   "lang": "en-US", "gender": "female", "quality": "C+", "built_in": True, "engine": "kokoro"},
+    {"id": "af_alloy",   "name": "Alloy",   "lang": "en-US", "gender": "female", "quality": "C",  "built_in": True, "engine": "kokoro"},
+    {"id": "af_aoede",   "name": "Aoede",   "lang": "en-US", "gender": "female", "quality": "C+", "built_in": True, "engine": "kokoro"},
+    {"id": "af_kore",    "name": "Kore",    "lang": "en-US", "gender": "female", "quality": "C+", "built_in": True, "engine": "kokoro"},
+    {"id": "af_jessica", "name": "Jessica", "lang": "en-US", "gender": "female", "quality": "D",  "built_in": True, "engine": "kokoro"},
+    {"id": "af_river",   "name": "River",   "lang": "en-US", "gender": "female", "quality": "D",  "built_in": True, "engine": "kokoro"},
+    {"id": "am_adam",    "name": "Adam",    "lang": "en-US", "gender": "male",   "quality": "F+", "built_in": True, "engine": "kokoro"},
+    {"id": "am_michael", "name": "Michael", "lang": "en-US", "gender": "male",   "quality": "C+", "built_in": True, "engine": "kokoro"},
+    {"id": "am_fenrir",  "name": "Fenrir",  "lang": "en-US", "gender": "male",   "quality": "C+", "built_in": True, "engine": "kokoro"},
+    {"id": "am_puck",    "name": "Puck",    "lang": "en-US", "gender": "male",   "quality": "C+", "built_in": True, "engine": "kokoro"},
+    {"id": "am_onyx",    "name": "Onyx",    "lang": "en-US", "gender": "male",   "quality": "D",  "built_in": True, "engine": "kokoro"},
+    {"id": "am_echo",    "name": "Echo",    "lang": "en-US", "gender": "male",   "quality": "D",  "built_in": True, "engine": "kokoro"},
+    {"id": "am_eric",    "name": "Eric",    "lang": "en-US", "gender": "male",   "quality": "D",  "built_in": True, "engine": "kokoro"},
+    {"id": "am_liam",    "name": "Liam",    "lang": "en-US", "gender": "male",   "quality": "D",  "built_in": True, "engine": "kokoro"},
+    {"id": "am_santa",   "name": "Santa",   "lang": "en-US", "gender": "male",   "quality": "D-", "built_in": True, "engine": "kokoro"},
     # British English
-    {"id": "bf_emma",     "name": "Emma",     "lang": "en-GB", "gender": "female", "quality": "B-", "built_in": True},
-    {"id": "bf_isabella", "name": "Isabella", "lang": "en-GB", "gender": "female", "quality": "C",  "built_in": True},
-    {"id": "bf_alice",    "name": "Alice",    "lang": "en-GB", "gender": "female", "quality": "D",  "built_in": True},
-    {"id": "bf_lily",     "name": "Lily",     "lang": "en-GB", "gender": "female", "quality": "D",  "built_in": True},
-    {"id": "bm_george",   "name": "George",   "lang": "en-GB", "gender": "male",   "quality": "C",  "built_in": True},
-    {"id": "bm_lewis",    "name": "Lewis",    "lang": "en-GB", "gender": "male",   "quality": "D+", "built_in": True},
-    {"id": "bm_fable",    "name": "Fable",    "lang": "en-GB", "gender": "male",   "quality": "C",  "built_in": True},
-    {"id": "bm_daniel",   "name": "Daniel",   "lang": "en-GB", "gender": "male",   "quality": "D",  "built_in": True},
+    {"id": "bf_emma",     "name": "Emma",     "lang": "en-GB", "gender": "female", "quality": "B-", "built_in": True, "engine": "kokoro"},
+    {"id": "bf_isabella", "name": "Isabella", "lang": "en-GB", "gender": "female", "quality": "C",  "built_in": True, "engine": "kokoro"},
+    {"id": "bf_alice",    "name": "Alice",    "lang": "en-GB", "gender": "female", "quality": "D",  "built_in": True, "engine": "kokoro"},
+    {"id": "bf_lily",     "name": "Lily",     "lang": "en-GB", "gender": "female", "quality": "D",  "built_in": True, "engine": "kokoro"},
+    {"id": "bm_george",   "name": "George",   "lang": "en-GB", "gender": "male",   "quality": "C",  "built_in": True, "engine": "kokoro"},
+    {"id": "bm_lewis",    "name": "Lewis",    "lang": "en-GB", "gender": "male",   "quality": "D+", "built_in": True, "engine": "kokoro"},
+    {"id": "bm_fable",    "name": "Fable",    "lang": "en-GB", "gender": "male",   "quality": "C",  "built_in": True, "engine": "kokoro"},
+    {"id": "bm_daniel",   "name": "Daniel",   "lang": "en-GB", "gender": "male",   "quality": "D",  "built_in": True, "engine": "kokoro"},
 ]
+
+PIPER_VOICES_DIR = Path("voices/piper")
+
+PIPER_VOICE_CATALOG = [
+    {"id": "piper:en_US-lessac-medium", "name": "Lessac", "lang": "en-US", "gender": "female", "quality": "medium", "built_in": True, "engine": "piper"},
+    {"id": "piper:en_US-amy-medium",     "name": "Amy",    "lang": "en-US", "gender": "female", "quality": "medium", "built_in": True, "engine": "piper"},
+    {"id": "piper:en_US-ryan-medium",    "name": "Ryan",   "lang": "en-US", "gender": "male",   "quality": "medium", "built_in": True, "engine": "piper"},
+]
+
+
+def _scan_piper_voices():
+    """Only list Piper catalog entries whose .onnx model is actually present."""
+    if not PIPER_VOICES_DIR.exists():
+        return []
+    available = {p.stem for p in PIPER_VOICES_DIR.glob("*.onnx")}
+    return [
+        v for v in PIPER_VOICE_CATALOG
+        if v["id"].split(":", 1)[1] in available
+    ]
 
 router = APIRouter(prefix="/voices")
 
@@ -99,8 +119,10 @@ def _scan_custom_voices():
 
 @router.get("")
 def list_voices():
-    custom = _scan_custom_voices()
-    return ENGLISH_VOICE_CATALOG + custom
+    active = engine_manager.manager.active()
+    if active == engine_manager.PIPER:
+        return _scan_piper_voices()
+    return ENGLISH_VOICE_CATALOG + _scan_custom_voices()
 
 
 @router.post("/upload")

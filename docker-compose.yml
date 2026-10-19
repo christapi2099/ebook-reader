@@ -6,28 +6,19 @@ services:
     container_name: ebook-tts-backend
     restart: unless-stopped
     ports:
-      - "3001:8000"
+      - "3002:8000"
     volumes:
       - backend_uploads:/app/uploads
       - backend_data:/data
     environment:
       - PYTHONUNBUFFERED=1
       - DB_PATH=/data/ebook_reader.db
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       - UVICORN_WS=websockets
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
     healthcheck:
       test: ["CMD", "curl", "-fs", "http://localhost:8000/health"]
       interval: 30s
