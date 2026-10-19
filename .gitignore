@@ -85,6 +85,3 @@ backend/scripts/output/
 *.db.*.bak
 tts-cpu-tuning/
 deploy/
-
-# Precompiled chapter audio + sync manifests (services/precompile_engine.py)
-backend/chapter_audio/

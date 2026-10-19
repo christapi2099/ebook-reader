@@ -865,6 +865,11 @@ total**. **Intent** — recorded in `docs/research/02-synthesis-strategy.md` §6
 
 ### 6.6 · 2026-09-27 addendum: precompiled chapter audio (implemented)
 
+> **Removed.** This per-chapter path (`routers/precompiled_audio.py`, `services/precompile_engine.py`,
+> `ChapterAudio`) was superseded by the process-first whole-book render
+> (`docs/plans/process-first-architecture.md`, `services/render_*`) and deleted from `main`. It remains in
+> the history at `agent/precompiled-audio`. Kept below as the record of why the render format works as it does.
+
 **What this is.** A second playback path, alongside — not replacing — everything in §6.1–6.5 and
 §3. `services/precompile_engine.py` + `routers/precompiled_audio.py` synthesise one chapter at
 1.0× through the same `TTSEngine`/`AudioCache` as the live path, encode it to Opus, and derive

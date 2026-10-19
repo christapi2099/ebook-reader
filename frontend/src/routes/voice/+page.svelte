@@ -46,8 +46,7 @@
 
   function selectVoice(id: string) {
     selectedVoice = id
-    const engineId = voices.find(v => v.id === id)?.engine ?? 'kokoro'
-    settingsStore.setVoiceForEngine(engineId, id)
+    settingsStore.setVoice(id)
   }
 
   function releaseAudio() {

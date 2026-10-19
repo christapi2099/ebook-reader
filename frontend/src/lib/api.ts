@@ -314,8 +314,6 @@ export interface Voice {
   gender: string
   quality: string
   built_in: boolean
-  /** Which engine this voice belongs to (`kokoro`/`piper`); absent on legacy rows means `kokoro`. */
-  engine?: string
 }
 
 export async function getVoices(): Promise<Voice[]> {
@@ -408,105 +406,6 @@ export async function getExports(): Promise<ExportItem[]> {
 
 export async function getExportStatus(exportId: number): Promise<ExportStatus> {
   return fetchApi(`/mp3/exports/${exportId}/status`)
-}
-
-// --------------------------------------------------------------------------
-// Precompiled chapter audio (Opus + sync manifest, atempo speed tiers)
-//
-// Companion to TTSSocket's live WebSocket streaming, not a replacement for
-// it — see stores/audio.ts. A chapter's audio is built once in the
-// background (`buildPrecompiledChapter`) and served from disk from then on;
-// `getPrecompiledStatus` is polled the same way `getExports` is for MP3
-// exports (plain REST, no WebSocket needed for job progress).
-// --------------------------------------------------------------------------
-
-export interface PrecompiledTierStatus {
-  requested_speed: number
-  effective_speed: number | null
-  method: 'native' | 'atempo'
-  status: 'pending' | 'processing' | 'done' | 'error'
-  phase: string | null
-  progress: number
-  duration_ms: number | null
-  error_message: string | null
-}
-
-export interface PrecompiledWord {
-  text: string
-  start_ms: number
-  end_ms: number
-}
-
-export interface PrecompiledSegment {
-  sentence_index: number
-  page: number
-  start_ms: number
-  end_ms: number
-  words: PrecompiledWord[]
-}
-
-export interface PrecompiledManifest {
-  requested_speed: number
-  effective_speed: number
-  method: 'native' | 'atempo'
-  sample_rate: number
-  audio_url: string
-  duration_ms: number
-  segments: PrecompiledSegment[]
-}
-
-export interface PrecompiledBuildResult {
-  status: 'queued' | 'already_queued' | 'already_done'
-  /** 0 = running now, 1 = next in line, ... absent when status is 'already_done'. */
-  queue_position?: number
-  tiers?: number[]
-}
-
-export interface PrecompiledStatusResult {
-  tiers: PrecompiledTierStatus[]
-  /** This chapter's own position in the global precompile queue (see
-   * routers/precompiled_audio.py's module docstring for why builds are
-   * serialized): 0 = running now, 1 = next, ... null = not queued (either
-   * finished, errored, or never requested). */
-  queue_position: number | null
-}
-
-export async function buildPrecompiledChapter(
-  bookId: string,
-  chapter: number,
-  voice: string,
-  speeds: number[],
-): Promise<PrecompiledBuildResult> {
-  return fetchApi(`/precompiled/${bookId}/chapters/${chapter}/build`, {
-    method: 'POST',
-    body: JSON.stringify({ voice, speeds }),
-  })
-}
-
-export async function getPrecompiledStatus(
-  bookId: string,
-  chapter: number,
-  voice: string,
-): Promise<PrecompiledStatusResult> {
-  return fetchApi(
-    `/precompiled/${bookId}/chapters/${chapter}/status?voice=${encodeURIComponent(voice)}`,
-  )
-}
-
-export async function getPrecompiledManifest(
-  bookId: string,
-  chapter: number,
-  voice: string,
-  speed: number,
-): Promise<PrecompiledManifest> {
-  return fetchApi(
-    `/precompiled/${bookId}/chapters/${chapter}/manifest?voice=${encodeURIComponent(voice)}&speed=${speed}`,
-  )
-}
-
-/** Not fetched through `fetchApi` — this is a plain URL an `<audio>` element's `src` points at directly, so the browser can issue its own Range requests for seeking. */
-export function precompiledAudioUrl(bookId: string, chapter: number, voice: string, speed: number): string {
-  return `${API_BASE}/precompiled/${bookId}/chapters/${chapter}/audio?voice=${encodeURIComponent(voice)}&speed=${speed}`
 }
 
 export async function deleteExport(exportId: number): Promise<void> {
