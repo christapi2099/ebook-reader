@@ -6,7 +6,7 @@ process. ``EngineManager`` makes the same decision at runtime: it builds the
 requested engine first and swaps it in only on success, so a failed switch
 leaves the previous engine running and the reader keeps working.
 
-Four engines, all funnelling into the same ``TTSEngine`` contract:
+Five engines, all funnelling into the same ``TTSEngine`` contract:
 
 ``cpu`` / ``gpu``
     The in-process ``KPipeline``. ``gpu`` asks torch for CUDA; switching between
@@ -19,6 +19,9 @@ Four engines, all funnelling into the same ``TTSEngine`` contract:
     ``PiperEngine``, a small VITS model on the CPU. Same call shape as the others;
     it also gives native phoneme durations to the render path. The render
     fingerprint's engine family becomes ``piper`` while it is live.
+``kokoro-onnx``
+    ``KokoroOnnxEngine``: the Kokoro fp32 ONNX export on onnxruntime (CPU, or a GPU
+    provider when one is selected and present). Own engine family, parallel-safe.
 
 The manager owns no FastAPI or router state. When the live engine changes it
 calls whatever applier was registered with :func:`register_applier`; ``main``
@@ -40,6 +43,8 @@ from services import env_config, gpu_inventory, kokoro_runtime, modal_remote
 
 logger = logging.getLogger(__name__)
 
+NOT_INSTALLED = "Kokoro ONNX model not installed"  # prefix of the probe reason (kokoro_onnx_engine)
+
 KOKORO_MODEL_REPO = "hexgrad/Kokoro-82M"
 KOKORO_LANG_CODE = "a"
 
@@ -47,13 +52,15 @@ CPU = "cpu"
 GPU = "gpu"
 MODAL = "modal"
 PIPER = "piper"
-ENGINE_IDS = (CPU, GPU, MODAL, PIPER)
+KOKORO_ONNX = "kokoro-onnx"
+ENGINE_IDS = (CPU, GPU, MODAL, PIPER, KOKORO_ONNX)
 
 ENGINE_LABELS = {
     CPU: "This device · CPU",
     GPU: "This device · GPU",
     MODAL: "Cloud · Modal GPU",
     PIPER: "This device · Piper",
+    KOKORO_ONNX: "This device · Kokoro ONNX",
 }
 
 # One vocabulary for "what is the GPU doing", shared by this module, the export
@@ -128,6 +135,9 @@ class EngineOption:
     label: str
     available: bool
     reason: str | None = None
+    # True when the engine is unavailable only because its model files are missing and
+    # ``POST /api/system/engine/{id}/install`` can fetch them.
+    installable: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -135,6 +145,7 @@ class EngineOption:
             "label": self.label,
             "available": self.available,
             "reason": self.reason,
+            "installable": self.installable,
         }
 
 
@@ -184,6 +195,22 @@ def build_piper(voices_dir=None) -> tuple[Any | None, str | None]:
         logger.exception("[piper] engine failed to initialise")
         return None, f"{type(exc).__name__}: {exc}"
     logger.info("[piper] engine ready with %d voices", len(engine.available_voices()))
+    return engine, None
+
+
+def build_kokoro_onnx(model_dir=None) -> tuple[Any | None, str | None]:
+    """Build the Kokoro ONNX engine. A GPU provider is used only when a GPU is selected in
+    settings and onnxruntime offers one; otherwise (or if it is absent) it runs on the CPU."""
+    from services import kokoro_onnx_engine
+
+    device = "gpu" if load_persisted_gpu_device() else "cpu"
+    try:
+        engine = kokoro_onnx_engine.KokoroOnnxEngine(
+            str(model_dir or storage.KOKORO_ONNX_DIR), device=device)
+    except Exception as exc:
+        logger.exception("[kokoro-onnx] engine failed to initialise")
+        return None, f"{type(exc).__name__}: {exc}"
+    logger.info("[kokoro-onnx] engine ready (providers=%s)", engine.providers)
     return engine, None
 
 
@@ -315,6 +342,12 @@ def _default_piper_probe() -> tuple[bool, str | None]:
     return piper_engine.probe_voices(storage.PIPER_VOICES_DIR)
 
 
+def _default_kokoro_onnx_probe() -> tuple[bool, str | None]:
+    from services import kokoro_onnx_engine
+
+    return kokoro_onnx_engine.probe(storage.KOKORO_ONNX_DIR)
+
+
 def register_applier(applier: Callable[[Any], None]) -> None:
     """Register the callback that pushes a new engine into the routers."""
     global _applier
@@ -332,11 +365,15 @@ class EngineManager:
         remote_probe: Callable[..., dict[str, Any]] | None = None,
         piper_builder: Callable[[], tuple[Any | None, str | None]] = build_piper,
         piper_probe: Callable[[], tuple[bool, str | None]] | None = None,
+        kokoro_onnx_builder: Callable[[], tuple[Any | None, str | None]] = build_kokoro_onnx,
+        kokoro_onnx_probe: Callable[[], tuple[bool, str | None]] | None = None,
     ) -> None:
         self._local_builder = local_builder
         self._remote_builder = remote_builder
         self._piper_builder = piper_builder
         self._piper_probe = piper_probe or _default_piper_probe
+        self._kokoro_onnx_builder = kokoro_onnx_builder
+        self._kokoro_onnx_probe = kokoro_onnx_probe or _default_kokoro_onnx_probe
         # Both probes are injectable, and both the selector and the startup path
         # go through these same two callables: reading cuda_available from one
         # source while a switch consulted another is how a machine with no GPU
@@ -413,6 +450,8 @@ class EngineManager:
             return self._modal_availability()
         if engine_id == PIPER:
             return self._piper_availability()
+        if engine_id == KOKORO_ONNX:
+            return self._kokoro_onnx_availability()
         raise UnknownEngine(f"Unknown engine {engine_id!r}; expected one of {', '.join(ENGINE_IDS)}")
 
     def _local_availability(self, engine_id: str) -> EngineOption:
@@ -440,6 +479,12 @@ class EngineManager:
     def _piper_availability(self) -> EngineOption:
         available, reason = self._piper_probe()
         return EngineOption(PIPER, ENGINE_LABELS[PIPER], available, None if available else reason)
+
+    def _kokoro_onnx_availability(self) -> EngineOption:
+        available, reason = self._kokoro_onnx_probe()
+        return EngineOption(KOKORO_ONNX, ENGINE_LABELS[KOKORO_ONNX], available,
+                            None if available else reason,
+                            installable=not available and bool(reason) and reason.startswith(NOT_INSTALLED))
 
     def options(self) -> list[EngineOption]:
         """Every engine, with the reason each one is or is not usable.
@@ -514,6 +559,8 @@ class EngineManager:
             client, error = self._remote_builder(False)
         elif engine_id == PIPER:
             client, error = self._piper_builder()
+        elif engine_id == KOKORO_ONNX:
+            client, error = self._kokoro_onnx_builder()
         else:
             device = gpu_torch_device() if engine_id == GPU else "cpu"
             client, error = self._local_builder(device)
@@ -555,6 +602,10 @@ class EngineManager:
             state.record_remote()
         elif engine_id == PIPER:
             state.record_local(device="cpu", model_repo="piper")
+        elif engine_id == KOKORO_ONNX:
+            providers = getattr(engine, "providers", ["CPUExecutionProvider"])
+            state.record_local(device="gpu" if providers[0] != "CPUExecutionProvider" else "cpu",
+                               model_repo="kokoro-onnx")
         else:
             state.record_local(
                 device=gpu_torch_device() if engine_id == GPU else "cpu",

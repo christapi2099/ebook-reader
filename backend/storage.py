@@ -10,6 +10,9 @@ UPLOADS_DIR = Path(os.environ.get("UPLOADS_DIR") or Path(__file__).parent / "upl
 # Piper voice models (``*.onnx`` plus their ``*.onnx.json`` configs). Lives under
 # backend/voices/piper by default; ``voices/`` at the root holds custom ``.pt`` packs.
 PIPER_VOICES_DIR = Path(os.environ.get("PIPER_VOICES_DIR") or Path(__file__).parent / "voices" / "piper")
+
+# Kokoro fp32 ONNX model (``kokoro-v1.0.onnx`` + ``voices-v1.0.bin``, ~325 MB), gitignored.
+KOKORO_ONNX_DIR = Path(os.environ.get("KOKORO_ONNX_DIR") or Path(__file__).parent / "voices" / "kokoro-onnx")
 # First-page cover images (PNG), one per book, made from the PDF on first request.
 COVERS_DIR = Path(os.environ.get("COVERS_DIR") or Path(__file__).parent / "covers")
 
