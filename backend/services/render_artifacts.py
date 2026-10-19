@@ -8,13 +8,16 @@ in ``manifest["tiers"]`` (``render_store.reconcile`` relies on that).
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 import numpy as np
 import soundfile as sf
 
 from services import book_processor
+from services.env_config import positive_int
 
 SR = 24000
 BITRATE_K = 24
@@ -37,6 +40,46 @@ class RenderError(RuntimeError):
 class RenderAuditError(RenderError):
     def __init__(self, message: str):
         super().__init__(message, phase="drift_audit")
+
+
+def tier_workers() -> int:
+    """Concurrent tier encodes: ``RENDER_TIER_WORKERS`` or ``min(4, max(1, cpus // 2))``."""
+    default = min(4, max(1, (os.cpu_count() or 2) // 2))
+    return positive_int("RENDER_TIER_WORKERS", default)
+
+
+def _run_ordered(items: list, fn, workers: int, on_done=None) -> list:
+    """Run ``fn(item)`` for each item on up to ``workers`` threads.
+
+    Results come back in input order whatever the completion order. ``on_done(n)``
+    is called from the CALLING thread only, with the running completed count.
+    The first failure stops submission, cancels what has not started, waits for
+    what is running, then re-raises the failure of the lowest-index item (the one
+    the serial loop would have hit first).
+    """
+    results: list = [None] * len(items)
+    errors: dict[int, BaseException] = {}
+    nxt = completed = 0
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        running: dict = {}
+        while (nxt < len(items) and not errors) or running:
+            while nxt < len(items) and not errors and len(running) < workers:
+                running[pool.submit(fn, items[nxt])] = nxt
+                nxt += 1
+            finished, _ = wait(list(running), return_when=FIRST_COMPLETED)
+            for f in finished:
+                i = running.pop(f)
+                try:
+                    results[i] = f.result()
+                except BaseException as exc:  # noqa: BLE001 - re-raised below
+                    errors[i] = exc
+                    continue
+                completed += 1
+                if on_done and not errors:
+                    on_done(completed)
+    if errors:
+        raise errors[min(errors)]
+    return results
 
 
 def tier_key(t: float) -> str:
@@ -142,17 +185,13 @@ def build_tiers(base_flac, segments: list[dict], tiers=None, work_dir=None, on_s
     base_ms = ffprobe_duration_ms(base)
     out = {}
     factors = (1.0, *[float(x) for x in tiers if float(x) != 1.0])
-    for done, t in enumerate(factors):
-        key = tier_key(t)
-        path = work / f"audio_{key}.opus"
-        if on_step:
-            on_step(done / len(factors))
-        _encode(base, path, t)
+
+    def _entry(t: float, path: Path) -> dict:
         if t == 1.0:
             actual = 1.0
         else:
             actual = base_ms / ffprobe_duration_ms(path)
-        out[key] = {
+        return {
             "requested_factor": t, "actual_factor": actual, "max_drift_ms": 0.0,
             "duration_ms": ffprobe_duration_ms(path), "path": path,
             "segments": [{**s, "start_ms": s["start_ms"] / actual, "end_ms": s["end_ms"] / actual,
@@ -160,6 +199,44 @@ def build_tiers(base_flac, segments: list[dict], tiers=None, work_dir=None, on_s
                                      "end_ms": w["end_ms"] / actual} for w in s["words"]]}
                          for s in segments],
         }
+
+    workers = tier_workers()
+    if workers <= 1 or len(factors) <= 1:
+        for done, t in enumerate(factors):
+            key = tier_key(t)
+            path = work / f"audio_{key}.opus"
+            if on_step:
+                on_step(done / len(factors))
+            _encode(base, path, t)
+            out[key] = _entry(t, path)
+        if on_step:
+            on_step(1.0)
+        return out
+
+    # Each tier writes only work/audio_<key>.opus, so tiers cannot clobber each
+    # other as long as keys are unique: collapse repeated factors (the serial loop
+    # would just overwrite the same dict entry) so two threads never share a file.
+    unique: dict[str, float] = {}
+    for t in factors:
+        unique.setdefault(tier_key(t), t)
+    items = list(unique.items())
+
+    def _one(item):
+        key, t = item
+        path = work / f"audio_{key}.opus"
+        try:
+            _encode(base, path, t)
+            return _entry(t, path)
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+
+    if on_step:
+        on_step(0.0)
+    entries = _run_ordered(items, _one, workers,
+                           (lambda n: on_step(n / len(items))) if on_step else None)
+    for (key, _t), entry in zip(items, entries):
+        out[key] = entry
     if on_step:
         on_step(1.0)
     return out
@@ -216,27 +293,45 @@ def drift_audit(base_flac, segments: list[dict], tier_results: dict, work_dir=No
     sf.write(mbase, np.clip(x, -1, 1), SR, format="FLAC", subtype="PCM_16")
     exp = centers[pick]
     report = {}
+
+    def _audit_one(item):
+        key, info = item
+        opus = work / f"audit_{key}.opus"
+        wav = work / f"audit_{key}.wav"
+        _encode(mbase, opus, info["requested_factor"])
+        _run(["ffmpeg", "-y", "-v", "error", "-i", str(opus), "-ar", str(SR), "-ac", "1", str(wav)])
+        y, _ = sf.read(wav, dtype="float32")
+        lin = exp / info["actual_factor"]
+        drift = _detect(y, lin) - lin
+        for j, d in enumerate(drift):
+            edge = pick[j] in (0, len(centers) - 1)
+            tol = TOL_EDGE_MS if edge else TOL_SAMPLED_MS
+            if abs(d) > tol:
+                raise RenderAuditError(
+                    f"tier {key}: drift {d:+.1f} ms at boundary {pick[j]} exceeds {tol:.0f} ms")
+        opus.unlink(missing_ok=True)
+        wav.unlink(missing_ok=True)
+        return float(np.abs(drift).max())
+
     try:
-        for done, (key, info) in enumerate(tier_results.items()):
+        items = list(tier_results.items())
+        workers = tier_workers()
+        if workers <= 1 or len(items) <= 1:
+            for done, item in enumerate(items):
+                if on_step:
+                    on_step(done / len(items))
+                item[1]["max_drift_ms"] = _audit_one(item)
+                report[item[0]] = item[1]["max_drift_ms"]
+        else:
+            # audit_<key>.{opus,wav} are keyed by the unique tier_results key, and
+            # mbase is only read, so concurrent tiers share no writable file.
             if on_step:
-                on_step(done / len(tier_results))
-            opus = work / f"audit_{key}.opus"
-            wav = work / f"audit_{key}.wav"
-            _encode(mbase, opus, info["requested_factor"])
-            _run(["ffmpeg", "-y", "-v", "error", "-i", str(opus), "-ar", str(SR), "-ac", "1", str(wav)])
-            y, _ = sf.read(wav, dtype="float32")
-            lin = exp / info["actual_factor"]
-            drift = _detect(y, lin) - lin
-            for j, d in enumerate(drift):
-                edge = pick[j] in (0, len(centers) - 1)
-                tol = TOL_EDGE_MS if edge else TOL_SAMPLED_MS
-                if abs(d) > tol:
-                    raise RenderAuditError(
-                        f"tier {key}: drift {d:+.1f} ms at boundary {pick[j]} exceeds {tol:.0f} ms")
-            info["max_drift_ms"] = float(np.abs(drift).max())
-            report[key] = info["max_drift_ms"]
-            opus.unlink(missing_ok=True)
-            wav.unlink(missing_ok=True)
+                on_step(0.0)
+            drifts = _run_ordered(items, _audit_one, workers,
+                                  (lambda n: on_step(n / len(items))) if on_step else None)
+            for (key, info), d in zip(items, drifts):
+                info["max_drift_ms"] = d
+                report[key] = d
         if on_step:
             on_step(1.0)
     finally:
