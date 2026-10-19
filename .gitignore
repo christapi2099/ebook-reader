@@ -80,3 +80,8 @@ backend/covers/
 
 # Spike output: precompiled sample audio/manifest (backend/scripts/precompile_sample.py)
 backend/scripts/output/
+
+# Local-only: DB backups, TTS tuning experiments (models/profiles), deploy scratch
+*.db.*.bak
+tts-cpu-tuning/
+deploy/
