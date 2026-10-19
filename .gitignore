@@ -85,3 +85,4 @@ backend/scripts/output/
 *.db.*.bak
 tts-cpu-tuning/
 deploy/
+.baseline/
