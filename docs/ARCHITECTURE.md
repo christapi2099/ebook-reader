@@ -997,6 +997,51 @@ badly misled; it is a plan about one-fifth executed.
 
 From "open a book" to "hear audio while the right words light up". Every step below is **Verified**.
 
+> **Updated for the process-first architecture** (`docs/plans/process-first-architecture.md`). Reading is
+> no longer lazy: a book is rendered once, in the background, and the reader plays that immutable render.
+> The pipeline is now **upload → render → gate → tier player**. §7.1–7.3 (ingestion) still describe the
+> upload-time extraction, which still runs so the book is listed immediately, but the **render worker
+> re-extracts from the stored file** and its result is what the reader reads. §7.4–7.6 are rewritten for
+> the render gate and the tier player; the WebSocket and Web Audio chain that used to sit there is now
+> the legacy path (§3.5). §7.7–7.8 are unchanged in substance; their line references predate the
+> rewrite and were **not** re-verified.
+
+### 7.0 The render stage that now sits between ingestion and reading
+
+Upload only creates rows. `routers/documents.py::_trigger_render` calls
+`render_triggers.request_for_book(book_id, voice, debounce=False)` after the commit, which computes the
+**target fingerprint** (voice, engine family, codec and pipeline inputs; compute device is deliberately
+not an input) and sets `job_status='pending'`. A failure to fingerprint does not lose the import; the
+startup sweep retries.
+
+`services/render_worker.py` runs one background thread (`start_worker`, disabled by
+`PROCESSOR_ENABLED=0`). For each claimed book (`render_jobs.claim_next`, leased and renewed by a
+heartbeat thread) it:
+
+1. **Extracts** again from the stored file (`default_extractor`; pasted text keeps its stored
+   sentences), so a changed text pipeline takes effect on the next render. PDF extraction joins words
+   hyphenated across a line break (`join_line_hyphens`) and drops faux-bold duplicate words.
+2. **Synthesizes each sentence at `speed=1.0`** with whatever engine is live. Any other effective speed
+   fails the render (`base_speed_mismatch`). Sentences with nothing speakable are skipped, not fatal.
+   Every finished sentence is checkpointed (`chunks/{i}.flac` plus a `.json` sidecar written last), so a
+   killed render resumes where it stopped.
+3. **Times each word** (`aligner.align_sentence`), best source first: Kokoro's own token timestamps
+   (`timing_source='kokoro'`), then Piper's native phoneme durations (`'piper'`), then the CTC forced
+   aligner (`'aligned'`), accepted only above `CTC_SCORE_GATE`, and finally a syllable-weighted split of
+   the sentence duration (`'estimated'`). The manifest's `timing_quality` is the worst source present
+   (`exact`, `aligned` or `estimated`), and the player skips word highlighting when it is `estimated`.
+   PDF word boxes are mapped onto the words (`word_boxes.map_words_to_boxes`).
+4. **Encodes** `base.flac` and one Opus file per tier in `book_processor.TIERS` with ffmpeg `atempo`, then
+   **audits drift** with marker tones before writing `manifest.json`.
+5. **Publishes** atomically: `renders/{book}/{generation}/`, sentences replaced with the old-to-new remap
+   computed, `ready_generation` bumped, `job_status='idle'`. A published generation never changes.
+
+Between sentences the worker checks for supersede, cancel, delete and user pause (`render_pause`).
+Progress writes double as the stall signal: if none arrive for `RENDER_STALL_TIMEOUT_S` (900 s) the book
+is marked `error` rather than showing a frozen bar. A book is **readable iff `ready_generation` is not
+null**; a re-render (new voice, engine family or `POST /library/{id}/reprocess`) leaves the previous
+generation readable until the new one is published.
+
 ### 7.1 Stage 1 — Ingestion (PDF)
 
 `POST /documents/upload` (`routers/documents.py:21-85`):
@@ -1060,97 +1105,98 @@ unknowable without the bytes. Two consequences worth naming, both **Verified**:
   the bytes. The library lists the title from the *original* upload's filename (`documents.py:76`), so
   a re-upload under a new filename appears as a separate book.
 
-### 7.4 Stage 4 — The frontend's load path
+### 7.4 Stage 4 — The frontend's load path and the render gate
 
-`routes/reader/[id]/+page.svelte:44-77`, in order:
+`routes/reader/[id]/+page.svelte` opens a book with `openBook(id)`; the gate decides what the user sees:
 
-1. Subscribe to the three stores (`:45-47`).
-2. `bookMeta = await getBook(bookId)` — failures are `console.error`'d and swallowed (`:50-54`), which
-   is what silently routes an EPUB to the PDF viewer if the metadata call fails.
-3. `await loadBook(bookId)` (`:56`) → `GET /documents/{id}/sentences`, then `getProgress()`, then
-   `readerStore.update(...)`, then a fire-and-forget `updateLastRead` (`stores/reader.ts:23-37`).
-4. `settingsStore.loadFromServer()` (`:57`) — pulls `highlight_enabled`.
-5. `audioStore.init(bookId)` (`:58`) — **creates the `TTSSocket` and connects it immediately**, before
-   any play action. `audioStore.init` installs all four socket callbacks and calls `socket.connect()`
-   (`stores/audio.ts:294-338`).
-6. Speed, current index and voice are copied from the reader/settings stores into the audio store
-   (`:59-61`).
-7. `registerHotkeys({...})` (`:63-76`): Space, ←/→ (±1 sentence), ↑/↓ (±0.25 speed), B, F. Escape is
-   deliberately **not** in the map — `:73-74` explains that the overlay stack owns Escape so that it
-   closes only the topmost layer (`lib/utils/overlay-stack.ts`).
+1. `bookMeta = await getBook(id)` (failures are logged and swallowed, as before).
+2. If the book has `ready_generation === null`, `gatePhase = 'processing'` and the **processing screen**
+   shows. `createRenderGate` (`lib/utils/render-gate.ts`) polls `getBook` every 3 s (`PROCESSING_POLL_MS`)
+   and calls `onReady(generation)` when one is published.
+3. `loadGeneration(id, generation)`: `loadBook(id, generation)` fetches that generation's sentences
+   (`GET /documents/{id}/sentences`, which returns **409** until a render is ready and reports the
+   generation served in `X-Render-Generation`; the client turns a 409 into `NotReadyError` and falls back
+   to the processing screen), then the manifest (`getRenderManifest` → `GET /library/{id}/render`).
+4. `audioStore.init(id)` then `audioStore.load(generation, manifest)`, then speed, current index and
+   voice are copied in from the reader and settings stores. **No socket is opened and nothing is fetched
+   from the audio endpoints until the first `play()`.**
+5. With a generation loaded the gate keeps polling every 10 s and on window focus. A newer generation
+   (voice or engine change, reprocess) raises `onNewer`, which shows the **new-version banner**;
+   `switchToPending` flushes progress, destroys the audio store, resets the reader and loads the newer
+   generation. The backend remaps the saved reading position (`translate_index`, using the generation
+   the client's index was written against).
+6. `registerHotkeys` is unchanged (Space, ←/→, ↑/↓ speed, B, F; Escape belongs to the overlay stack).
 
-`onDestroy` (`:79-85`) unsubscribes, calls `audioStore.destroy()` (which stops all nodes, closes the
-socket and closes the `AudioContext`) and unregisters hotkeys.
+`onDestroy` stops the gate, flushes progress, calls `audioStore.destroy()` and unregisters hotkeys.
+`bookId` is `$derived` from the route, so navigating between books reopens through `openBook` instead of
+reusing the old book's state.
 
-### 7.5 Stage 5 — The WebSocket synthesis protocol
+### 7.5 Stage 5 — Serving the render
 
-The message types are enumerated in §3.5. The client half, all in `stores/audio.ts`:
+There is no synthesis protocol on the reader path any more. The browser fetches audio itself:
 
-* `play(fromIndex)` (`:340-346`): `resetForPlay()` (bump `generation`, cancel all scheduled nodes, bump
-  `sessionId`, resume the `AudioContext`, start the rAF loop — `:281-289`), set local state, then
-  `socket.play(fromIndex, voice, speed, sessionId)`.
-* `seek(index)` (`:365-371`): same, sending `seek` instead of `play`.
-* `pause()` (`:348-355`): sends `pause`, then `stopAll()`, and clears `buffering` explicitly so the
-  spinner cannot stick.
-* `setSpeed(newSpeed)` (`:373-401`): updates local speed, **discards all measured durations** because
-  they described the previous rate (`:379-383`), fires a debounced (100 ms) `prefetchSpeed` to warm the
-  cache at the new rate without interrupting playback (`:387-395`), and — only if playing — waits
-  `SPEED_CHANGE_DEBOUNCE_MS = 200` (`:80`) before restarting playback at the new speed
-  (`:396-400`).
-* `init()` (`:294-338`) installs the four handlers, each of which begins with a `sessionId` comparison.
+* `GET /api/renders/{book}/{generation}/audio_{tier}.opus` (`routers/renders.py`). The three path
+  segments are validated against a book-id pattern, digits, and the allowed tier set, and the resolved
+  path must stay under `RENDERS_DIR` (400 otherwise). The file is a `FileResponse`, so **HTTP Range**
+  works, with `Cache-Control: public, max-age=31536000, immutable` and an ETag of
+  book, generation, tier, size and mtime (a matching `If-None-Match` gets 304). Immutability is what
+  makes the aggressive caching safe.
+* nginx proxies `/api/renders/` with `proxy_buffering off` and a long read timeout so a Range request is
+  never buffered whole.
+* `renderAudioUrl(bookId, generation, tier)` in `lib/api.ts` builds the URL; the tier key is the
+  manifest's key (`"1.0"`, `"1.5"`, ...).
 
-### 7.6 Stage 6 — The Web Audio scheduling and decoding chain
+The WebSocket `/ws/tts/{id}` (§3.5) still exists but the reader does not use it.
 
-This is where the visible highlight comes from, and it is the most intricate part of the client.
-**Verified.**
+### 7.6 Stage 6 — The tier player
+
+`stores/audio.ts` is a small player over one `HTMLAudioElement` per speed tier. **Verified.**
 
 ```
-socket.onAudioChunk(bytes)                      audio.ts:302-308
-  -> gated on activeSessionId === sessionId     (binary frames carry no tag)
-  -> scheduleChunk(bytes, receivingSentenceIndex)
+load(gen, manifest)
+  -> teardownElements(); swapGen++; playToken++
+  -> tiers = manifest.tiers (sorted by factor); detectUnsupported() -> unsupportedMessage
+  -> activeKey = nearestTier(speed)
 
-scheduleChunk(bytes, idx)                       audio.ts:198-248
-  -> myGen = generation                         (captured at ARRIVAL, not at decode)
-  -> decodeChain = decodeChain.then(async () => {
-         if (cancelled || myGen !== generation) return
-         buffer = await ac.decodeAudioData(bytes.slice(0))
-         if (cancelled || myGen !== generation) return
-         source.playbackRate.value = 1.0        :218  (speed is the backend's job)
-         startAt = max(ac.currentTime, nextStartTime)
-         if (!sentenceTimings.has(idx))
-             sentenceTimings.set(idx, startAt + 0.016)   :225
-         source.start(startAt)
-         source.onended = ...  (generation-guarded fallback that advances currentIndex)
-         nextStartTime = startAt + buffer.duration
-         buffering = (nextStartTime - ac.currentTime) < 0.3        :244
-     })
+play(index) / seek(index)
+  -> prime()                                 muted play()+pause() on first gesture so later async play() is allowed
+  -> token = ++playToken; el.pause()
+  -> el.currentTime = segment(index).start_ms / 1000
+  -> startPlayback(el, token): wait until >= START_GATE_S (0.3 s) is buffered past currentTime,
+                               el.play(), then startRaf()
+
+requestAnimationFrame tick (applyTime)
+  -> ms = el.currentTime * 1000
+  -> segmentAt(segments, ms)                 binary search: last segment with start_ms <= ms
+  -> word index: last word with start_ms <= ms   (skipped when timing_quality === 'estimated')
+  -> publish currentIndex / currentWordIndex / elapsedSeconds
 ```
 
-Four mechanisms here, each with a recorded reason in the code:
+Mechanisms, each with its reason:
 
-1. **The serialized `decodeChain`** (`:60-62`). Every chunk's decode is chained onto the previous one so
-   scheduling happens in arrival order and `nextStartTime` advances monotonically. Without it, chunks
-   that decode out of order would be scheduled out of order — the comment calls the symptom a "marble
-   effect".
-2. **The generation counter** (`:41-45`, `:204`, `:206`, `:214`, `:236`). Bumped on every `stopAll()`.
-   Both the post-decode guard *and* `onended` check it. The stated reason: `onended` fires even for a
-   source that was stopped early, so without the guard a seek backwards would let the previous
-   session's callbacks re-advance `currentIndex` past the seek target.
-3. **The rAF loop** (`:133-192`). Each frame it finds the **latest** sentence whose scheduled start time
-   is `<= ac.currentTime` (deliberately the max, not the min, so several short sentences elapsing inside
-   one frame still land on the newest — `:143-149`), advances `currentIndex` to it, computes
-   `currentWordIndex` by scanning `wordTimings` backwards for the last word whose `start <= elapsed`
-   (`:151-164`), and prunes `sentenceTimings`/`wordTimings` entries for sentences already past
-   (`:165-171`). Advancing from the **audio clock** rather than from message arrival is what makes the
-   highlight track what is audible.
-4. **`elapsedSeconds`** (`:95-131`, published from the rAF tick at `:187`). The sum of backend-reported
-   durations for earlier sentences plus the elapsed part of the current one, measured against
-   `ac.currentTime`. The comment is explicit that unknown durations contribute 0 — "unknown, never
-   estimated". This is what `AudioProgressBar` displays.
-
-`buffering` (`:244`) is derived from the scheduled-ahead margin, not from a timer: it is true while less
-than 300 ms of audio is queued. `PDFViewer` gates autoscroll on `!buffering` (`PDFViewer.svelte:397`)
-so the page does not jump during the initial synthesis gap.
+1. **The audio element's clock is the only clock.** The highlight follows `el.currentTime` against the
+   manifest, so it tracks what is audible, including after a stall, seek, tab throttle or tier swap.
+   There are no wall-clock timers and no per-sentence events to drift out of step.
+2. **Speed is a tier swap** (`setSpeed`). It picks the nearest tier (`nearestTier`), bumps `swapGen`,
+   pauses the old element, starts the new one at the **start of the word currently being heard**
+   (`currentPositionMs`; the sentence start when the book has estimated timings), and resumes only if it
+   was playing. `playbackRate` is never touched. A no-op when the nearest tier is unchanged, so a
+   slider drag across one tier costs nothing.
+3. **Two counters cancel stale work.** `swapGen` is bumped on every tier swap, load and destroy; the
+   rAF loop and `applyTime` capture it and exit when it moved, so a retired element can never write
+   state. `playToken` is bumped on every play, pause, seek and resume; it cancels a start gate that is
+   still waiting for buffer. These replace the old generation counter and `decodeChain`.
+4. **`buffering` follows the element's `waiting` and `playing` events**, and `play()` is gated on 300 ms
+   of buffered audio, so the spinner and autoscroll behave as before without a scheduled-ahead margin.
+5. **`sentenceDurations`** now come from the manifest (`end_ms - start_ms` of the active tier), so the
+   progress bar knows the true total from the first frame instead of accumulating durations as audio
+   arrives, and a tier swap just replaces the map.
+6. **Browser support.** `detectUnsupported()` checks `canPlayType('audio/ogg; codecs=opus')` and treats
+   Safari as unsupported; the store then sets `unsupportedMessage` and every transport call is a no-op,
+   so the reader shows an explicit message instead of a dead player. The supported set is Chrome,
+   Edge and Firefox.
+7. **`speedDowngradeStore`** survives only because `MediaBar` reads it. Nothing sets it: every tier is
+   pre-rendered, so no rate is ever refused at play time.
 
 ### 7.7 Stage 7 — Coordinate mapping between PyMuPDF and PDF.js
 
