@@ -1617,6 +1617,15 @@ disk*.
 
 ### ADR-5 · The server applies speed; the browser's `playbackRate` stays at 1.0
 
+> **SUPERSEDED by the process-first architecture** (`docs/plans/process-first-architecture.md`).
+> Kokoro is now asked for `speed=1.0` only when a book is rendered; every other speed is an
+> `ffmpeg atempo` tier built from the lossless base, and the reader changes speed by switching to the
+> matching tier's `<audio>` element. The browser's `playbackRate` still stays at 1.0, so that half of
+> this decision stands. What no longer holds: speed is not a synthesis parameter, a speed change does
+> not re-synthesise or warm a cache, and the `speed_unavailable` / 3.0x-ceiling reasoning below applies
+> to the legacy WebSocket path only (tier drift was measured within tolerance at 3.0x). Kept as the
+> record of the decision at the time.
+
 **Status:** Deliberate. Rationale recorded, and the *limits* of it were measured and acted on during
 this session.
 

@@ -1465,6 +1465,15 @@ code). I have not invented rationale that appears nowhere.
 
 ### ADR-5 · Dynamic on-demand synthesis rather than full pre-synthesis
 
+> **SUPERSEDED by the process-first architecture** (`docs/plans/process-first-architecture.md`,
+> `services/render_*`). A book is now rendered in full, once, and read from that render. What changed
+> against the numbers below: ADR-5 priced pre-synthesis as every voice at every speed in uncompressed
+> audio (185-355 GiB per book). The render is **one voice** at 1x, stored as lossless FLAC plus Opus,
+> with the other speeds derived by `ffmpeg atempo` instead of re-synthesised, which the plan sizes at
+> roughly **0.6-1.0 GB per 10 h book**. Render time is a one-off cost per (book, voice, engine family),
+> paid in the background, and a published render stays readable while a new one is built. The text
+> below is kept as the record of the decision at the time.
+
 - **Context.** A proposal to pre-synthesise whole books, and to re-synthesise on every speed/voice
   change, to remove mid-read lag.
 - **Decision.** Keep it dynamic with a prefetch window; do **not** pre-synthesise books and do **not**
