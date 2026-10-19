@@ -328,20 +328,20 @@ mode_unit() {
   local pattern=("$@")
   say "${C_BOLD}unit${C_OFF} ${C_DIM}— vitest${C_OFF}"
   if (( ${#pattern[@]} )); then
-    run_suite "vitest ${pattern[*]}" "$T_UNIT" "$FRONTEND" npm run test:unit -- "${pattern[@]}"
+    run_suite "vitest ${pattern[*]}" "$T_UNIT" "$FRONTEND" pnpm run test:unit "${pattern[@]}"
   else
-    run_suite "vitest (all)" "$T_UNIT" "$FRONTEND" npm run test:unit
+    run_suite "vitest (all)" "$T_UNIT" "$FRONTEND" pnpm run test:unit
   fi
 }
 
 # Playwright covers only the *critical* flows: playwright.config.ts greps for
-# the `@critical` tag unless E2E_ALL=1, so `npm run test:e2e` is the 32 critical
-# tests and `npm run test:e2e:all` is everything. This mode just forwards; it
+# the `@critical` tag unless E2E_ALL=1, so `pnpm run test:e2e` is the 32 critical
+# tests and `pnpm run test:e2e:all` is everything. This mode just forwards; it
 # never widens the default selection on its own.
 mode_e2e() {
   local spec=("$@")
   say "${C_BOLD}e2e${C_OFF} ${C_DIM}— playwright, @critical flows only (needs :5173 and the API on :8000)${C_OFF}"
-  note "run all 121 specs with: E2E_ALL=1 npm run test:e2e   (or: npm run test:e2e:all)"
+  note "run all 121 specs with: E2E_ALL=1 pnpm run test:e2e (or: pnpm run test:e2e:all)"
   if (( ${#spec[@]} )); then
     # Accept a bare spec name as well as a path.
     local s out=()
@@ -351,15 +351,15 @@ mode_e2e() {
       elif [[ -f "$FRONTEND/tests/$s.spec.ts" ]]; then out+=("tests/$s.spec.ts")
       else out+=("$s"); fi
     done
-    run_suite "playwright ${out[*]}" "$T_E2E" "$FRONTEND" npm run test:e2e -- "${out[@]}"
+    run_suite "playwright ${out[*]}" "$T_E2E" "$FRONTEND" pnpm run test:e2e "${out[@]}"
   else
-    run_suite "playwright (critical)" "$T_E2E" "$FRONTEND" npm run test:e2e
+    run_suite "playwright (critical)" "$T_E2E" "$FRONTEND" pnpm run test:e2e
   fi
 }
 
 mode_check() {
   say "${C_BOLD}check${C_OFF} ${C_DIM}— svelte-check${C_OFF}"
-  run_suite "svelte-check" "$T_CHECK" "$FRONTEND" npm run check
+  run_suite "svelte-check" "$T_CHECK" "$FRONTEND" pnpm run check
 }
 
 # ---------------------------------------------------------------------------
@@ -499,11 +499,11 @@ mode_changed() {
   fi
   if (( ${#vt[@]} )); then
     note "vitest:  ${vt[*]}"
-    run_suite "vitest changed (${#vt[@]} files)" "$T_UNIT" "$FRONTEND" npm run test:unit -- "${vt[@]}"
+    run_suite "vitest changed (${#vt[@]} files)" "$T_UNIT" "$FRONTEND" pnpm run test:unit "${vt[@]}"
   fi
   if (( ${#et[@]} )); then
     note "e2e:     ${et[*]}"
-    run_suite "playwright changed (${#et[@]} specs)" "$T_E2E" "$FRONTEND" npm run test:e2e -- "${et[@]}"
+    run_suite "playwright changed (${#et[@]} specs)" "$T_E2E" "$FRONTEND" pnpm run test:e2e "${et[@]}"
   fi
 }
 
@@ -514,16 +514,16 @@ mode_full() {
   pick_python; set_pytest_cmd
   say "${C_BOLD}full${C_OFF} ${C_DIM}— backend + unit + e2e, each with its own timeout${C_OFF}"
   run_suite "backend all" "$T_FULL_BACKEND" "$BACKEND" "${PYTEST[@]}" tests/
-  run_suite "vitest (all)" "$T_UNIT" "$FRONTEND" npm run test:unit
-  run_suite "playwright (all)" "$T_E2E" "$FRONTEND" npm run test:e2e
+  run_suite "vitest (all)" "$T_UNIT" "$FRONTEND" pnpm run test:unit
+  run_suite "playwright (all)" "$T_E2E" "$FRONTEND" pnpm run test:e2e
 }
 
 mode_gates() {
   pick_python; set_pytest_cmd
   say "${C_BOLD}gates${C_OFF} ${C_DIM}— the four handoff gates (unit, e2e, check, pytest)${C_OFF}"
-  run_suite "vitest (test:unit)" "$T_UNIT" "$FRONTEND" npm run test:unit
-  run_suite "playwright (test:e2e)" "$T_E2E" "$FRONTEND" npm run test:e2e
-  run_suite "svelte-check (check)" "$T_CHECK" "$FRONTEND" npm run check
+  run_suite "vitest (test:unit)" "$T_UNIT" "$FRONTEND" pnpm run test:unit
+  run_suite "playwright (test:e2e)" "$T_E2E" "$FRONTEND" pnpm run test:e2e
+  run_suite "svelte-check (check)" "$T_CHECK" "$FRONTEND" pnpm run check
   run_suite "pytest (backend all)" "$T_FULL_BACKEND" "$BACKEND" "${PYTEST[@]}" tests/
 }
 
@@ -551,7 +551,7 @@ ${C_BOLD}MODES${C_OFF}
                            A HEURISTIC — it can miss indirect coverage.
   ${C_BOLD}full${C_OFF}                     backend + unit + e2e.
   ${C_BOLD}gates${C_OFF}                    the four handoff gates: test:unit, test:e2e,
-                           npm run check, pytest.
+                           pnpm run check, pytest.
 
 ${C_BOLD}OPTIONS${C_OFF}
   -v, --verbose            stream full output instead of a summary.

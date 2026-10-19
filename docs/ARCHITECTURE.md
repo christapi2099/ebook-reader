@@ -194,11 +194,11 @@ flowchart TB
 ### 2.3 Development: a Vite dev server, driven by Playwright
 
 **Verified.** In development the frontend is not a built artifact. `frontend/vite.config.ts` registers
-`tailwindcss()` and `sveltekit()`; `npm run dev` starts Vite, which serves the client and proxies
+`tailwindcss()` and `sveltekit()`; `pnpm run dev` starts Vite, which serves the client and proxies
 nothing — the browser calls `localhost:8000` directly. `frontend/svelte.config.js:8-10` uses
-`@sveltejs/adapter-static` with a `fallback: 'index.html'`, so `npm run build` produces a static SPA.
+`@sveltejs/adapter-static` with a `fallback: 'index.html'`, so `pnpm run build` produces a static SPA.
 
-`frontend/playwright.config.ts` drives exactly that server: `webServer.command = 'npm run dev'` at
+`frontend/playwright.config.ts` drives exactly that server: `webServer.command = 'pnpm run dev'` at
 `baseURL http://localhost:5173`, with `reuseExistingServer: !process.env.CI` (`playwright.config.ts:19-23`).
 The e2e suite therefore **starts its own Vite dev server** if one is not already listening on 5173.
 The specs do not require a live backend: they intercept HTTP with `page.route(...)` and drive the
@@ -223,7 +223,7 @@ Two consequences, both **Verified**:
    fallback (`nginx.conf:50-52` `try_files ... /index.html`) and return HTML instead of JSON.
 
 `docker-compose.dev.yml` has the same 3002 mapping for the backend and runs the frontend as
-`node:18-alpine` on 5173, so the dev stack has the same mismatch. See §10 R6.
+`node:22-alpine` on 5173, so the dev stack has the same mismatch. See §10 R6.
 
 ---
 
@@ -1269,16 +1269,16 @@ perishable.** Where a figure differs from the brief I was given, I record both.
 
 | Gate | Command | **Measured now** | Brief's figure |
 |---|---|---|---|
-| Type/compile check | `cd frontend && npm run check` | **Green** — `0 errors and 19 warnings in 6 files` | Green — `0 errors, 29 warnings in 7 files` |
-| Frontend unit | `cd frontend && npm run test:unit` | **RED** — `2 failed \| 137 passed (139)` in `8` files | Green — `139 tests in 8 files` |
+| Type/compile check | `cd frontend && pnpm run check` | **Green** — `0 errors and 19 warnings in 6 files` | Green — `0 errors, 29 warnings in 7 files` |
+| Frontend unit | `cd frontend && pnpm run test:unit` | **RED** — `2 failed \| 137 passed (139)` in `8` files | Green — `139 tests in 8 files` |
 | Backend | `cd backend && uv run pytest` | **RED** — `14 failed, 603 passed, 1 xfailed` in 96 s | Green — `559 passed, 1 xfailed` |
-| Browser e2e | `cd frontend && npm run test:e2e` | **Not green. Not run to completion.** The default run is now 32 `@critical` tests, and the human has paused e2e execution. Last full attempt: 121 failed of 121, all `browserType.launch: Executable doesn't exist at ~/.cache/ms-playwright/chromium_headless_shell-1217/...` | "runs only the 32 `@critical` tests by default" |
+| Browser e2e | `cd frontend && pnpm run test:e2e` | **Not green. Not run to completion.** The default run is now 32 `@critical` tests, and the human has paused e2e execution. Last full attempt: 121 failed of 121, all `browserType.launch: Executable doesn't exist at ~/.cache/ms-playwright/chromium_headless_shell-1217/...` | "runs only the 32 `@critical` tests by default" |
 
 **Two of the four gates are red where I was told they were green.** The brief I was given said pytest was
 "effectively green: 559 passed, 1 xfailed" and `test:unit` was "139 tests in 8 files"; measured now,
 pytest is `14 failed, 603 passed, 1 xfailed` and the unit gate is `2 failed | 137 passed`. Both
 regressions are in work that landed *after* that brief was written. The other two gates match what I was
-told: `npm run check` is green, and e2e is explicitly not green and not being run. §8.3 and §8.4 give
+told: `pnpm run check` is green, and e2e is explicitly not green and not being run. §8.3 and §8.4 give
 the causes rather than the counts alone.
 
 The suite also grew: eight backend test modules and three frontend unit files appeared during the
@@ -1287,7 +1287,7 @@ session (`test_audio_cache_eviction.py`, `test_db_schema_startup.py`, `test_fold
 `test_speed_adversarial.py`, `test_system_capabilities.py`, `test_voices_path_traversal.py`), which is
 why the pass count rose from 559 to 603.
 
-### 8.2 `npm run check` — svelte-check
+### 8.2 `pnpm run check` — svelte-check
 
 `package.json` → `svelte-kit sync && svelte-check --tsconfig ./tsconfig.json`. It type-checks
 TypeScript inside `.svelte` files and runs Svelte's a11y/validity warnings.
@@ -1303,11 +1303,11 @@ Measured: **0 errors, 19 warnings in 6 files.** The warnings are all accessibili
   mean to reference it inside a derived instead?"* — `PageNavigator.svelte:12`.
 
 The count moved from the brief's 29-in-7 to 19-in-6 because components were edited concurrently. Note
-that `npm run check` is **not** a lint config: there is no ESLint, no Prettier and no `.prettierrc` in
+that `pnpm run check` is **not** a lint config: there is no ESLint, no Prettier and no `.prettierrc` in
 the repo (`Verified` — `frontend/package.json` devDependencies contain none), so formatting and
 import ordering are unenforced.
 
-### 8.3 `npm run test:unit` — vitest
+### 8.3 `pnpm run test:unit` — vitest
 
 `vitest.config.ts`: `environment: 'jsdom'`, `include: ['src/**/*.test.ts']`, `setupFiles:
 ['src/tests/setup.ts']`. It is a **unit** suite: pure functions, stores with mocked `fetch`, and
@@ -1426,10 +1426,10 @@ fixture-shadowing bug (`voices._kokoro` was a dict, not a callable), fixed by co
 history here is full of *test* problems masquerading as *product* problems, which is why each failure
 above is labelled with whether it reproduces alone.
 
-### 8.5 `npm run test:e2e` — playwright
+### 8.5 `pnpm run test:e2e` — playwright
 
 `playwright.config.ts`: `testDir: './tests'`, `fullyParallel: true`, one project (`chromium`), 30 s
-timeout, `webServer: npm run dev` on `http://localhost:5173` with `reuseExistingServer` outside CI.
+timeout, `webServer: pnpm run dev` on `http://localhost:5173` with `reuseExistingServer` outside CI.
 10 spec files, **121 tests** (`Measured` — the runner's own count).
 
 **The default run is now a deliberate subset: 32 of 121.** `playwright.config.ts` sets
@@ -1483,12 +1483,12 @@ The four gates plus their variants, as they exist now:
 
 | Command | What it runs |
 |---|---|
-| `cd frontend && npm run check` | `svelte-kit sync && svelte-check` — types + Svelte a11y/validity warnings |
-| `cd frontend && npm run test:unit` | `vitest run` (jsdom, `src/**/*.test.ts`) |
-| `cd frontend && npm run test:e2e` | Playwright, **32 `@critical` tests only** |
-| `cd frontend && npm run test:e2e:all` | Playwright, all 121 (`E2E_ALL=1`) |
-| `cd frontend && npm run test:e2e:list` | Lists what would run, without running it |
-| `cd frontend && npm run test:unit:changed` | `vitest run --changed` |
+| `cd frontend && pnpm run check` | `svelte-kit sync && svelte-check` — types + Svelte a11y/validity warnings |
+| `cd frontend && pnpm run test:unit` | `vitest run` (jsdom, `src/**/*.test.ts`) |
+| `cd frontend && pnpm run test:e2e` | Playwright, **32 `@critical` tests only** |
+| `cd frontend && pnpm run test:e2e:all` | Playwright, all 121 (`E2E_ALL=1`) |
+| `cd frontend && pnpm run test:e2e:list` | Lists what would run, without running it |
+| `cd frontend && pnpm run test:unit:changed` | `vitest run --changed` |
 | `cd backend && uv run pytest` | The backend suite |
 
 Support files and other gates, all **Verified**:
@@ -2021,7 +2021,7 @@ catalogue.
 | R8i | **`GET /library/{book_id}/progress` never 404s**, returning `0` for unknown books. It hides a caller bug rather than surfacing it. | `library.py:87-90` |
 | R8j | **Dead UI: `TopToolbar`'s CC and copy buttons** are rendered and wired to `() => {}`. `DESIGN.md:174` says they should be removed. | `routes/reader/[id]/+page.svelte:214-215` |
 | R8k | **`stores/ui.ts` is not consumed by the reader route**, which keeps three local booleans for the same panels. Two representations of "which panel is open". | `stores/ui.ts`; `routes/reader/[id]/+page.svelte:29-31` |
-| R8l | **No linting or formatting gate.** No ESLint, no Prettier, no config for either. `npm run check` is types + Svelte warnings only. Import ordering, unused imports (`API_BASE` in two routes) and naming are unenforced. | `frontend/package.json` |
+| R8l | **No linting or formatting gate.** No ESLint, no Prettier, no config for either. `pnpm run check` is types + Svelte warnings only. Import ordering, unused imports (`API_BASE` in two routes) and naming are unenforced. | `frontend/package.json` |
 | R8m | **`persistTextBook` sends a `title` the server ignores.** `api.ts:287-289` JSON-encodes `{title}`; the handler takes no body (`documents.py:156`). Harmless today, misleading forever. | `api.ts:287`, `documents.py:155-169` |
 | R8n | **`text_filter`'s filters can never be reviewed or reversed.** `filtered` is set at ingestion and no endpoint can change it, so a false positive permanently removes a sentence from both playback and rendering with no user recourse. | `documents.py:52`, `db/models.py:62` |
 
@@ -2091,7 +2091,7 @@ kind: the *engine* tests were fine — it was the test that restated a `main`-le
 
 The frontend shows the same pattern in a different form: `stores/settings.ts` gained
 `bionicMinWordLength` and `bionicSkipCommonWords`, and `settings.test.ts` — which keeps its own copy of
-the expected defaults instead of importing `DEFAULTS` — was not updated, so `npm run test:unit` is red
+the expected defaults instead of importing `DEFAULTS` — was not updated, so `pnpm run test:unit` is red
 (§8.3).
 
 **Why this is architectural rather than incidental.** Both cases are the same root cause: **an
@@ -2287,14 +2287,14 @@ components and the only ones that use semantic tokens. **Do not copy `SettingsOv
    `modal: true` for a dialog, `closeOnBackdrop: true` if the backdrop should dismiss. Keep ARIA
    (`role="dialog"`, `aria-modal`, `aria-labelledby`) in the markup where it is greppable — the action
    deliberately does not manage it.
-7. **Accessibility, because `npm run check` reports it:** every icon-only button needs an `aria-label`;
+7. **Accessibility, because `pnpm run check` reports it:** every icon-only button needs an `aria-label`;
    do not put a click handler on a non-interactive element without a role and a keyboard handler (five
    of the 19 current warnings are this); associate every `<label>` with a control.
 8. **Touch targets ≥ 44 px** (`implementation-handoff.md` §4), and one primary action per view.
 9. Component tests go in `frontend/src/tests/components/` (`TextViewer.test.ts`,
    `library-folders.test.ts` are the models); a full user flow goes in `frontend/tests/*.spec.ts` as a
    Playwright spec using the `page.route` + `WsDriver` fixtures — **but note the gate cannot currently
-   run until `npx playwright install chromium` is done** (§8.5).
+   run until `pnpm exec playwright install chromium` is done** (§8.5).
 
 ### 11.5 Add a test
 
@@ -2315,8 +2315,8 @@ backend with `page.route`; the suite is designed to need no live backend. Keep a
 `DESIGN.md` §5 selector contract so the tests survive restyling.
 
 **A full local run.** `scripts/test.sh` (untracked at the snapshot) is meant to be the one command; until
-it is committed, the sequence is `cd frontend && npm run check && npm run test:unit`, then
-`cd backend && uv run pytest`, then `npx playwright install chromium && cd frontend && npm run test:e2e`.
+it is committed, the sequence is `cd frontend && pnpm run check && pnpm run test:unit`, then
+`cd backend && uv run pytest`, then `pnpm exec playwright install chromium && cd frontend && pnpm run test:e2e`.
 
 ---
 

@@ -8,7 +8,7 @@ Local TTS reader: FastAPI + Kokoro TTS (backend) / Svelte 5 + PDF.js (frontend).
 cd backend && uv sync && uv run uvicorn main:app --reload
 
 # Frontend (port 5173)
-cd frontend && npm run dev
+cd frontend && pnpm install && pnpm run dev
 ```
 
 ## Key Files

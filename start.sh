@@ -61,7 +61,7 @@ BACKEND_PID=$!
 
 echo "Starting frontend on http://localhost:$FRONTEND_PORT"
 cd "$REPO_DIR/frontend"
-npm run dev -- --port "$FRONTEND_PORT" &
+pnpm run dev --port "$FRONTEND_PORT" &
 FRONTEND_PID=$!
 
 wait
