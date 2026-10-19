@@ -15,11 +15,16 @@ cd frontend && npm run dev
 | File | Purpose |
 |---|---|
 | `backend/services/tts_engine.py` | Kokoro synthesis, AudioCache, SynthJob(speed=) |
-| `backend/routers/tts.py` | WebSocket /ws/tts/{id} — play/seek/pause+speed |
-| `frontend/src/lib/stores/audio.ts` | Web Audio API, generation counter, decode chain |
+| `backend/routers/tts.py` | WebSocket /ws/tts/{id} — live playback, fallback until a chapter is precompiled |
+| `backend/services/precompile_engine.py` | Precompile a chapter: Kokoro at 1x, every other speed via ffmpeg atempo |
+| `backend/routers/precompiled_audio.py` | Build/status/manifest/audio endpoints for precompiled chapter audio |
+| `frontend/src/lib/stores/audio.ts` | Web Audio API (live) + `<audio>`-driven precompiled playback, dual-mode |
 | `frontend/src/lib/stores/reader.ts` | sentences[], currentIndex, isPlaying, speed |
 | `frontend/src/lib/components/PDFViewer.svelte` | PDF.js canvas + sentence overlay |
-| `frontend/src/lib/api.ts` | TTSSocket + all HTTP calls |
+| `frontend/src/lib/api.ts` | TTSSocket + all HTTP calls (incl. precompiled-audio endpoints) |
+
+See `docs/TTS_ARCHITECTURE.md` §6.6 for the precompiled-audio design and why it differs from
+the live path's speed strategy below.
 
 ## Active Plan: process-first architecture
 `docs/plans/process-first-architecture.md` (not started yet). In this plan, a book is read only from a complete, immutable render: sentences plus 1x Opus audio, atempo speed tiers and a sync manifest. The plan supersedes ADR-5 and, once implemented, replaces the Audio rules below. Read it before changing playback, caching, upload or reprocess code, and don't add new on-demand-synthesis features to the reader path.
@@ -42,7 +47,8 @@ cd frontend && npm run dev
 - PyMuPDF + PDF.js canvas share top-left origin. Direct mapping: `x = fitz_x * 1.5`, `y = fitz_y * 1.5`. No y-flip.
 
 **Audio**
-- Speed handled by Kokoro native `speed` param — browser `playbackRate` stays at `1.0`
+- Live WebSocket path: speed handled by Kokoro native `speed` param — browser `playbackRate` stays at `1.0`
+- Precompiled path: Kokoro renders only 1.0x; every other speed tier is derived via `ffmpeg atempo` (audio-domain time-stretch), not Kokoro's native `speed=` — see `docs/TTS_ARCHITECTURE.md` §6.6
 - pdfjs-dist v5: `import * as pdfjsLib` + `import workerUrl from '...?url'` at **module level** (not inside function)
 
 ## Dispatch (OpenCode)

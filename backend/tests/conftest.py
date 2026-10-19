@@ -74,8 +74,9 @@ RUNTIME_DIRS = (
     ("routers.documents", "UPLOAD_DIR", "uploads"),
     ("routers.voices", "VOICES_DIR", "voices"),
     ("routers.mp3", "EXPORTS_DIR", "exports"),
+    ("services.precompile_engine", "CHAPTER_AUDIO_DIR", "chapter_audio"),
 )
-KOKORO_HOLDERS = ("routers.tts", "routers.voices", "routers.mp3")
+KOKORO_HOLDERS = ("routers.tts", "routers.voices", "routers.mp3", "routers.precompiled_audio")
 
 
 # --------------------------------------------------------------------------- #
@@ -101,7 +102,7 @@ def _make_working_sandbox() -> Path:
             probe.unlink()
         except OSError:  # pragma: no cover - platform dependent
             continue
-        for name in ("uploads", "voices", "exports"):
+        for name in ("uploads", "voices", "exports", "chapter_audio"):
             (candidate / name).mkdir(exist_ok=True)
         return candidate
     raise RuntimeError("no writable directory available for the test sandbox")

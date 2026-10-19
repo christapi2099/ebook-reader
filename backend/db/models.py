@@ -143,6 +143,48 @@ class MP3Export(SQLModel, table=True):
     bitrate_kbps: int | None = None
     options: str | None = None
 
+class ChapterAudio(SQLModel, table=True):
+    """One precompiled speed tier of one chapter's audio.
+
+    Exactly one row per ``(book_id, chapter, voice, requested_speed)``. Only the
+    ``requested_speed == 1.0`` row is ever produced by Kokoro synthesis
+    (``method="native"``); every other row is derived from that 1x audio via
+    ffmpeg ``atempo`` (``method="atempo"``) rather than Kokoro's own ``speed=``,
+    which degrades audibly ("tapers off / whispers") above ~2x — see
+    services/precompile_engine.py. Restricting Kokoro synthesis to exactly 1.0x
+    also means this job never reads or writes an AudioCache row at any other
+    speed, which is what let a stale non-1.0x cache row (missing
+    word_timestamps, from before this feature existed) get silently reused
+    during prototyping.
+
+    ``status``/``phase``/``progress``/``error_message`` intentionally mirror
+    ``MP3Export``'s job-state columns rather than inventing new vocabulary —
+    this is the same "background job with polled progress" shape.
+
+    Audio and manifest are files on disk (``CHAPTER_AUDIO_DIR``), not DB blobs:
+    a long chapter's manifest JSON (sentence + word timestamps) can run into
+    MBs, which does not belong inline in SQLite the way the app already avoids
+    for MP3Export output.
+    """
+
+    id: int | None = Field(default=None, primary_key=True)
+    book_id: str = Field(foreign_key='book.id', index=True)
+    chapter: int = Field(index=True)
+    voice: str
+    requested_speed: float
+    effective_speed: float | None = None
+    method: str = "native"  # "native" (Kokoro 1x) | "atempo"
+    status: str = "pending"  # pending | processing | done | error
+    phase: str | None = None  # services/engine_manager.py PHASE_* vocabulary
+    progress: int = 0
+    audio_path: str | None = None
+    manifest_path: str | None = None
+    duration_ms: float | None = None
+    file_size: int | None = None
+    error_message: str | None = None
+    created_at: datetime
+
+
 class UserSettings(SQLModel, table=True):
     id: int = Field(primary_key=True, default=1)
     last_book_id: str | None = Field(foreign_key='book.id', nullable=True)

@@ -43,6 +43,7 @@ dependencies = [
     "onnx>=1.23.2",
     "ctc-forced-aligner>=1.0.2",
     "piper-tts>=1.2",
+    "scipy>=1.18.1",
 ]
 
 [dependency-groups]

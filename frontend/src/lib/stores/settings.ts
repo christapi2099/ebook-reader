@@ -19,6 +19,13 @@ const VALID_COLORS = new Set<string>(HIGHLIGHT_SWATCHES)
 
 export interface SettingsState {
   voice: string
+  /**
+   * Last voice picked while each engine was active, keyed by engine id
+   * (`cpu`/`gpu`/`modal`/`piper`). `voice` alone can't tell a Kokoro pick from
+   * a Piper one apart across an engine switch, so switching engines would
+   * otherwise hand a stale Kokoro voice id to Piper (and vice versa).
+   */
+  voiceByEngine: Record<string, string>
   highlightColor: string
   autoscroll: boolean
   hotkeysEnabled: boolean
@@ -38,6 +45,7 @@ export const BIONIC_MIN_WORD_LENGTH_RANGE = { min: 1, max: 8 } as const
 
 const DEFAULTS: SettingsState = {
   voice: 'af_heart',
+  voiceByEngine: {},
   highlightColor: '#F5CB5C',
   autoscroll: true,
   hotkeysEnabled: true,
@@ -106,6 +114,11 @@ function readFromStorage(): SettingsState {
     const parsed = JSON.parse(raw)
     return {
       voice: typeof parsed.voice === 'string' ? parsed.voice : DEFAULTS.voice,
+      voiceByEngine: (parsed.voiceByEngine && typeof parsed.voiceByEngine === 'object')
+        ? Object.fromEntries(
+            Object.entries(parsed.voiceByEngine).filter(([, v]) => typeof v === 'string'),
+          ) as Record<string, string>
+        : { ...DEFAULTS.voiceByEngine },
       highlightColor: isValidColor(parsed.highlightColor) ? parsed.highlightColor : DEFAULTS.highlightColor,
       autoscroll: typeof parsed.autoscroll === 'boolean' ? parsed.autoscroll : DEFAULTS.autoscroll,
       hotkeysEnabled: typeof parsed.hotkeysEnabled === 'boolean' ? parsed.hotkeysEnabled : DEFAULTS.hotkeysEnabled,
@@ -143,6 +156,8 @@ function saveToStorage(state: SettingsState): void {
 function createSettingsStore() {
   const { subscribe, set, update } = writable<SettingsState>(readFromStorage())
 
+  let current: SettingsState = readFromStorage()
+  subscribe(s => { current = s })
   subscribe(saveToStorage)
 
   // Keep <html data-theme> in sync with the stored preference. Guarded for
@@ -169,6 +184,16 @@ function createSettingsStore() {
 
     setVoice(voice: string) {
       update(s => ({ ...s, voice }))
+    },
+
+    /** Picks a voice while `engineId` is active, and remembers it for next time. */
+    setVoiceForEngine(engineId: string, voice: string) {
+      update(s => ({ ...s, voice, voiceByEngine: { ...s.voiceByEngine, [engineId]: voice } }))
+    },
+
+    /** Last voice picked for `engineId`, or `null` if none was ever picked. */
+    voiceForEngine(engineId: string): string | null {
+      return current.voiceByEngine[engineId] ?? null
     },
 
     setHighlightColor(color: string) {

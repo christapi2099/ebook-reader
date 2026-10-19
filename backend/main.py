@@ -20,6 +20,7 @@ from routers import documents, library
 from routers import tts as tts_router
 from routers import voices as voices_router
 from routers import mp3 as mp3_router
+from routers import precompiled_audio as precompiled_audio_router
 from routers import bookmarks as bookmarks_router
 from routers import folders as folders_router
 from routers import user as user_router
@@ -62,6 +63,7 @@ def _apply_kokoro(kokoro: Any) -> None:
     # The render worker synthesizes with whatever engine is live, so it must
     # follow every switch (and be cleared when there is none).
     tts_engine.set_render_engine(TTSEngine(kokoro) if kokoro is not None else None)
+    precompiled_audio_router.set_kokoro(kokoro)
 
 
 engine_manager.register_applier(_apply_kokoro)
@@ -85,6 +87,14 @@ async def lifespan(app: FastAPI):
     # and with a database that already sits under the cap.
     await audio_cache.sweep_once(engine)
     sweeper = audio_cache.start_periodic_sweep(engine)
+    # One worker, module-level: precompile jobs run one chapter at a time,
+    # not one task per POST .../build — see routers/precompiled_audio.py's
+    # module docstring for the CUDA-OOM this fixes.
+    precompiled_audio_router.start_queue_worker()
+    # Detects a precompile job that has stopped reporting progress (a hung
+    # ffmpeg/CUDA call, not a dead process — see start_queue_worker()'s own
+    # _reset_orphaned_jobs() sweep for the dead-process case).
+    precompiled_audio_router.start_stall_watchdog()
     try:
         yield
     finally:
@@ -92,6 +102,8 @@ async def lifespan(app: FastAPI):
         # Cancelled and awaited on shutdown so the task cannot outlive the
         # engine, and a sweep in flight cannot keep the process alive.
         await audio_cache.stop_periodic_sweep(sweeper)
+        await precompiled_audio_router.stop_queue_worker()
+        await precompiled_audio_router.stop_stall_watchdog()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -110,6 +122,7 @@ app.include_router(user_router.router)
 app.include_router(tts_router.router)
 app.include_router(voices_router.router)
 app.include_router(mp3_router.router)
+app.include_router(precompiled_audio_router.router)
 app.include_router(bookmarks_router.router)
 app.include_router(folders_router.router)
 app.include_router(system_router.router)

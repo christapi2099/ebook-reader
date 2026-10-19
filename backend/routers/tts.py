@@ -1,3 +1,24 @@
+"""Live TTS streaming over WebSocket — the fallback path, not the only one.
+
+As of the precompiled-chapter-audio feature (`routers/precompiled_audio.py`,
+`services/precompile_engine.py`), this WebSocket is no longer where every
+playback session goes. A chapter that has already been precompiled (Kokoro
+synthesis at 1x + ffmpeg-derived speed tiers, served as a static Opus file +
+sync manifest) plays from there instead — see `frontend/src/lib/stores/
+audio.ts`'s 'precompiled' mode. This module remains the path for:
+
+- the first play of any chapter that hasn't been precompiled yet (the
+  frontend triggers a background build on that first play and keeps
+  streaming live here until it finishes — nothing ever blocks waiting for a
+  whole chapter to synthesize)
+- a speed the reader asks for that isn't one of the precompiled tiers
+
+Nothing below this docstring changed for that feature — nothing in this
+module needed to. If you're reading this because the code below looks like
+"the" playback path: it's one of two, and the newer one is fully static
+(Opus + JSON) with a much simpler frontend consumer.
+"""
+
 import asyncio
 import io
 import json
