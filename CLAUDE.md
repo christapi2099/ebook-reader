@@ -7,6 +7,9 @@ Local TTS reader: FastAPI + Kokoro TTS (backend) / Svelte 5 + PDF.js (frontend).
 # Backend (Python 3.12, port 8000) — uv manages backend/.venv from backend/uv.lock
 cd backend && uv sync && uv run uvicorn main:app --reload
 
+# AMD GPU (ROCm): separate env, never `uv run` — see docs/AMD_ROCM.md
+./scripts/setup-rocm-env.sh && GPU_ENV=rocm ./start.sh
+
 # Frontend (port 5173)
 cd frontend && pnpm install && pnpm run dev
 ```

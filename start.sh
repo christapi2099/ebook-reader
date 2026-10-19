@@ -42,7 +42,21 @@ if [ -z "$UV_BIN" ] && [ -x "$HOME/.local/bin/uv" ]; then
 fi
 
 cd "$REPO_DIR/backend"
-if [ -n "$UV_BIN" ]; then
+# GPU_ENV=rocm: AMD GPU. Runs the separate ROCm env (backend/.venv-rocm, created by
+# scripts/setup-rocm-env.sh) directly. NEVER `uv run` here: it would re-sync that env
+# to uv.lock and silently replace ROCm torch with CUDA torch. See docs/AMD_ROCM.md.
+# HSA_OVERRIDE_GFX_VERSION (e.g. 10.3.0 for an RX 6700 XT) is NOT set here; export it
+# yourself or put it in backend/.env if your card needs it.
+if [ "${GPU_ENV:-}" = "rocm" ]; then
+    ROCM_PY="$REPO_DIR/backend/.venv-rocm/bin/python"
+    if [ ! -x "$ROCM_PY" ]; then
+        echo "Error: GPU_ENV=rocm but backend/.venv-rocm is missing."
+        echo "Create it first: ./scripts/setup-rocm-env.sh"
+        exit 1
+    fi
+    echo "Starting backend on http://localhost:$BACKEND_PORT (ROCm env: backend/.venv-rocm; no uv run)"
+    "$ROCM_PY" -m uvicorn main:app --reload --host 0.0.0.0 --port "$BACKEND_PORT" &
+elif [ -n "$UV_BIN" ]; then
     echo "Starting backend on http://localhost:$BACKEND_PORT (uv run; syncing .venv from uv.lock)"
     "$UV_BIN" run uvicorn main:app --reload --host 0.0.0.0 --port "$BACKEND_PORT" &
 elif [ -x "$REPO_DIR/backend/.venv/bin/uvicorn" ]; then

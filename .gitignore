@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
+.venv-rocm/
+backend/.venv-rocm/
 venv/
 # Local uv cache (only needed by sandboxed runs where ~/.cache/uv is read-only).
 # uv.lock is intentionally NOT ignored — it must be committed.
