@@ -71,10 +71,23 @@ CORPUS = [
     "Nothing, absolutely nothing, could have prepared them for what came next.",
     "The train left at 7:45, arrived at 11:10, and was forty minutes late.",
     "Read the next chapter carefully before attempting the exercises.",
+    "Page 14",
+    "At dawn the fishermen pushed their boats into the grey water and did not speak.",
+    "Copyright 2024 All rights reserved.",
+    "Wait, what was that noise? Nobody moved, and nobody breathed.",
+    "By the end of the summer, the orchard had given more fruit than anyone could carry.",
 ]
+# Sentences the pipeline must skip (the real text filter would drop them): they exercise the
+# "index gaps" case that remapping and the manifest have to survive.
+FILTERED = {"Page 14", "Copyright 2024 All rights reserved."}
+CHAPTER_SIZE = 8  # sentences per chapter, so chapter breaks (extra gap) are exercised
 
-VOICES = {"piper": "en_US-lessac-medium", "kokoro-cpu": "af_heart", "fake": "af_heart"}
-EXACT_ENGINES = {"fake"}
+VOICES = {"piper": "en_US-lessac-medium", "kokoro-cpu": "af_heart", "fake": "af_heart",
+          "piper-replay": "en_US-lessac-medium", "kokoro-cpu-replay": "af_heart"}
+# ``*-replay`` engines feed the PCM recorded at capture time back through the REAL aligner and
+# pipeline, so everything downstream of synthesis is deterministic and compared exactly.
+EXACT_ENGINES = {"fake", "piper-replay", "kokoro-cpu-replay"}
+PCM_ROOT = Path(__file__).resolve().parent.parent / ".baseline" / "pcm"
 
 # Tolerances for compare. CPU engines on one machine are expected to be exact; the
 # tolerances exist so a deliberate, small numerical difference (GPU, ONNX) is reported
@@ -84,12 +97,14 @@ TOL = {
     "total_frac": 0.01,     # whole-book duration, relative
     "word_order_slack_ms": 1.0,
     "size_frac": 0.05,      # encoded file size, relative
+    "word_pos_frac": 0.06,  # a word's relative position inside its sentence
 }
 # Measured run-to-run noise on UNCHANGED code (two renders, same machine): Piper's VITS
 # duration predictor is stochastic, so a single sentence moved 8.6% then 15.1% while the whole
 # book stayed within 1%. Kokoro CPU lengths were identical. The per-sentence bound is therefore
 # loose for Piper; the word-count, order and containment checks are what protect highlighting.
-ENGINE_TOL = {"piper": {"segment_frac": 0.25, "total_frac": 0.02}}
+# Word position inside a sentence moved 0.063 on unchanged Piper code (Kokoro: 0.003).
+ENGINE_TOL = {"piper": {"segment_frac": 0.25, "total_frac": 0.02, "word_pos_frac": 0.12}}
 
 
 def tol_for(engine: str) -> dict:
@@ -117,6 +132,48 @@ def _pcm_sha(path: Path) -> str:
     """Hash of the decoded PCM, so container metadata differences cannot hide or fake a diff."""
     data, _ = sf.read(path, dtype="int16")
     return hashlib.sha256(np.ascontiguousarray(data).tobytes()).hexdigest()
+
+
+def _key(text: str) -> str:
+    return hashlib.sha1(text.encode()).hexdigest()[:16]
+
+
+def _base_engine(name: str) -> str:
+    return name[:-len("-replay")] if name.endswith("-replay") else name
+
+
+class RecordingSynth:
+    """Wraps a real synthesizer and saves each sentence's PCM + native timings for replay."""
+
+    def __init__(self, inner: Callable, out_dir: Path):
+        self.inner, self.dir = inner, out_dir
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+    def __call__(self, text: str, voice: str):
+        res = self.inner(text, voice)
+        k = _key(text)
+        np.save(self.dir / f"{k}.npy", np.asarray(res.audio, dtype=np.float32))
+        (self.dir / f"{k}.json").write_text(json.dumps({
+            "effective_speed": res.effective_speed, "native_words": res.native_words,
+            "kokoro_tokens": res.kokoro_tokens, "text": text}))
+        return res
+
+
+class ReplaySynth:
+    """Replays recorded PCM: deterministic input for the real aligner and encoder."""
+
+    def __init__(self, src_dir: Path):
+        if not src_dir.is_dir():
+            raise RuntimeError(f"no recorded PCM in {src_dir}; run capture for the base engine first")
+        self.dir = src_dir
+
+    def __call__(self, text: str, voice: str):
+        from services import render_worker as rw
+
+        k = _key(text)
+        meta = json.loads((self.dir / f"{k}.json").read_text())
+        return rw.SynthResult(np.load(self.dir / f"{k}.npy"), meta["effective_speed"],
+                              meta["native_words"], meta["kokoro_tokens"])
 
 
 class FakeSynth:
@@ -170,15 +227,20 @@ def make_sandbox(root: Path, corpus: list[str], voice: str):
                    page_count=1, created_at=T0, target_fingerprint=FINGERPRINT,
                    job_status="pending", voice=voice))
         s.add_all(Sentence(book_id=BOOK_ID, index=i, text=t, page=0, x0=0, y0=0, x1=0, y1=0,
-                           filtered=False, chapter=0 if i < len(corpus) // 2 else 1)
+                           filtered=t in FILTERED, chapter=i // CHAPTER_SIZE)
                   for i, t in enumerate(corpus))
         s.commit()
     return engine
 
 
 def render_once(engine_name: str, corpus: list[str], root: Path,
-                render_fn: Callable[..., str] | None = None) -> Path:
-    """Run the real pipeline for the corpus; return the published generation directory."""
+                render_fn: Callable[..., str] | None = None, *, record: bool = False,
+                ) -> tuple[Path, dict]:
+    """Run the real pipeline for the corpus.
+
+    Returns ``(generation_dir, aligned)`` where ``aligned`` maps sentence text to the word
+    list the aligner produced (word, start_ms, end_ms, timing_source), before clamping.
+    """
     from services import render_jobs as rj
     from services import render_worker as rw
 
@@ -187,22 +249,39 @@ def render_once(engine_name: str, corpus: list[str], root: Path,
     aligner = None
     if engine_name == "fake":
         synth, aligner = FakeSynth(), FakeAligner()
+    elif engine_name.endswith("-replay"):
+        synth = ReplaySynth(PCM_ROOT / _base_engine(engine_name))
     else:
         synth = rw.engine_synthesizer(build_engine(engine_name))
+        if record:
+            synth = RecordingSynth(synth, PCM_ROOT / engine_name)
     now = datetime.now(timezone.utc).replace(year=2030)
     claimed = rj.claim_next("baseline", now, lease_s=3600, debounce_s=0)
     if claimed != BOOK_ID:
         raise RuntimeError(f"could not claim the baseline book (got {claimed!r})")
-    outcome = (render_fn or rw.render_book)(
-        BOOK_ID, "baseline", synthesizer=synth, aligner=aligner, tiers=TIERS,
-        now=lambda: now, lease_s=3600, raise_errors=True)
+
+    aligned: dict[str, list] = {}
+    original = rw.align_sentence
+
+    def spy(audio, sr, text, **kw):
+        out = original(audio, sr, text, **kw)
+        aligned[text] = [[t.word, t.start_ms, t.end_ms, t.timing_source] for t in out]
+        return out
+
+    rw.align_sentence = spy
+    try:
+        outcome = (render_fn or rw.render_book)(
+            BOOK_ID, "baseline", synthesizer=synth, aligner=aligner, tiers=TIERS,
+            now=lambda: now, lease_s=3600, raise_errors=True)
+    finally:
+        rw.align_sentence = original
     if outcome != rw.READY:
         raise RuntimeError(f"render ended {outcome!r}, expected {rw.READY!r}")
     gens = sorted(p for p in (storage.RENDERS_DIR / BOOK_ID).iterdir() if p.name.isdigit())
-    return gens[-1]
+    return gens[-1], aligned
 
 
-def snapshot(gen_dir: Path, engine_name: str, corpus: list[str]) -> dict:
+def snapshot(gen_dir: Path, engine_name: str, corpus: list[str], aligned: dict | None = None) -> dict:
     """Everything a listener or the highlighter depends on, from the published files."""
     from scripts.verify_render import verify_render  # noqa: E402  (after sandbox is set)
 
@@ -217,9 +296,31 @@ def snapshot(gen_dir: Path, engine_name: str, corpus: list[str]) -> dict:
         "engine": engine_name,
         "corpus_sha256": hashlib.sha256("\n".join(corpus).encode()).hexdigest(),
         "manifest": _scrub(manifest),
+        "aligned": aligned or {},
+        "meta": _meta(),
         "files": files,
         "verify": report.to_dict(),
     }
+
+
+def _meta() -> dict:
+    """Provenance, so a golden can be tied to the code and libraries that produced it."""
+    import subprocess
+    from importlib.metadata import PackageNotFoundError, version
+
+    def ver(pkg: str) -> str | None:
+        try:
+            return version(pkg)
+        except PackageNotFoundError:
+            return None
+
+    try:
+        head = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True,
+                              cwd=Path(__file__).parent).stdout.strip() or None
+    except OSError:
+        head = None
+    return {"git_head": head, "torch": ver("torch"), "piper_tts": ver("piper-tts"),
+            "onnxruntime": ver("onnxruntime"), "kokoro": ver("kokoro")}
 
 
 _VOLATILE = {"created_at", "rendered_at", "built_at", "generated_at", "timestamp"}
@@ -300,6 +401,67 @@ def _check_words(seg: dict, tier: str, rep: Report, tol: dict) -> None:
         prev_end = w["end_ms"]
 
 
+def _norm(w: str) -> str:
+    return "".join(ch for ch in w.lower() if ch.isalnum())
+
+
+def _check_aligned(golden: dict, fresh: dict, rep: Report, *, exact: bool, tol: dict) -> None:
+    """Word TEXT and timings per sentence: what the highlighter actually shows."""
+    ga, fa = golden.get("aligned", {}), fresh.get("aligned", {})
+    if not ga:
+        rep.notes.append("golden has no aligned words (captured before this check existed)")
+        return
+    if set(ga) != set(fa):
+        rep.fail(f"sentence set differs: {sorted(set(ga) ^ set(fa))[:3]}")
+    shifts = []
+    for text in sorted(set(ga) & set(fa)):
+        g, f = ga[text], fa[text]
+        if [w[0] for w in g] != [w[0] for w in f]:
+            rep.fail(f"words differ for {text[:40]!r}: {[w[0] for w in g][:4]} -> "
+                     f"{[w[0] for w in f][:4]}")
+            continue
+        if [_norm(w[0]) for w in f] != [_norm(x) for x in text.split()]:
+            rep.fail(f"aligned words do not spell the sentence {text[:40]!r}")
+        if exact:
+            if g != f:
+                rep.fail(f"word timings/sources differ for {text[:40]!r}")
+            continue
+        gd, fd = (g[-1][2] or 1), (f[-1][2] or 1)
+        for i, (a, b) in enumerate(zip(g, f)):
+            shift = abs(a[1] / gd - b[1] / fd)
+            shifts.append(shift)
+            if shift > tol["word_pos_frac"]:
+                rep.fail(f"{text[:40]!r} word {i} {a[0]!r}: relative start "
+                         f"{a[1] / gd:.2f} -> {b[1] / fd:.2f}")
+    if shifts:
+        rep.notes.append(f"worst relative word-position shift {max(shifts):.3f} "
+                         f"(limit {tol['word_pos_frac']})")
+
+
+def _check_tiers(manifest: dict, rep: Report) -> None:
+    """Properties of ONE render: sentences ordered per tier, tiers consistent with the base."""
+    tiers = manifest.get("tiers", {})
+    for key, info in tiers.items():
+        segs = info["segments"]
+        for a, b in zip(segs, segs[1:]):
+            if not a["end_ms"] <= b["start_ms"] + 1:
+                rep.fail(f"tier {key}: sentence {a['index']} ends after {b['index']} starts")
+            if not a["index"] < b["index"]:
+                rep.fail(f"tier {key}: sentence order broken at {a['index']}, {b['index']}")
+    base = tiers.get("1.0")
+    if not base:
+        return
+    for key, info in tiers.items():
+        if key == "1.0":
+            continue
+        factor = info["actual_factor"]
+        for bs, ts in zip(base["segments"], info["segments"]):
+            expect = bs["start_ms"] / factor
+            if abs(ts["start_ms"] - expect) > 0.02 * expect + 40:
+                rep.fail(f"tier {key} sentence {ts['index']}: start {ts['start_ms']:.0f} ms but "
+                         f"base/factor says {expect:.0f} ms")
+
+
 def diff_snapshots(golden: dict, fresh: dict, *, exact: bool = False, engine: str = "") -> Report:
     """Compare two snapshots. ``exact`` (fake engine) demands identical PCM and manifest."""
     rep = Report()
@@ -320,6 +482,8 @@ def diff_snapshots(golden: dict, fresh: dict, *, exact: bool = False, engine: st
             rep.fail(f"{name}: size {g['bytes']} -> {f['bytes']} "
                      f"(> {tol['size_frac']:.0%})")
     _diff_manifest(golden["manifest"], fresh["manifest"], rep, exact=exact, tol=tol)
+    _check_tiers(fresh["manifest"], rep)
+    _check_aligned(golden, fresh, rep, exact=exact, tol=tol)
     return rep
 
 
@@ -340,8 +504,9 @@ def main(argv: list[str] | None = None) -> int:
     root = Path(tempfile.mkdtemp(prefix="render-baseline-"))
     try:
         try:
-            gen = render_once(args.engine, corpus, root)
-            fresh = snapshot(gen, args.engine, corpus)
+            gen, aligned = render_once(args.engine, corpus, root,
+                                       record=args.mode == "capture")
+            fresh = snapshot(gen, args.engine, corpus, aligned)
             if args.keep:
                 args.keep.mkdir(parents=True, exist_ok=True)
                 for f in gen.iterdir():

@@ -107,8 +107,126 @@ def test_fake_engine_renders_reproduce_exactly(tmp_path, monkeypatch):
     for n in range(2):
         root = tmp_path / f"r{n}"
         root.mkdir()
-        gen = rb.render_once("fake", corpus, root)
-        snaps.append(rb.snapshot(gen, "fake", corpus))
+        gen, aligned = rb.render_once("fake", corpus, root)
+        snaps.append(rb.snapshot(gen, "fake", corpus, aligned))
     rep = rb.diff_snapshots(snaps[0], snaps[1], exact=True)
     assert rep.ok, rep.failures
     assert snaps[0]["verify"]["ok"]
+
+
+# ---------------------------------------------------------------- aligned words / tiers
+def _aligned(shift=0.0, words=("Hello", "brave", "new", "world")):
+    return {"Hello brave new world": [[w, 100 * i + shift, 100 * i + 90 + shift, "aligned"]
+                                      for i, w in enumerate(words)]}
+
+
+def _with_aligned(snap, aligned):
+    snap = copy.deepcopy(snap)
+    snap["aligned"] = aligned
+    return snap
+
+
+def test_changed_word_text_is_caught():
+    g = _with_aligned(_snap(), _aligned())
+    f = _with_aligned(_snap(), _aligned(words=("Hello", "brave", "old", "world")))
+    assert any("words differ" in m for m in rb.diff_snapshots(g, f).failures)
+
+
+def test_exact_mode_catches_a_small_systematic_timing_shift():
+    g = _with_aligned(_snap(), _aligned())
+    f = _with_aligned(_snap(), _aligned(shift=3))  # every word 3 ms late
+    assert not rb.diff_snapshots(g, f, exact=True).ok
+
+
+def test_statistical_mode_catches_words_moving_within_a_sentence():
+    g = _with_aligned(_snap(), _aligned())
+    moved = _aligned()
+    for w in moved["Hello brave new world"]:
+        w[1] += 60  # every word starts 60 ms later, ~15% of this sentence
+    assert not rb.diff_snapshots(g, _with_aligned(_snap(), moved)).ok
+
+
+def test_aligned_words_must_spell_the_sentence():
+    wrong = {"Hello brave new world": [["Hello", 0, 90, "a"], ["brave", 100, 190, "a"],
+                                       ["new", 200, 290, "a"]]}  # a word is missing
+    rep = rb.diff_snapshots(_with_aligned(_snap(), wrong), _with_aligned(_snap(), wrong))
+    assert any("do not spell" in m for m in rep.failures)
+
+
+def test_tier_start_must_agree_with_the_base_tier():
+    fresh = _snap()
+    base = fresh["manifest"]["tiers"]["1.0"]
+    fresh["manifest"]["tiers"]["2.0"] = copy.deepcopy(base)
+    fresh["manifest"]["tiers"]["2.0"]["requested_factor"] = 2.0
+    fresh["manifest"]["tiers"]["2.0"]["actual_factor"] = 2.0
+    # not scaled: sentence 1 still starts at 520 ms instead of ~260 ms
+    golden = copy.deepcopy(fresh)
+    rep = rb.diff_snapshots(golden, fresh)
+    assert any("base/factor" in m for m in rep.failures)
+
+
+# ------------------------------------------------------------------ resume equivalence
+@pytest.mark.skipif(not export_encoding.ffmpeg_available(), reason="needs ffmpeg")
+def test_resumed_render_equals_an_uninterrupted_one(tmp_path, monkeypatch):
+    """Kill a render part-way, resume it from its chunk files, and the published result must
+    match a render that was never interrupted (exact: the fake engine is deterministic)."""
+    from datetime import datetime, timezone
+
+    import db.database as _db
+    import storage
+    from services import render_jobs as rj
+    from services import render_worker as rw
+
+    monkeypatch.setattr(_db, "engine", _db.engine)
+    monkeypatch.setattr(storage, "RENDERS_DIR", storage.RENDERS_DIR)
+    corpus = rb.CORPUS[:8]
+
+    clean_root = tmp_path / "clean"
+    clean_root.mkdir()
+    gen, aligned = rb.render_once("fake", corpus, clean_root)
+    clean = rb.snapshot(gen, "fake", corpus, aligned)
+
+    class Boom(Exception):
+        pass
+
+    class DiesAt(rb.FakeSynth):
+        def __init__(self, n):
+            self.n, self.calls = n, 0
+
+        def __call__(self, text, voice):
+            self.calls += 1
+            if self.calls == self.n:
+                raise Boom("simulated crash")
+            return super().__call__(text, voice)
+
+    root = tmp_path / "resumed"
+    root.mkdir()
+    rb.make_sandbox(root, corpus, rb.VOICES["fake"])
+    now = datetime.now(timezone.utc).replace(year=2030)
+    assert rj.claim_next("w", now, lease_s=3600, debounce_s=0) == rb.BOOK_ID
+    with pytest.raises(Exception):
+        rw.render_book(rb.BOOK_ID, "w", synthesizer=DiesAt(4), aligner=rb.FakeAligner(),
+                       tiers=rb.TIERS, now=lambda: now, lease_s=3600, retries=0,
+                       raise_errors=True)
+    # Back to pending, as an operator or the retry path would: the chunk files stay on disk.
+    from sqlmodel import Session
+    from db.models import Book
+    with Session(_db.engine) as s:
+        b = s.get(Book, rb.BOOK_ID)
+        b.job_status, b.lease_owner, b.lease_expires = "pending", None, None
+        s.add(b)
+        s.commit()
+    assert rj.claim_next("w2", now, lease_s=3600, debounce_s=0) == rb.BOOK_ID
+    counter = rb.FakeSynth()
+    calls = []
+    synth = lambda t, v: (calls.append(t), counter(t, v))[1]  # noqa: E731
+    outcome = rw.render_book(rb.BOOK_ID, "w2", synthesizer=synth, aligner=rb.FakeAligner(),
+                             tiers=rb.TIERS, now=lambda: now, lease_s=3600, raise_errors=True)
+    assert outcome == rw.READY
+    assert len(calls) < len([c for c in corpus if c not in rb.FILTERED]), \
+        "resume re-synthesized everything instead of reusing finished chunks"
+    gens = sorted(p for p in (storage.RENDERS_DIR / rb.BOOK_ID).iterdir() if p.name.isdigit())
+    resumed = rb.snapshot(gens[-1], "fake", corpus, {})
+    resumed["aligned"] = clean["aligned"]  # the spy only saw the post-resume sentences
+    rep = rb.diff_snapshots(clean, resumed, exact=True)
+    assert rep.ok, rep.failures
