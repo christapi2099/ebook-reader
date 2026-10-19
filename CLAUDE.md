@@ -14,21 +14,32 @@ cd frontend && npm run dev
 ## Key Files
 | File | Purpose |
 |---|---|
-| `backend/services/tts_engine.py` | Kokoro synthesis, AudioCache, SynthJob(speed=) |
-| `backend/routers/tts.py` | WebSocket /ws/tts/{id} — play/seek/pause+speed |
-| `frontend/src/lib/stores/audio.ts` | Web Audio API, generation counter, decode chain |
+| `backend/services/render_worker.py` | Render pipeline: extract, synthesize 1x, align, encode, publish; leased, resumable, stall watchdog |
+| `backend/services/render_jobs.py` | Claim/lease/pause/requeue/supersede state transitions (pure DB logic) |
+| `backend/services/render_triggers.py` | Target fingerprint (voice, engine family, pipeline) and when a book needs a (re)render |
+| `backend/services/render_artifacts.py` | base.flac, atempo speed tiers, drift audit, sync manifest |
+| `backend/services/render_store.py` | `RENDERS_DIR` layout, immutable generations, cleanup |
+| `backend/routers/renders.py` | `GET /api/renders/{book}/{gen}/audio_{tier}.opus` (Range) and the manifest |
+| `backend/services/tts_engine.py` | Kokoro synthesis, AudioCache, SynthJob(speed=); the render engine is set via `set_render_engine` |
+| `backend/services/engine_manager.py` | cpu / gpu / modal / piper engines; switching saves and restarts the render |
+| `backend/routers/tts.py` | Legacy WebSocket /ws/tts/{id} (live synthesis); not the reader path |
+| `frontend/src/lib/stores/audio.ts` | Tier player: one `<audio>` element per speed tier over the ready render, driven by the manifest |
+| `frontend/src/lib/utils/render-gate.ts` | Polls render status; reader shows the processing screen until a generation is ready |
 | `frontend/src/lib/stores/reader.ts` | sentences[], currentIndex, isPlaying, speed |
 | `frontend/src/lib/components/PDFViewer.svelte` | PDF.js canvas + sentence overlay |
-| `frontend/src/lib/api.ts` | TTSSocket + all HTTP calls |
+| `frontend/src/lib/api.ts` | All HTTP calls (renders, manifest, library, voices); legacy `TTSSocket` |
 
-## Active Plan: process-first architecture
-`docs/plans/process-first-architecture.md` (not started yet). In this plan, a book is read only from a complete, immutable render: sentences plus 1x Opus audio, atempo speed tiers and a sync manifest. The plan supersedes ADR-5 and, once implemented, replaces the Audio rules below. Read it before changing playback, caching, upload or reprocess code, and don't add new on-demand-synthesis features to the reader path.
+## Architecture: process-first
+A book is read only from a complete, immutable render: the sentences plus one voice rendered at 1x to Ogg Opus, speed tiers (`book_processor.TIERS`: 0.75, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0) built from the lossless base with ffmpeg `atempo`, and a sync manifest with word timings and PDF boxes. A published render never changes; a new voice, engine family, codec or pipeline fingerprint produces a new generation while the previous one stays readable. Books with no render yet are locked behind the processing screen. Compute device (CPU/GPU/Modal) does not trigger a re-render.
+
+Plan: `docs/plans/process-first-architecture.md` (kept out of git; it is in the primary checkout). Read it before changing playback, caching, upload, render or reprocess code. Don't add on-demand synthesis to the reader path. The per-chapter precompile pipeline (`ChapterAudio`) was removed in favour of this; it lives on in history at `agent/precompiled-audio`.
 
 ## Hard Rules
 
 **Backend**
 - Kokoro yields 3-tuples `(graphemes, phonemes, audio_ndarray)` — use `result[-1]`, sample_rate=24000
-- AudioCache key = `SHA256(text:voice:speed)` — speed is part of key
+- AudioCache key = `SHA256(text:voice:speed)` — speed is part of key. It serves voice preview and MP3 export; the render worker does not read it
+- Renders are immutable: write to a `.tmp-*` dir and publish a new generation atomically, never edit a published one. Render state changes go through `render_jobs` (one short transaction each)
 - Use `import db.database as _db` + `_db.engine` at call time (not import-time)
 - Run Python through uv: `cd backend && uv run <cmd>` (env is `backend/.venv`, locked by `backend/uv.lock`). Re-run `uv sync` after pulling; add deps with `uv add` / `uv add --dev` (never hand-edit `requirements.txt` — it is generated from the lock)
 
@@ -42,7 +53,9 @@ cd frontend && npm run dev
 - PyMuPDF + PDF.js canvas share top-left origin. Direct mapping: `x = fitz_x * 1.5`, `y = fitz_y * 1.5`. No y-flip.
 
 **Audio**
-- Speed handled by Kokoro native `speed` param — browser `playbackRate` stays at `1.0`
+- Reader speed = switching to the matching atempo tier `<audio>` element; browser `playbackRate` stays at `1.0`. Kokoro is only ever asked for `speed=1.0` when rendering a book (the worker rejects any other base speed)
+- Sync comes from the manifest and `audio.currentTime` (rAF loop), not from wall-clock timers or WebSocket events
+- Browsers: Chrome and Firefox (Ogg Opus). Safari shows an explicit "unsupported browser" message
 - pdfjs-dist v5: `import * as pdfjsLib` + `import workerUrl from '...?url'` at **module level** (not inside function)
 
 ## Dispatch (OpenCode)
