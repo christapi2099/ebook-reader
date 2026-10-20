@@ -300,3 +300,17 @@ def test_a_wrong_factor_on_a_short_book_still_fails(need_ffmpeg, tmp_path):
     tiers["2.0"]["actual_factor"] = 1.5
     with pytest.raises(ra.RenderAuditError, match="actual_factor"):
         ra.drift_audit(base["path"], base["segments"], tiers, tmp_path)
+
+
+def test_finished_tier_survives_a_restart_and_only_for_the_same_base(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(ra, "_encode", lambda src, dst, f: (calls.append(f), dst.write_bytes(b"x")))
+    path = tmp_path / "audio_1.5.opus"
+    ra._encode_tier(tmp_path / "base.flac", path, 1.5, 1000.0)
+    ra._encode_tier(tmp_path / "base.flac", path, 1.5, 1000.0)  # restart: reused
+    assert calls == [1.5]
+    ra._encode_tier(tmp_path / "base.flac", path, 1.5, 1000.5)   # different base: redone
+    assert calls == [1.5, 1.5]
+    path.with_name(path.name + ".done").unlink()                  # no marker: never trusted
+    ra._encode_tier(tmp_path / "base.flac", path, 1.5, 1000.5)
+    assert calls == [1.5, 1.5, 1.5]
