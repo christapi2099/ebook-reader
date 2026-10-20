@@ -16,6 +16,7 @@ All of these leave the app database and the renders directory untouched unless n
 
 - 2026-10-20, RX 6700 XT, MIOpen off, 80 sentences/process, while a tier encode ran on the CPU:
   1 proc 24.0x, 2 procs 37.9x, 4 procs 45.1x real time (median sentence 0.47 s at 4 procs).
+  6 procs 41.1x (slower than 4), 8 procs: 2 of 8 workers died with CUDA out of memory (12 GB card; peak VRAM sampled 12.9 GB).
   The 8-worker CPU ONNX render of the 28.8 h Deep Learning book ran at about 15x.
 
 ## Testing a full GPU render in the app

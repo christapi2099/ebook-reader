@@ -1,0 +1,20 @@
+{
+  "device": "cuda",
+  "voice": "af_heart",
+  "sentences_per_proc": 40,
+  "load_1m": 24.931640625,
+  "date": "2026-10-20 10:59:53",
+  "results": {
+    "6": {
+      "audio_s": 1499.1,
+      "wall_s": 36.4,
+      "speed_x": 41.1,
+      "lat_median_s": 0.789,
+      "lat_p95_s": 1.372,
+      "miopen_enabled": false
+    },
+    "8": {
+      "error": "2 of 8 workers failed"
+    }
+  }
+}
