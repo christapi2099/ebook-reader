@@ -125,8 +125,12 @@ def _render_status(book: Book, queue_position: int | None = None) -> dict:
     sps, total = stats.get("sps_ewma"), stats.get("sentences_total")
     done = stats.get("sentences_done") or 0
     eta = None
-    if book.job_status == "processing" and sps and total:
-        eta = max(0, round((total - done) / sps))
+    if book.job_status == "processing" and sps and total and total > done:
+        # A rate that decayed toward zero (a long no-progress phase such as encode) would
+        # overflow here; an absurd estimate is no estimate.
+        remaining = (total - done) / sps
+        if remaining < 10 * 24 * 3600:
+            eta = round(remaining)
     needs = book.ready_generation is None or (
         book.target_fingerprint is not None
         and book.target_fingerprint != book.ready_fingerprint)

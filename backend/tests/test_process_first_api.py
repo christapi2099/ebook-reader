@@ -170,6 +170,16 @@ def test_processing_endpoint(client, db_engine, seed_book, renders_dir):
     assert client.get("/library/e").json()["eta_seconds"] == 45
 
 
+def test_list_survives_a_decayed_rate(client, db_engine, seed_book, monkeypatch):
+    # A no-progress phase (encode) decays the EWMA toward zero; the list must not 500.
+    live = datetime.now(timezone.utc) + timedelta(hours=1)
+    seed_book(db_engine, ready_generation=None, job_status="processing", lease_expires=live)
+    monkeypatch.setattr(render_stats, "read", lambda _id: {
+        "sps_ewma": 1e-286, "sentences_total": 18539, "sentences_done": 100})
+    r = client.get("/library")
+    assert r.status_code == 200 and r.json()[0]["eta_seconds"] is None
+
+
 # --- the read gate -------------------------------------------------------------
 
 def test_sentences_409_without_ready_generation(client, db_engine, seed_book):

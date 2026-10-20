@@ -84,7 +84,8 @@ CHAPTER_SIZE = 8  # sentences per chapter, so chapter breaks (extra gap) are exe
 
 VOICES = {"piper": "en_US-lessac-medium", "kokoro-cpu": "af_heart", "fake": "af_heart",
           "piper-replay": "en_US-lessac-medium", "kokoro-cpu-replay": "af_heart",
-          "kokoro-onnx": "af_heart", "kokoro-onnx-replay": "af_heart"}
+          "kokoro-onnx": "af_heart", "kokoro-onnx-replay": "af_heart",
+          "kokoro-gpu": "af_heart"}
 # ``*-replay`` engines feed the PCM recorded at capture time back through the REAL aligner and
 # pipeline, so everything downstream of synthesis is deterministic and compared exactly.
 EXACT_ENGINES = {"fake", "piper-replay", "kokoro-cpu-replay", "kokoro-onnx-replay"}
@@ -228,6 +229,8 @@ def build_engine(name: str) -> Any:
         built, err = engine_manager.build_piper()
     elif name == "kokoro-cpu":
         built, err = engine_manager.build_local("cpu")
+    elif name == "kokoro-gpu":
+        built, err = engine_manager.build_local("cuda")
     elif name == "kokoro-onnx":
         built, err = engine_manager.build_kokoro_onnx()
     else:
