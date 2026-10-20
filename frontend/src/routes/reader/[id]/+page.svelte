@@ -46,7 +46,6 @@ const bookId = $derived($page.params.id as string)
 let reader: ReaderState = $state(get(readerStore))
 let audio = $state(get(audioStore))
   let settings: SettingsState = $state(get(settingsStore))
-let seeking = $state(false)
 // The transport controls stay disabled until `audioStore.init` has opened the
 // socket; see MediaBar's `ready` prop for what an earlier Play click would do.
 let audioReady = $state(false)
@@ -178,7 +177,7 @@ async function switchToPending() {
 
 // Newer render published while nothing is playing: switch without asking.
 $effect(() => {
-  if (pendingVersion && !reader.isPlaying && !audio.isPlaying && !seeking) void switchToPending()
+  if (pendingVersion && !reader.isPlaying && !audio.isPlaying) void switchToPending()
 })
 
 async function handleRetryRender() {
@@ -315,22 +314,18 @@ function handlePause() {
   flushProgress()
 }
 
-async function handleSeek(index: number) {
-  if (seeking) return
-  seeking = true
-
-  if (reader.isPlaying) {
+function handleSeek(index: number) {
+  // Latest click wins: nothing here awaits, so no click can be dropped.
+  if (reader.isPlaying || audio.isPlaying) {
+    setPlaying(true)
     audioStore.seek(index)
   } else {
     // Auto-play from the clicked sentence and fix the stale audio.currentIndex bug
     setPlaying(true)
     audioStore.play(index)
   }
-  try {
-    await seek(index)
-  } finally {
-    seeking = false
-  }
+  // Optimistic position; the bookmark write is debounced inside seek().
+  void seek(index)
 }
 
 function handleSpeedChange(s: number) {
@@ -464,7 +459,7 @@ function handleBackToLibrary() {
           sentences={reader.sentences}
           currentIndex={audio.currentIndex}
           currentWordIndex={audio.currentWordIndex}
-          buffering={audio.buffering || seeking}
+          buffering={audio.buffering}
           pageToScroll={pageToScroll}
           resumePage={resumePage}
           searchMatches={searchMatches}
@@ -512,7 +507,6 @@ function handleBackToLibrary() {
         <MediaBar
           isPlaying={reader.isPlaying}
           speed={reader.speed}
-          disabled={seeking}
           ready={audioReady}
           buffering={audio.buffering}
           onPlay={handlePlay}

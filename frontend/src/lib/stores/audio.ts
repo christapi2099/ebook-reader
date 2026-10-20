@@ -336,8 +336,19 @@ function createAudioStore() {
       prime()
       const token = ++playToken
       const el = ensureElement(activeKey)
-      el.pause()
+      // Already sounding: move the playhead and keep going. Pausing here is what
+      // made a click feel dead until the start gate re-opened.
+      const sounding = cur().isPlaying && !el.paused
       update(s => ({ ...s, currentIndex: index, currentWordIndex: -1 }))
+      if (sounding) {
+        seekTo(index)
+        // If the target is not buffered the element stalls itself ('waiting'
+        // shows the buffering state, 'playing' clears it); no gate needed.
+        if (bufferedAhead(el) < START_GATE_S) update(s => ({ ...s, buffering: true }))
+        startRaf()
+        return
+      }
+      el.pause()
       seekTo(index)
       void startPlayback(el, token)
     },

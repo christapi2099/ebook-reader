@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { get } from 'svelte/store'
-import readerStore, { loadBook, seek, type ReaderState } from '$lib/stores/reader'
+import readerStore, { loadBook, seek, flushProgress, type ReaderState } from '$lib/stores/reader'
 import { buildPageIndex, pageForSentenceIndex } from '$lib/utils/page-index'
 import type { Sentence } from '$lib/api'
 import * as api from '$lib/api'
@@ -51,6 +51,7 @@ describe('reader pages', () => {
     // Jumping to page 20 of 50 seeks to that page's sentence.
     const target = pageIndex()[20]
     await seek(target.sentenceIndex)
+    flushProgress()
     expect(get(readerStore).currentIndex).toBe(20)
 
     // Reload: what the reader route does on mount, and what a browser refresh does.
@@ -67,6 +68,8 @@ describe('reader pages', () => {
   it('persists the sentence index, never a percentage', async () => {
     await loadBook(BOOK_ID)
     await seek(25)
+    flushProgress()
+    await new Promise(r => setTimeout(r, 0))
 
     expect(api.saveProgress).toHaveBeenCalledWith(BOOK_ID, 25)
     expect(api.updateUserSettings).toHaveBeenCalledWith({

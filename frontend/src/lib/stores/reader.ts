@@ -193,17 +193,27 @@ export const resetReader = (): void => {
   readerStore.set({ bookId: null, sentences: [], currentIndex: 0, isPlaying: false, speed: readStoredSpeed() })
 }
 
+/** Quiet time after the last click before the position is sent to the server. */
+const SEEK_SAVE_DEBOUNCE_MS = 300
+
+/**
+ * Move the reading position. Synchronous for the caller: the index changes at
+ * once and the bookmark write is debounced and fire-and-forget, so a click never
+ * waits on (or is dropped behind) a network round trip. `flushProgress` still
+ * forces it out on pause, leave and unload.
+ */
 export const seek = async (index: number): Promise<void> => {
   const { bookId, sentences } = get(readerStore)
   const clamped = Math.max(0, Math.min(index, sentences.length - 1))
   readerStore.update(s => ({ ...s, currentIndex: clamped }))
   if (bookId === null) return
-  // Persist the clamped value, not the requested one. `seek(999)` on a
-  // hundred-sentence book used to store 999, and the reader then resumed out of
-  // bounds. The server now clamps too (POST /library/{id}/progress), but this
-  // keeps the local position and the stored one identical without a round trip.
+  // The clamped value is what `writeCurrentPosition` reads back from the store,
+  // so the stored position can never be out of bounds.
   clearSaveTimer()
-  await writeProgress(bookId, clamped)
+  saveTimer = setTimeout(() => {
+    saveTimer = null
+    void writeCurrentPosition()
+  }, SEEK_SAVE_DEBOUNCE_MS)
 }
 
 /**
