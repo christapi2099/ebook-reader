@@ -71,7 +71,7 @@ def test_current_inputs_defaults():
     i = bp.current_inputs("af_heart", "kokoro", ffmpeg_version="7.0",
                           voices_dir="/nonexistent")
     assert i.pipeline_version == bp.PIPELINE_VERSION
-    assert i.tiers == bp.TIERS
+    assert i.tiers == bp.FINGERPRINT_TIERS
     assert i.pymupdf_version
     # built-in voice: hash of the name string
     import hashlib
@@ -106,3 +106,24 @@ def test_current_inputs_aligner_defaults_are_real():
     assert i.aligner_name == "ctc-forced-aligner"
     assert i.aligner_version == metadata.version("ctc-forced-aligner") != "unknown"
     assert "MMS" in i.aligner_model
+
+
+# The fingerprint of every published book was computed with the tier list
+# (0.75, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0). Changing the tiers a render builds must
+# not change it, or every ready book would look stale and requeue.
+PINNED = "6c907c0c35bffb106227c98a262026ecc70160cf9ec55a93e855e7119f97452a"
+
+
+def test_fingerprint_pinned_across_the_tier_set_change():
+    assert bp.FINGERPRINT_TIERS == (0.75, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0)
+    assert bp.fingerprint(_base(model_revision="r1", pipeline_version="p" * 64)) == PINNED
+
+
+def test_rendered_tiers_are_independent_of_the_fingerprint():
+    assert bp.TIERS == (1.5, 2.0, 2.5, 3.0)
+    i = bp.current_inputs("af_heart", "kokoro", ffmpeg_version="7.0", voices_dir="/nonexistent")
+    assert i.tiers == bp.FINGERPRINT_TIERS != bp.TIERS
+
+
+def test_servable_tiers_keep_old_renders_playable():
+    assert set(bp.SERVABLE_TIERS) == {0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0}

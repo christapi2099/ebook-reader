@@ -285,6 +285,13 @@ def test_rejects_bad_tiers(tier, renders_dir):
     assert e.value.status_code == 400
 
 
+@pytest.mark.parametrize("tier", ["1.0", "0.75", "1.25", "1.5", "1.75", "2.0", "2.5", "3.0"])
+def test_old_and_new_tiers_are_servable(tier, renders_dir):
+    """Old renders keep their 0.75/1.25/1.75 files; new ones build 1.5..3.0."""
+    path = renders_router.resolve_audio_path(BID, "1", tier)
+    assert path.name == f"audio_{tier}.opus"
+
+
 def test_rejects_symlink_escape(renders_dir, tmp_path):
     (tmp_path / "secret").mkdir()
     (renders_dir / "evil").symlink_to(tmp_path / "secret")

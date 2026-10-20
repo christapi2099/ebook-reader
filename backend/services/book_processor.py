@@ -20,8 +20,18 @@ _SERVICES_DIR = Path(__file__).resolve().parent
 # base_engine.py (BaseEngine._split_sentences).
 PIPELINE_SOURCES = ("text_filter.py", "text_cleaner.py", "base_engine.py")
 
-# Single constant; the final list may change after Checkpoint 2.
-TIERS: tuple[float, ...] = (0.75, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0)
+# Speed tiers a new render builds next to the 1.0 base (1.0 is always added).
+TIERS: tuple[float, ...] = (1.5, 2.0, 2.5, 3.0)
+
+# The tier list that goes into the fingerprint, pinned to the list every render
+# before 2026-10-20 was built with. Changing TIERS must not change the fingerprint
+# of published books (that would mark every ready book stale and requeue it, a
+# running render included). New renders simply contain fewer tiers; old ones keep
+# theirs. Change this only on purpose, to force every book to re-render.
+FINGERPRINT_TIERS: tuple[float, ...] = (0.75, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0)
+
+# Tier files the renders router serves: today's set plus what older renders contain.
+SERVABLE_TIERS: tuple[float, ...] = tuple(sorted({1.0, *TIERS, *FINGERPRINT_TIERS}))
 
 DEFAULT_CODEC = "opus"
 DEFAULT_BITRATE = "48k"
@@ -62,7 +72,7 @@ class FingerprintInputs:
     codec: str = DEFAULT_CODEC
     bitrate: str = DEFAULT_BITRATE
     sample_rate: int = DEFAULT_SAMPLE_RATE
-    tiers: tuple = TIERS
+    tiers: tuple = FINGERPRINT_TIERS
     base_effective_speed: float = 1.0
     gap_policy: str = DEFAULT_GAP_POLICY
 

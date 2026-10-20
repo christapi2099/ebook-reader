@@ -11,13 +11,14 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 
 import storage
-from services.book_processor import TIERS
+from services.book_processor import SERVABLE_TIERS
 
 router = APIRouter(prefix="/api/renders", tags=["renders"])
 
 BOOK_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-# Filenames are audio_{t}.opus with t = str(float): 1.0, 0.75, 1.25, ...
-ALLOWED_TIERS = frozenset(str(float(t)) for t in (*TIERS, 1.0))
+# Filenames are audio_{t}.opus with t = str(float): 1.0, 1.5, ... Older renders
+# also carry 0.75, 1.25 and 1.75, which stay servable.
+ALLOWED_TIERS = frozenset(str(float(t)) for t in SERVABLE_TIERS)
 IMMUTABLE = "public, max-age=31536000, immutable"
 
 
