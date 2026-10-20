@@ -399,7 +399,8 @@ def test_four_gpu_workers_give_same_order_manifest_and_audio_as_one(env, real_ff
     assert h1 == []                      # RENDER_SYNTH_WORKERS=1: serial path, no processes
     assert len(h4) == 4                  # default on the GPU engine
     assert all(h.closed for h in h4)     # VRAM released when the render ends
-    segs = lambda m: [s["index"] for s in m["tiers"]["1.0"]["segments"]]
+    from services import render_manifest as rman
+    segs = lambda m: [s["index"] for s in rman.tier_segments(m, "1.0")]
     assert segs(m4) == segs(m1) == list(range(14))
     assert pcm4 == pcm1
     assert m4["tiers"] == m1["tiers"]
