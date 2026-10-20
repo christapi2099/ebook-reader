@@ -338,6 +338,24 @@ class TestSdkTransport:
         assert len(chunks) == 1
         assert calls[0]["texts"] == ["Hello."]
 
+    def test_batch_map_targets_the_export_function(self, monkeypatch):
+        """Regression: map_batches used the interactive function, which rejects batch payloads."""
+        names = []
+        module = types.ModuleType("modal")
+        module.Function = types.SimpleNamespace(
+            from_name=lambda app, name: names.append(name) or types.SimpleNamespace(
+                map=lambda payloads, order_outputs=False: iter([])
+            )
+        )
+        monkeypatch.setitem(sys.modules, "modal", module)
+        monkeypatch.setattr(modal_remote, "modal_credentials_present", lambda env=None: True)
+
+        config = RemoteConfig(transport="sdk")
+        transport = modal_remote._SdkTransport(config)
+        list(transport.map_batches([{"batch_index": 0, "sentences": []}]))
+        assert names == [config.export_function_name]
+        assert config.export_function_name != config.function_name
+
     def test_function_handle_is_cached_between_calls(self, monkeypatch):
         lookups = []
         function = types.SimpleNamespace(remote=lambda payload: _wire())

@@ -292,8 +292,9 @@ class _SdkTransport:
         self._env = os.environ if env is None else env
         self._lock = threading.Lock()
         self._function: Any = None
+        self._export_function: Any = None
 
-    def _resolve_function(self) -> Any:
+    def _resolve_function(self, export: bool = False) -> Any:
         if not modal_credentials_present(self._env):
             raise RemoteSynthesisError(
                 "No Modal credentials found: set MODAL_TOKEN_ID and MODAL_TOKEN_SECRET "
@@ -307,28 +308,31 @@ class _SdkTransport:
                 f"or set KOKORO_BACKEND=local ({exc})"
             ) from exc
 
+        name = self._config.export_function_name if export else self._config.function_name
         with self._lock:
-            function = self._function
+            function = self._export_function if export else self._function
         if function is None:
             try:
                 # `from_name` is lazy and never fails on its own; the first
                 # remote()/spawn() call is what resolves it against Modal.
-                function = modal.Function.from_name(
-                    self._config.app_name, self._config.function_name
-                )
+                function = modal.Function.from_name(self._config.app_name, name)
             except Exception as exc:
                 raise RemoteSynthesisError(
                     f"Could not look up Modal function "
-                    f"{self._config.app_name}/{self._config.function_name}: "
+                    f"{self._config.app_name}/{name}: "
                     f"{_describe_exception(exc)}"
                 ) from exc
             with self._lock:
-                self._function = function
+                if export:
+                    self._export_function = function
+                else:
+                    self._function = function
         return function
 
     def _forget_function(self) -> None:
         with self._lock:
             self._function = None
+            self._export_function = None
 
     def invoke(self, payload: dict) -> dict:
         function = self._resolve_function()
@@ -380,7 +384,8 @@ class _SdkTransport:
         container finishes, which is what lets the export report progress
         instead of waiting for the slowest batch.
         """
-        function = self._resolve_function()
+        # The bulk-export function, not the interactive one: it takes a batch payload.
+        function = self._resolve_function(export=True)
         try:
             return iter(function.map(list(payloads), order_outputs=False))
         except Exception as exc:

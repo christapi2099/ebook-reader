@@ -1,0 +1,44 @@
+{
+  "sentences": 374,
+  "chars": 46638,
+  "first_call_s": 1.35,
+  "second_call_s": 0.5,
+  "single": {
+    "n": 20,
+    "median_s": 0.299,
+    "p95_s": 1.498,
+    "rtf": 0.055,
+    "audio_s": 177.2
+  },
+  "multi10": {
+    "wall_s": 3.3,
+    "audio_s": 96.5,
+    "rtf": 0.034
+  },
+  "parallel": {
+    "1": {
+      "requests": 1,
+      "wall_s": 75.9,
+      "first_done_s": 75.1,
+      "audio_s": 3230.8,
+      "rtf": 0.0235,
+      "speed_x": 42.5
+    },
+    "4": {
+      "requests": 4,
+      "wall_s": 68.1,
+      "first_done_s": 66.8,
+      "audio_s": 3230.8,
+      "rtf": 0.0211,
+      "speed_x": 47.4
+    },
+    "8": {
+      "requests": 8,
+      "wall_s": 59.4,
+      "first_done_s": 28.5,
+      "audio_s": 3230.8,
+      "rtf": 0.0184,
+      "speed_x": 54.4
+    }
+  }
+}
