@@ -122,9 +122,57 @@ useful), and entries far behind (browsing/seek backwards) get evicted.
 | **pause** | playback stops; preloads kept | `stopAudio()` + `++prefetchGeneration`; **cache kept** by design |
 | **stop** | preloads kept until next `schedulePreload` evicts | cache cleared, generation bumped, object URLs revoked |
 
----
+### 1.6 Instant sentence switching (click → play)
 
-## 2. Streaming WebSocket protocol
+Why clicking a different sentence starts reading it fast. All line refs `23.69f45db…js`.
+
+**Pre-warmed audio stack (one-time):** a single `AudioContext` is created at service construction
+(8085). On the first click gesture, `setAudio()` (9833) runs `audioPlayer.prime()` (8239): resume +
+play a **50 ms silent buffer** (`suppressOnEnded`), and also do silent `play()…pause()` on the hidden
+`<audio>` element — unlocking both Web Audio and HTMLAudio autoplay — then a "prime pause" 50 ms
+later. After that, every switch costs no context-creation/resume latency.
+
+**Preloads make the common case a cache hit:** the orchestrator calls
+`preparePreloadForPlay` + `schedulePreload` on *every* play (`checkPlayIdAndPlay`, 15304), so the
+`{prev:2, next:4}` neighbours (plus `{2,8}` at page ends/background) are already fetched/decoded
+while the current sentence reads. `preloadFromOrchestrator` even records the "first-next" key
+(`orchestratorFirstNextKey`) for the streaming fallback check.
+
+**The play path (9925 `play` → 9972 `playHelper`):**
+
+1. `clearPlay()` first (9954): clears all streaming waiters, kills the CC + monitor timers,
+   `audioPlayer.pause()` unless first play, `resetCurrentAudioSequence()`, `bufferController = null`
+   — a **hard stop that returns immediately** (no await on audio tail).
+2. `playHelper` looks up `preloads[page/idx/voiceKey]`:
+   - **Cache hit** → `Promise.race([entry.blob, 20 s timeout])`, verify `blob.text === processed`
+     (stale-wrong-text guard, else drop + re-synthesize), then `checkBlob` — zero network.
+   - **Cache miss** → `downloadUrl(...)`; the result is itself *stored into the same `preloads`
+     map* — play and preload are literally one code path, so in-flight prefetch work for the
+     clicked sentence is **reused, not duplicated** (the race awaits the same promise the prefetch
+     started).
+3. `checkBlob` (10017) and `setPlay` (10047) re-check `playId` **three times** (arrival, after blob
+   await, after 50 ms timer). `playId` is bumped per request by the orchestrator's `setPlayId()`
+   (15295) and validated in `checkPlayIdAndPlay` (15304) — a newer click makes older work inert
+   (`isProcessingPlay` off, never played; in-flight streams keep filling preloads in the background).
+4. `setPlay` emits `VRv` (sentence start → UI/highlight move **immediately**), then schedules
+   `innerPlay` on a 50 ms timer (10130–10153).
+5. `innerPlay` (10161) → `playCurrentAudioSegment()` (11990): prefers **decoded
+   `AudioBuffer`s** (PCM chunks are decoded to buffers *at receive time* — no decode-on-click) →
+   `startGaplessStreamPlayback` + fresh BufferController; otherwise blob URL on the hidden
+   `<audio>`.
+6. The old source dies via `stopCurrentSource(true)` (8296): `a.stop()` + **`onended = null`** so the
+   sentence-end chain (`qSK` → next sentence) cannot fire from the killed source; the new source
+   starts on the same context in its place. Switch latency ≈ one animation frame.
+
+**Supertonic (on-device) does the same with cheaper state** (14161 `play`):
+`++playToken` → `stopAudio()` → `prefetchCache` hit (pre-synthesized WAV) or **in-flight synth
+promise reused** (miss stores the promise, deduping) → stale plays abort at 3 checkpoints
+(`D !== playToken`) → `playBlob(q)` → `qSK`. Played entries are deleted from the cache (14271);
+pause bumps `prefetchGeneration` but **keeps the cache** (14199), so pause→resume of any preloaded
+sentence is instant re-use.
+
+**Orchestrator note:** `pause()` = `stop()`; a mid-`play`-processing pause sets
+`isStoppedWhenProcessingPlay` which `setPlay` converts into a clean `stop()` (10133).
 
 ### 2.1 Connection
 
@@ -211,14 +259,20 @@ are merged by KMP suffix-overlap of adjacent words.
 
 - A **50 ms `setInterval` wall-clock timer** walks the mark list against elapsed playback time
   (not `audio.currentTime` — confirmed: `timeupdate` appears only in a record-preview path, 597:8737).
-- Time normalization: chunk marks are divided by the speed factor (`z = getSpeed()/180`) unless they
-  come from the final/speech-mark-API path (`z = 1`, they are already in adjusted time).
+- Time normalization (11750–11783): chunk marks are divided by the speed factor (`z = getSpeed()/180`)
+  unless they come from the final/speech-mark-API path (`z = 1`, already adjusted); **"pro" voices use
+  raw mark time** (server renders at speed). Timer fires `mWY {word, speechMarks}` per word and adds
+  a `WfZ` chunk update when `mark.start ≥ getIndexToSwitchText(chunk+1)`.
 - Text segmentation: each sentence emits one `WfZ` (CC text) message; each mark emits `mWY`
   (highlight word).
+- Text segmentation detail: `ttsCcService` splits each sentence into CC display chunks
+  (`getTextChunkHtml(j)`, `getIndexToSwitchText(j+1)`, `getNumTextChunks`); the CC panel shows a
+  rolling chunk and switches at char boundaries.
 - **No marks → estimates**: CJK = per-char timing; else split `/\s+/`;
   `estimateDuration(text, wpm) = syllables/(0.95 · wpm) · 60000` (11824) with a syllable-estimate
-  heuristic (11821–11848); streaming without final update gets an estimated total; a **one-shot
-  correction** fires at sentence end to resync.
+  heuristic (11821–11848); `oneCharTime = duration/len · 0.95` (11696); streaming without final
+  update gets an estimated total, **upgraded in-flight to the real duration once chunk buffers exist
+  (`upgradedToActual`, 11709–11725)**; a **one-shot correction** fires at sentence end to resync.
 - Marks are **disabled** entirely after 10 min input inactivity or tab hide (6e5 ms timer,
   12763–12830; message `rNO {state:"yes"|"no"}`); re-enabling re-inits the socket if closed. This
   saves the marks fetch cost while the user is away — highlight then works from estimates.
@@ -285,6 +339,12 @@ if audio never arrives (stream stall) the sentence advance gate (`qSK` after seg
 
 ## 6. Mapping to our process-first design
 
+One important contrast to §1.6: NaturalReader must **pause + swap audio sources** per sentence
+(separate files/buffers per sentence) and relies on preloads to hide that switch cost. We play one
+immutable chapter file per speed tier, so "switching to another sentence" is just
+`audio.currentTime = sentenceOffset` on the same element — no stop/start at all. Their
+pre-warmed-context and stale-gating ideas are still worth copying (§7 below).
+
 Our reader plays a fixed, immutable render (base FLAC → atempo tiers → Opus + manifest with word
 timings + PDF boxes). NaturalReader's pipeline is the dynamic counterpart of the same ideas. Both
 converge on: bounded lookahead, position-keyed caches, generation tokens, sentence-level advance,
@@ -308,6 +368,9 @@ and a single advancing highlight driven by wall-clock interpolation — differen
 
 ### Ranked small wins (low risk first)
 
+0. **Pre-warm + generation-gate the player**: on first user gesture, run one silent play to unlock
+   the audio path; guard every pending playback result with a per-request generation so a seek
+   (or chapter jump) can never play an older resolve — NR's `prime()`/`playId` pattern (§1.6).
 1. **Generation check inside the render sentence loop** (`render_worker.py`): cheap supersede without
    restarting the chapter render — mirrors `prefetchGeneration` exactly.
 2. **Degraded-lookahead mode**: after N consecutive render failures for a book, reduce chapter
