@@ -232,21 +232,26 @@ def encode_tiers(base: Path, tiers: list[tuple[str, str | None, Path]], *, base_
                                         stderr=err)
                 with procs_lock:
                     procs.append(proc)
+
+                def exited_cleanly() -> None:
+                    """At EOF, before the last chunk is queued: a decoder that died
+                    early must fail the tier, never publish a short one."""
+                    if proc.wait() != 0 and not abort.is_set():
+                        err.seek(0)
+                        raise ChunkEncodeError(f"tier {t.key}: ffmpeg decode failed: "
+                                               f"{err.read().decode(errors='replace')[-300:]}")
+
                 try:
-                    _split_stream(t, proc.stdout)
+                    _split_stream(t, proc.stdout, exited_cleanly)
                 finally:
                     if abort.is_set():
                         proc.kill()
                     proc.stdout.close()
-                    rc = proc.wait()
-                if rc != 0 and not abort.is_set():
-                    err.seek(0)
-                    raise ChunkEncodeError(f"tier {t.key}: ffmpeg decode failed: "
-                                           f"{err.read().decode(errors='replace')[-300:]}")
+                    proc.wait()
         except BaseException as exc:  # noqa: BLE001 - handed to the calling thread
             fail(exc)
 
-    def _split_stream(t: _Tier, pipe) -> None:
+    def _split_stream(t: _Tier, pipe, exited_cleanly) -> None:
         buf = np.zeros(0, dtype="<i2")
         off = a = k = 0            # buf[0] is global sample `off`; next chunk starts at `a`
         carry = b""
@@ -278,6 +283,7 @@ def encode_tiers(base: Path, tiers: list[tuple[str, str | None, Path]], *, base_
             job = _Job((t.rank, k, next(seq)), t, k, a, b, s0, last,
                        buf[s0 - off:stop - off].tobytes())
             if last:
+                exited_cleanly()
                 t.total = end
                 t.chunks = k + 1
             if not submit(job):
