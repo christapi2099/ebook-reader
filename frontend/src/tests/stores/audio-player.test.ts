@@ -243,3 +243,40 @@ describe('render tier player', () => {
     expect(get(audioStore).isPlaying).toBe(false)
   })
 })
+
+describe('speeds come from the manifest', () => {
+  function withTiers(keys: string[]): any {
+    const m = manifest()
+    const one = m.tiers['1.0']
+    m.tiers = Object.fromEntries(keys.map(k => [k, { ...one, requested_factor: Number(k), actual_factor: Number(k) }]))
+    return m
+  }
+
+  it('offers exactly the tiers of a new render', () => {
+    audioStore.init('b')
+    audioStore.load(1, withTiers(['1.0', '1.5', '2.0', '2.5', '3.0']))
+    expect(get(audioStore).availableSpeeds).toEqual([1, 1.5, 2, 2.5, 3])
+  })
+
+  it('offers every tier an old render still has', () => {
+    audioStore.init('b')
+    audioStore.load(1, withTiers(['0.75', '1.0', '1.25', '1.5', '1.75', '2.0', '2.5', '3.0']))
+    expect(get(audioStore).availableSpeeds).toEqual([0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3])
+  })
+
+  it('snaps a speed the render lacks to the nearest tier and says which', () => {
+    audioStore.init('b')
+    audioStore.load(1, withTiers(['1.0', '1.5', '2.0', '2.5', '3.0']))
+    expect(audioStore.setSpeed(0.75)).toBe(1)
+    expect(get(audioStore).speed).toBe(1)
+    expect(audioStore.setSpeed(2.6)).toBe(2.5)
+    expect(get(audioStore).speed).toBe(2.5)
+  })
+
+  it('forgets the speeds when the book closes', () => {
+    audioStore.init('b')
+    audioStore.load(1, withTiers(['1.0', '2.0']))
+    audioStore.destroy()
+    expect(get(audioStore).availableSpeeds).toEqual([])
+  })
+})

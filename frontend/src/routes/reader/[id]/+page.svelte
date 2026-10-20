@@ -24,6 +24,7 @@ import {
   type RenderManifest,
 } from '$lib/api'
 import { createRenderGate } from '$lib/utils/render-gate'
+import { stepSpeed } from '$lib/utils/speed-tiers'
 import ProcessingScreen from '$lib/components/ProcessingScreen.svelte'
 import NewVersionBanner from '$lib/components/NewVersionBanner.svelte'
 import ReaderVoiceControl from '$lib/components/ReaderVoiceControl.svelte'
@@ -150,7 +151,9 @@ async function loadGeneration(id: string, generation: number | null) {
   settingsStore.loadFromServer().catch(() => {})
   audioStore.init(id)
   if (generation !== null && manifest) audioStore.load(generation, manifest)
-  audioStore.setSpeed((get(readerStore) as ReaderState).speed)
+  // A saved speed this render lacks (e.g. 1.25x on a new render) snaps to the
+  // nearest tier it has, and the snapped speed becomes the saved one.
+  applySpeed((get(readerStore) as ReaderState).speed)
   audioStore.setCurrentIndex((get(readerStore) as ReaderState).currentIndex)
   audioStore.setVoice(get(settingsStore).voice)
   audioReady = true
@@ -207,8 +210,8 @@ onMount(async () => {
     ' ': handlePlayPause,
     'ArrowLeft': () => handleSeek(Math.max(0, reader.currentIndex - 1)),
     'ArrowRight': () => handleSeek(Math.min(reader.sentences.length - 1, reader.currentIndex + 1)),
-    'ArrowUp': () => handleSpeedChange(Math.min(3, reader.speed + 0.25)),
-    'ArrowDown': () => handleSpeedChange(Math.max(0.5, reader.speed - 0.25)),
+    'ArrowUp': () => handleSpeedChange(stepSpeed(audio.availableSpeeds ?? [], reader.speed, 1)),
+    'ArrowDown': () => handleSpeedChange(stepSpeed(audio.availableSpeeds ?? [], reader.speed, -1)),
     'b': () => handleAddBookmark(),
     'B': () => handleAddBookmark(),
     'f': () => { searchOpen = true },
@@ -328,9 +331,13 @@ function handleSeek(index: number) {
   void seek(index)
 }
 
+/** Select the tier nearest `s`; the reader store keeps the tier actually chosen. */
+function applySpeed(s: number) {
+  setSpeed(audioStore.setSpeed(s) ?? s)
+}
+
 function handleSpeedChange(s: number) {
-  setSpeed(s)
-  audioStore.setSpeed(s)
+  applySpeed(s)
 }
 
 function handleRewind() {
@@ -507,6 +514,7 @@ function handleBackToLibrary() {
         <MediaBar
           isPlaying={reader.isPlaying}
           speed={reader.speed}
+          speeds={audio.availableSpeeds}
           ready={audioReady}
           buffering={audio.buffering}
           onPlay={handlePlay}

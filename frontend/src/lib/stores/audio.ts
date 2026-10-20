@@ -1,9 +1,13 @@
 import { writable, get } from 'svelte/store'
 import { renderAudioUrl, type RenderManifest, type ManifestSegment } from '$lib/api'
+import { nearestSpeed } from '$lib/utils/speed-tiers'
 
 export interface AudioState {
   isPlaying: boolean
+  /** The tier being played (snapped to one the loaded render has). */
   speed: number
+  /** Speeds the loaded render offers: its manifest tier factors, ascending. */
+  availableSpeeds: number[]
   currentIndex: number
   currentWordIndex: number
   voice: string
@@ -44,6 +48,7 @@ function initialState(): AudioState {
   return {
     isPlaying: false,
     speed: 1.0,
+    availableSpeeds: [],
     currentIndex: 0,
     currentWordIndex: -1,
     voice: 'af_heart',
@@ -105,11 +110,8 @@ function createAudioStore() {
   const activeEl = (): HTMLAudioElement | null => (activeKey ? elements.get(activeKey) ?? null : null)
 
   function nearestTier(speed: number): TierInfo | null {
-    let best: TierInfo | null = null
-    for (const t of tiers) {
-      if (!best || Math.abs(t.factor - speed) < Math.abs(best.factor - speed)) best = t
-    }
-    return best
+    const f = nearestSpeed(tiers.map(t => t.factor), speed)
+    return tiers.find(t => t.factor === f) ?? null
   }
 
   function ensureElement(key: string): HTMLAudioElement {
@@ -298,6 +300,8 @@ function createAudioStore() {
       activeKey = tier?.key ?? null
       update(s => ({
         ...s,
+        speed: tier?.factor ?? s.speed,
+        availableSpeeds: tiers.map(t => t.factor),
         unsupportedMessage: bad ? UNSUPPORTED_MESSAGE : null,
         sentenceDurations: tier ? sentenceDurations(tier) : {},
       }))
@@ -353,16 +357,21 @@ function createAudioStore() {
       void startPlayback(el, token)
     },
 
-    setSpeed(newSpeed: number) {
+    /**
+     * Switches to the tier nearest `newSpeed` and returns the speed actually
+     * selected (the request itself when no render is loaded yet).
+     */
+    setSpeed(newSpeed: number): number {
       const state = cur()
-      update(s => ({ ...s, speed: newSpeed }))
       const next = nearestTier(newSpeed)
+      const chosen = next?.factor ?? newSpeed
+      update(s => ({ ...s, speed: chosen }))
       const oldTier = activeTier()
-      if (!next || !oldTier || next.key === activeKey) return
+      if (!next || !oldTier || next.key === activeKey) return chosen
 
       const oldEl = activeEl()
       const wasPlaying = state.isPlaying
-            swapGen++
+      swapGen++
       stopRaf()
       const token = ++playToken
       if (oldEl) {
@@ -372,13 +381,14 @@ function createAudioStore() {
       }
       activeKey = next.key
       const posMs = currentPositionMs(next, state.currentIndex, state.currentWordIndex)
-      if (!bookId) return
+      if (!bookId) return chosen
       const el = ensureElement(next.key)
       el.volume = volume
       el.muted = muted
       el.currentTime = posMs / 1000
       update(s => ({ ...s, sentenceDurations: sentenceDurations(next), elapsedSeconds: posMs / 1000 }))
       if (wasPlaying) void startPlayback(el, token)
+      return chosen
     },
 
     setCurrentIndex(idx: number) {

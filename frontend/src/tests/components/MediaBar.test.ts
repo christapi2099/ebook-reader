@@ -8,10 +8,13 @@ function renderBar(overrides: Partial<{
   speed: number
   disabled: boolean
   buffering: boolean
+  speeds: number[]
 }> = {}) {
   const props = {
     isPlaying: true,
     speed: 1.5,
+    // An older render: it still carries 0.75, 1.25 and 1.75.
+    speeds: [0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3],
     onPlay: vi.fn(),
     onPause: vi.fn(),
     onRewind: vi.fn(),
@@ -26,6 +29,33 @@ function renderBar(overrides: Partial<{
 function speedButton(label: string): HTMLButtonElement {
   return screen.getByRole('button', { name: label }) as HTMLButtonElement
 }
+
+describe('MediaBar speeds follow the loaded render', () => {
+  beforeEach(() => {
+    cleanup()
+    speedDowngradeStore.set(null)
+  })
+
+  function labels(): string[] {
+    const group = screen.getByRole('group', { name: 'Playback speed' })
+    return Array.from(group.querySelectorAll('button')).map(b => b.textContent?.trim() ?? '')
+  }
+
+  it('offers exactly the tiers of a new render', () => {
+    renderBar({ speed: 1, speeds: [1, 1.5, 2, 2.5, 3] })
+    expect(labels()).toEqual(['1x', '1.5x', '2x', '2.5x', '3x'])
+  })
+
+  it('offers the extra tiers an old render still has', () => {
+    renderBar({ speed: 1 })
+    expect(labels()).toEqual(['0.75x', '1x', '1.25x', '1.5x', '1.75x', '2x', '2.5x', '3x'])
+  })
+
+  it('shows no speed buttons before a render is loaded', () => {
+    renderBar({ speeds: [] })
+    expect(screen.queryByRole('group', { name: 'Playback speed' })).toBeNull()
+  })
+})
 
 describe('MediaBar speed honesty', () => {
   beforeEach(() => {
@@ -68,7 +98,7 @@ describe('MediaBar speed honesty', () => {
 
     renderBar({ speed: 1.5 })
 
-    for (const label of ['0.5x', '0.75x', '1x', '1.25x', '1.5x', '2x']) {
+    for (const label of ['0.75x', '1x', '1.25x', '1.5x', '1.75x', '2x', '2.5x', '3x']) {
       expect(speedButton(label).disabled).toBe(true)
     }
     // Still discoverable: the control is visible, not removed.

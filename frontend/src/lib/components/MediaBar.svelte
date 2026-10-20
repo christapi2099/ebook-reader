@@ -12,6 +12,7 @@
     onRewind,
     onForward,
     onSpeedChange,
+    speeds = [],
   }: {
     isPlaying: boolean
     speed: number
@@ -29,17 +30,13 @@
     onRewind: () => void
     onForward: () => void
     onSpeedChange: (s: number) => void
+    /** Speeds the loaded render has (its manifest tiers); none before it loads. */
+    speeds?: number[]
   } = $props()
 
-  // 3.0 is deliberately absent: Kokoro's duration predictor floors every phoneme
-  // at one 25 ms frame (`clamp(min=1)` in kokoro/model.py:108), so the delivered
-  // rate saturates well below the request. Measured twice on this codebase, 3.0
-  // renders at roughly 2.15-2.2x — about 27% short of its own label — and on some
-  // sentences is identical to 2.75x. Offering it would be a control that lies
-  // about what it does. 2.0 is imperfect too (it delivers ~1.8-1.9x) but the
-  // shortfall is an order of magnitude less misleading and it is the top of the
-  // range Kokoro's own author exposes.
-  const speeds = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+  // The speed buttons are the render's own tiers (atempo files built from the 1x
+  // base), so every button plays exactly the rate it names. A new render offers
+  // 1, 1.5, 2, 2.5 and 3; an older one also keeps its 0.75, 1.25 and 1.75 files.
 
   // Rewind/forward move whole sentences, so the visible text says sentences too —
   // WCAG 2.5.3 requires the accessible name to contain the visible label.
@@ -140,6 +137,7 @@
     </button>
   </div>
 
+  {#if speeds.length > 0}
   <div
     class="flex items-center gap-0.5 bg-surface-sunken rounded-full px-1 py-1"
     role="group"
@@ -157,6 +155,7 @@
       </button>
     {/each}
   </div>
+  {/if}
 
   {#if speedLocked && downgrade}
     <!-- Stays after the notice is dismissed: disabled controls need a reason. -->
