@@ -1,4 +1,5 @@
 import { ApiError } from '$lib/utils/errors'
+import { normalizeManifest } from '$lib/utils/manifest-timeline'
 
 export interface WordBbox {
   x0: number
@@ -162,12 +163,22 @@ export interface ManifestSegment {
 
 export interface ManifestTier {
   requested_factor: number
+  /** This tier's times are the 1x timeline's divided by this (measured from the file). */
   actual_factor: number
   max_drift_ms: number
-  segments: ManifestSegment[]
+  file?: string
+  /** Length of this tier's timeline: duration_ms / actual_factor. */
+  duration_ms?: number
+  /**
+   * Only on a tier whose times are NOT 1x / actual_factor (an older render): its
+   * own timeline, used as is. A schema 1 manifest has this on every tier.
+   */
+  segments?: ManifestSegment[]
 }
 
 export interface RenderManifest {
+  /** 2 = slim (the 1x timeline once); 1 = every tier repeats it (older backends). */
+  schema?: number
   duration_ms: number
   base_effective_speed: number
   voice: string
@@ -175,13 +186,20 @@ export interface RenderManifest {
   container: string
   timing_quality: TimingQuality
   mixed_backends: boolean
-  /** Keyed by speed as a string, e.g. "1.0", "0.75", "1.5" (no "x" suffix). */
+  /** The 1x timeline, once (`normalizeManifest` fills it for a schema 1 manifest). */
+  segments: ManifestSegment[]
+  /** Keyed by speed as a string, e.g. "1.0", "1.5" (no "x" suffix). */
   tiers: Record<string, ManifestTier>
 }
 
-/** Manifest of the ready generation. Throws `NotReadyError` on 409. */
+/**
+ * Manifest of the ready generation, slim (see `utils/manifest-timeline.ts`).
+ * Served gzipped; keep the result as plain data (`$state.raw`), never a deep
+ * `$state`: a 29 h book has 18.5k segments and 246k words. Throws `NotReadyError` on 409.
+ */
 export async function getRenderManifest(bookId: string): Promise<RenderManifest> {
-  return fetchRender<RenderManifest>(bookId, `/library/${encodeURIComponent(bookId)}/render`)
+  return normalizeManifest(
+    await fetchRender<RenderManifest>(bookId, `/library/${encodeURIComponent(bookId)}/render`))
 }
 
 /** URL of one immutable tier file; the browser fetches it itself. */

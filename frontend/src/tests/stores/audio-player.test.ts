@@ -280,3 +280,86 @@ describe('speeds come from the manifest', () => {
     expect(get(audioStore).availableSpeeds).toEqual([])
   })
 })
+
+describe('slim manifest (schema 2): one 1x timeline, tiers divide', () => {
+  // A real measured factor: tier times are 1x / actual_factor, never 1x / requested.
+  const A2 = 1.9999999874080308
+  function slimManifest(quality = 'aligned'): any {
+    const segments = [
+      seg(0, 0, 1000, [word(0, 400), word(500, 1000)]),
+      seg(1, 1100, 2000, [word(1100, 1500), word(1500, 2000)]),
+      seg(4, 2100, 3000, [word(2100, 3000)]),
+    ]
+    return { schema: 2, duration_ms: 3000, base_effective_speed: 1, voice: 'v', fingerprint: 'f',
+      container: 'ogg-opus', timing_quality: quality, mixed_backends: false, segments,
+      tiers: { '1.0': { requested_factor: 1, actual_factor: 1, max_drift_ms: 0 },
+        '2.0': { requested_factor: 2, actual_factor: A2, max_drift_ms: 0 } } }
+  }
+  function setupSlim() {
+    audioStore.init('b')
+    audioStore.load(1, slimManifest())
+  }
+
+  it('seeks on the tier by 1x / actual_factor', async () => {
+    setupSlim()
+    audioStore.setSpeed(2)
+    const e = (audioStore.play(4), el('2.0'))
+    expect(e.currentTime).toBe(2100 / A2 / 1000)
+    e.bufferedEnd = 5
+    await flush()
+    expect(get(audioStore).sentenceDurations[1]).toBe((2000 / A2 - 1100 / A2) / 1000)
+  })
+
+  it('maps the element clock to sentence and word on a derived tier', async () => {
+    setupSlim()
+    audioStore.setSpeed(2)
+    audioStore.play(0)
+    const e = el('2.0')
+    e.bufferedEnd = 5
+    await flush()
+    e.currentTime = (1500 / A2 + 1) / 1000
+    tickAll()
+    expect(get(audioStore).currentIndex).toBe(1)
+    expect(get(audioStore).currentWordIndex).toBe(1)
+    e.currentTime = (2100 / A2) / 1000 // exactly the start of index 4
+    tickAll()
+    expect(get(audioStore).currentIndex).toBe(4)
+  })
+
+  it('a frame that changes nothing does not notify subscribers', async () => {
+    setupSlim()
+    audioStore.play(0)
+    const e = el('1.0')
+    e.bufferedEnd = 5
+    await flush()
+    e.currentTime = 0.2
+    tickAll()
+    let calls = 0
+    const unsub = audioStore.subscribe(() => { calls++ })
+    calls = 0
+    for (let i = 0; i < 30; i++) tickAll()
+    expect(calls).toBe(0)
+    e.currentTime = 1.2
+    tickAll()
+    expect(calls).toBe(1)
+    unsub()
+  })
+
+  it('switching tiers keeps the word position via the 1x timeline', async () => {
+    setupSlim()
+    audioStore.play(0)
+    el('1.0').bufferedEnd = 5
+    await flush()
+    el('1.0').currentTime = 0.6
+    tickAll()
+    audioStore.setSpeed(2)
+    expect(el('2.0').currentTime).toBe(500 / A2 / 1000)
+  })
+
+  it('keeps the manifest arrays as they are (no copies of the timeline)', () => {
+    const m = slimManifest()
+    audioStore.init('b')
+    audioStore.load(1, m)
+    expect(Object.keys(m.tiers['2.0'])).not.toContain('segments')
+  })
+})

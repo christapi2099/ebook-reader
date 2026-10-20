@@ -226,13 +226,12 @@ export const seek = async (index: number): Promise<void> => {
  */
 export const mirrorPlaybackIndex = (index: number, isPlaying: boolean): void => {
   if (!isPlaying) return
-  let moved = false
-  readerStore.update(s => {
-    if (s.currentIndex === index) return s
-    moved = true
-    return { ...s, currentIndex: index }
-  })
-  if (moved) scheduleProgressSave()
+  // Called on every audio-store change while playing: a store update that
+  // returns the same object still notifies every subscriber, so check first.
+  const s = get(readerStore)
+  if (s.currentIndex === index) return
+  readerStore.set({ ...s, currentIndex: index })
+  scheduleProgressSave()
 }
 
 export const setSpeed = (speed: number): void => {

@@ -1,6 +1,17 @@
 import { writable, get } from 'svelte/store'
-import { renderAudioUrl, type RenderManifest, type ManifestSegment } from '$lib/api'
+import { renderAudioUrl, type RenderManifest } from '$lib/api'
 import { nearestSpeed } from '$lib/utils/speed-tiers'
+import {
+  durationsOf,
+  normalizeManifest,
+  positionOf,
+  segEndMs,
+  segmentAt,
+  segStartMs,
+  tierTimeline,
+  wordStartMs,
+  type Timeline,
+} from '$lib/utils/manifest-timeline'
 
 export interface AudioState {
   isPlaying: boolean
@@ -41,7 +52,8 @@ const GATE_POLL_MS = 50
 interface TierInfo {
   key: string
   factor: number
-  segments: ManifestSegment[]
+  /** This tier's times: the 1x timeline / actual_factor (or its own segments). */
+  tl: Timeline
 }
 
 function initialState(): AudioState {
@@ -57,18 +69,6 @@ function initialState(): AudioState {
     sentenceDurations: {},
     unsupportedMessage: null,
   }
-}
-
-/** Last segment whose start_ms <= ms (binary search); -1 before the first. */
-function segmentAt(segments: ManifestSegment[], ms: number): number {
-  let lo = 0
-  let hi = segments.length - 1
-  let found = -1
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1
-    if (segments[mid].start_ms <= ms) { found = mid; lo = mid + 1 } else hi = mid - 1
-  }
-  return found
 }
 
 function detectUnsupported(): boolean {
@@ -105,7 +105,10 @@ function createAudioStore() {
   let volume = 1
   let muted = false
 
-  const cur = () => get({ subscribe })
+  // Plain mirror of the store, so the rAF loop can compare without subscribing.
+  let snapshot: AudioState = initialState()
+  subscribe(v => { snapshot = v })
+  const cur = () => snapshot
   const activeTier = (): TierInfo | null => tiers.find(t => t.key === activeKey) ?? null
   const activeEl = (): HTMLAudioElement | null => (activeKey ? elements.get(activeKey) ?? null : null)
 
@@ -170,26 +173,27 @@ function createAudioStore() {
   function applyTime(el: HTMLAudioElement, gen: number) {
     if (gen !== swapGen || el !== activeEl()) return
     const tier = activeTier()
-    if (!tier || tier.segments.length === 0) return
+    if (!tier || tier.tl.segs.length === 0) return
+    const tl = tier.tl
     const ms = el.currentTime * 1000
-    const segs = tier.segments
-    const last = segs[segs.length - 1]
-    if (ms >= last.end_ms && cur().isPlaying && (el.ended || ms >= last.end_ms + 50)) {
+    const lastEnd = segEndMs(tl, tl.segs.length - 1)
+    if (ms >= lastEnd && cur().isPlaying && (el.ended || ms >= lastEnd + 50)) {
       finishBook()
       return
     }
-    const si = Math.max(0, segmentAt(segs, ms))
-    const seg = segs[si]
+    const si = Math.max(0, segmentAt(tl, ms))
+    const seg = tl.segs[si]
     let wi = -1
-    if (manifest && manifest.timing_quality !== 'estimated' && seg.words.length > 0 && ms < seg.end_ms) {
+    if (manifest && manifest.timing_quality !== 'estimated' && seg.words.length > 0 && ms < segEndMs(tl, si)) {
       for (let i = seg.words.length - 1; i >= 0; i--) {
-        if (seg.words[i].start_ms <= ms) { wi = i; break }
+        if (wordStartMs(tl, si, i) <= ms) { wi = i; break }
       }
     }
-    update(s => {
-      if (s.currentIndex === seg.index && s.currentWordIndex === wi && Math.abs(s.elapsedSeconds - el.currentTime) < 0.1) return s
-      return { ...s, currentIndex: seg.index, currentWordIndex: wi, elapsedSeconds: el.currentTime }
-    })
+    // Every frame lands here: publish only a change, so subscribers (the whole
+    // reader page) do not re-run 60 times a second for nothing.
+    const s = cur()
+    if (s.currentIndex === seg.index && s.currentWordIndex === wi && Math.abs(s.elapsedSeconds - el.currentTime) < 0.1) return
+    set({ ...s, currentIndex: seg.index, currentWordIndex: wi, elapsedSeconds: el.currentTime })
   }
 
   function startRaf() {
@@ -207,16 +211,19 @@ function createAudioStore() {
   }
 
   function segmentStartMs(tier: TierInfo, index: number): number {
-    const seg = tier.segments.find(s => s.index === index) ?? tier.segments[Math.min(index, tier.segments.length - 1)]
-    return seg ? seg.start_ms : 0
+    const { tl } = tier
+    if (tl.segs.length === 0) return 0
+    const at = positionOf(tl, index)
+    return segStartMs(tl, at >= 0 ? at : Math.min(Math.max(index, 0), tl.segs.length - 1))
   }
 
   /** Start of the word being heard, or the sentence start when it has no word times. */
   function currentPositionMs(tier: TierInfo, index: number, wordIndex: number): number {
-    const seg = tier.segments.find(s => s.index === index)
-    if (!seg) return 0
-    if (manifest?.timing_quality !== 'estimated' && wordIndex >= 0 && seg.words[wordIndex]) return seg.words[wordIndex].start_ms
-    return seg.start_ms
+    const { tl } = tier
+    const at = positionOf(tl, index)
+    if (at < 0) return 0
+    if (manifest?.timing_quality !== 'estimated' && wordIndex >= 0 && tl.segs[at].words[wordIndex]) return wordStartMs(tl, at, wordIndex)
+    return segStartMs(tl, at)
   }
 
   function prime() {
@@ -249,9 +256,7 @@ function createAudioStore() {
   }
 
   function sentenceDurations(tier: TierInfo): Record<number, number> {
-    const out: Record<number, number> = {}
-    for (const s of tier.segments) out[s.index] = (s.end_ms - s.start_ms) / 1000
-    return out
+    return durationsOf(tier.tl)
   }
 
   function teardownElements() {
@@ -281,16 +286,18 @@ function createAudioStore() {
     },
 
     /** Binds the ready generation's manifest; tier elements are created lazily. */
-    load(gen: number, m: RenderManifest) {
+    load(gen: number, raw: RenderManifest) {
       if (!bookId) return
       teardownElements()
       swapGen++
       playToken++
       generation = gen
+      // Plain data on purpose: never wrap these arrays in reactive proxies.
+      const m = normalizeManifest(raw)
       manifest = m
-      tiers = Object.entries(m.tiers)
-        .map(([key, t]) => ({ key, factor: Number.parseFloat(key), segments: t.segments }))
-        .filter(t => Number.isFinite(t.factor))
+      tiers = Object.keys(m.tiers)
+        .map(key => ({ key, factor: Number.parseFloat(key), tl: tierTimeline(m, key) }))
+        .filter((t): t is TierInfo => Number.isFinite(t.factor) && t.tl !== null)
         .sort((a, b) => a.factor - b.factor)
       primed = false
       const bad = detectUnsupported()

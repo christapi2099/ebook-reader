@@ -44,9 +44,18 @@ import { goto } from '$app/navigation'
 
 const bookId = $derived($page.params.id as string)
 
-let reader: ReaderState = $state(get(readerStore))
-let audio = $state(get(audioStore))
-  let settings: SettingsState = $state(get(settingsStore))
+// $state.raw, not $state: these mirror stores that hold a book's sentences
+// (19.8k for a 29 h PDF) and the per-sentence durations. A deep $state wraps every
+// store value in a NEW proxy on each assignment, so each audio frame re-ran
+// everything that reads them (132 ms per update for that book, measured), and
+// PDFViewer rebuilt all its overlays. Stores replace their value, never mutate it.
+let reader: ReaderState = $state.raw(get(readerStore))
+let audio: AudioState = $state.raw(get(audioStore))
+let settings: SettingsState = $state.raw(get(settingsStore))
+// Stable identities for the children: these only change when the array does,
+// not on every reader/audio update.
+const sentences = $derived(reader.sentences)
+const sentenceDurations = $derived(audio.sentenceDurations)
 // The transport controls stay disabled until `audioStore.init` has opened the
 // socket; see MediaBar's `ready` prop for what an earlier Play click would do.
 let audioReady = $state(false)
@@ -63,17 +72,18 @@ let bookMeta = $state<Book | null>(null)
 /** `processing` until the book has a ready render, then `ready`. */
 let gatePhase = $state<'checking' | 'processing' | 'ready'>('checking')
 let loadedGeneration = $state<number | null>(null)
-let manifest = $state<RenderManifest | null>(null)
+// Plain data: 18.5k segments and 246k words for a 29 h book; never deep-proxied.
+let manifest = $state.raw<RenderManifest | null>(null)
 /** A newer published generation than the one on screen, awaiting a switch. */
 let pendingVersion = $state<{ generation: number; voice: string | null } | null>(null)
 let dismissedGeneration = $state<number | null>(null)
 let gate: ReturnType<typeof createRenderGate> | null = null
-let totalPages = $derived(bookMeta?.page_count ?? reader.sentences.length)
+let totalPages = $derived(bookMeta?.page_count ?? sentences.length)
 
 // PDFs number their own pages; every other format has one page per sentence.
 const isPageBased = $derived(bookMeta?.file_type === 'pdf')
 /** Every page of the book and the sentence it starts at — the skim overlay's list. */
-let pageIndex = $derived(buildPageIndex(reader.sentences, totalPages, isPageBased))
+let pageIndex = $derived(buildPageIndex(sentences, totalPages, isPageBased))
 
 // Search state
 let searchMatches = $state<number[]>([])
@@ -378,7 +388,7 @@ function handleBackToLibrary() {
   <div class="border-b border-border bg-surface">
     {#if searchOpen}
       <SearchOverlay
-        sentences={reader.sentences}
+        {sentences}
         onClose={() => { searchOpen = false; searchMatches = []; currentSearchIndex = -1 }}
         onResults={handleSearchResults}
       />
@@ -442,11 +452,11 @@ function handleBackToLibrary() {
         onRetry={handleRetryRender}
         onBack={handleBackToLibrary}
       />
-    {:else if reader.sentences.length > 0}
+    {:else if sentences.length > 0}
       {#if bookMeta?.file_type === 'text' || bookMeta?.file_type === 'epub'}
         <!-- Text books (saved from text reader) or EPUBs get TextViewer -->
         <TextViewer
-          sentences={reader.sentences}
+          {sentences}
           currentIndex={audio.currentIndex}
           currentWordIndex={audio.currentWordIndex}
           isPlaying={audio.isPlaying}
@@ -463,7 +473,7 @@ function handleBackToLibrary() {
         <!-- PDF books get PDFViewer -->
         <PDFViewer
           {bookId}
-          sentences={reader.sentences}
+          {sentences}
           currentIndex={audio.currentIndex}
           currentWordIndex={audio.currentWordIndex}
           buffering={audio.buffering}
@@ -499,10 +509,10 @@ function handleBackToLibrary() {
       class="pointer-events-auto w-full max-w-[720px] rounded-2xl border border-border bg-surface-raised/90 px-4 py-3 shadow-3 backdrop-blur-xl"
     >
       <AudioProgressBar
-        sentences={reader.sentences}
+        {sentences}
         currentIndex={audio.currentIndex}
         elapsedSeconds={audio.elapsedSeconds}
-        sentenceDurations={audio.sentenceDurations}
+        {sentenceDurations}
         isPlaying={audio.isPlaying}
         buffering={audio.buffering}
         onSeek={handleSeek}
