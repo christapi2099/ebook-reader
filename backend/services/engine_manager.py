@@ -197,6 +197,8 @@ def build_local(device: str) -> tuple[Any | None, str | None]:
         # capability endpoint can explain a bare `null`.
         logger.exception("[kokoro] local pipeline failed to initialise")
         return None, f"{type(exc).__name__}: {exc}"
+    # Lets the render path see this is a GPU torch pipeline (parallel worker processes).
+    pipeline.render_device = device
     logger.info("[kokoro] local pipeline ready on %s", device)
     return pipeline, None
 

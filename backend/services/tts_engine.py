@@ -513,18 +513,69 @@ class TTSEngine:
         )
         return duration_ms / 1000.0
 
+    def _gpu_device(self) -> str | None:
+        """The torch device when ``self.kokoro`` is an in-process Kokoro on a GPU (CUDA/ROCm).
+        ``build_local`` tags its pipeline; anything else (CPU, Piper, Modal, fakes) is None."""
+        dev = getattr(self.kokoro, "render_device", None)
+        return dev if isinstance(dev, str) and dev != "cpu" else None
+
     @property
     def parallel_safe(self) -> bool:
-        """True when the underlying engine can be cloned per render thread (Piper).
-        Torch Kokoro, the Modal client and anything unlabelled stay serial."""
+        """True when the render can fan out: Piper / Kokoro ONNX clone per thread; the torch
+        GPU Kokoro fans out over worker PROCESSES (threads lose to the GIL). The Modal client
+        and anything unlabelled stay serial."""
+        if self._gpu_device():
+            return True
         return bool(getattr(self.kokoro, "parallel_safe", False)) and callable(
             getattr(self.kokoro, "clone_for_worker", None))
 
+    def default_render_workers(self) -> int:
+        """Workers when ``RENDER_SYNTH_WORKERS`` is unset: 4 on the torch GPU engine (measured
+        best on a 12 GB RX 6700 XT), 1 for every other engine."""
+        from services import kokoro_process_pool
+        return kokoro_process_pool.DEFAULT_GPU_WORKERS if self._gpu_device() else 1
+
+    _render_pool = None
+
+    def render_window_threads(self, workers: int) -> int:
+        """Render threads to run over ``workers`` GPU processes. Each thread synthesizes, then
+        CTC-aligns its sentence on the CPU while its GPU worker is free, so with one thread per
+        worker the GPU sits idle for the alignment share (measured ~1/3 of a cycle). Twice the
+        threads keeps every worker busy; the pool queues the extra ones."""
+        return workers * 2 if self._render_pool is not None else workers
+
+    def open_render_workers(self, requested: int) -> int:
+        """Start the GPU worker processes for one render; returns the workers actually usable
+        (VRAM-capped, or fewer if some failed to load). 1 means "render serially in-process"
+        and nothing is started. No-op for engines that are not the torch GPU one."""
+        device = self._gpu_device()
+        if not device or requested <= 1:
+            return requested
+        from services import kokoro_process_pool as kpp
+
+        self.close_render_workers()
+        pool = kpp.KokoroProcessPool(device, requested)
+        if pool.active <= 1:
+            pool.close()
+            return 1
+        self._render_pool = pool
+        return pool.active
+
+    def close_render_workers(self) -> None:
+        pool, self._render_pool = self._render_pool, None
+        if pool is not None:
+            pool.close()
+
     def clone_for_render_worker(self, threads: int | None = None) -> Any:
-        """An independent engine for ONE render thread; its ``synthesize_for_render``
-        runs off ``_synthesis_pool`` so live playback is unaffected."""
+        """An independent engine for ONE render thread; its ``synthesize_for_render`` runs off
+        ``_synthesis_pool`` so live playback is unaffected."""
         if not self.parallel_safe:
             raise RuntimeError("engine is not parallel-safe")
+        if self._gpu_device():
+            from services import kokoro_process_pool as kpp
+            if self._render_pool is None:
+                raise RuntimeError("GPU render workers are not open")
+            return kpp.PoolClient(self._render_pool)
         return self.kokoro.clone_for_worker(threads)
 
     def synthesize_for_render(

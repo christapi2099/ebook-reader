@@ -4,6 +4,9 @@
     HSA_OVERRIDE_GFX_VERSION=10.3.0 .venv-rocm/bin/python scripts/bench_gpu_synth.py \
         --book-prefix 6f2c --procs 1,2,4 --sentences 80 [--device cuda|cpu] [--out ../docs/research/gpu-synth-bench.json]
 
+``--threads 4`` instead runs N threads inside ONE process, each owning its own KPipeline, to
+measure what the GIL costs (misaki g2p holds it). Result key ``threads=N``.
+
 Each process loads the engine, warms up, waits for a shared start time, then synthesizes its own
 slice of the book (different sentences per process). Reported speed is total audio / wall time
 across all processes, so process start-up and model load are excluded. Writes nothing to the app
@@ -71,9 +74,66 @@ def worker(args) -> None:
                                   "lat": lat, "miopen": bool(torch.backends.cudnn.enabled)}))
 
 
+def run_threads(args, n: int) -> dict:
+    """N threads in this process, each with its own pipeline; same slicing/metric as the procs."""
+    import threading
+
+    sys.path.insert(0, str(BACKEND))
+    import torch
+    from services import engine_manager
+
+    slices = [load_sentences(Path(args.db), args.book_prefix, args.sentences,
+                             args.offset + i * 400) for i in range(n)]
+    pipes = []
+    for _ in range(n):
+        pipe, err = engine_manager.build_local(args.device)
+        if pipe is None:
+            return {"error": f"engine unavailable: {err}"}
+        pipes.append(pipe)
+    out: list = [None] * n
+    ready = threading.Barrier(n + 1)
+
+    def work(i: int) -> None:
+        def synth(text: str) -> float:
+            c = 0
+            for _g, _p, audio in pipes[i](text, voice=args.voice, speed=1.0):
+                c += len(audio)
+            if args.device != "cpu":
+                torch.cuda.synchronize()
+            return c / SR
+        for t in slices[i][:3]:
+            synth(t)
+        ready.wait()
+        lat, audio = [], 0.0
+        for t in slices[i]:
+            s = time.perf_counter()
+            audio += synth(t)
+            lat.append(time.perf_counter() - s)
+        out[i] = (audio, lat)
+
+    ths = [threading.Thread(target=work, args=(i,)) for i in range(n)]
+    for t in ths:
+        t.start()
+    ready.wait()
+    t0 = time.time()
+    for t in ths:
+        t.join()
+    wall = time.time() - t0
+    audio = sum(o[0] for o in out)
+    lat = sorted(x for o in out for x in o[1])
+    return {"audio_s": round(audio, 1), "wall_s": round(wall, 1), "speed_x": round(audio / wall, 1),
+            "lat_median_s": round(statistics.median(lat), 3),
+            "lat_p95_s": round(lat[int(0.95 * (len(lat) - 1))], 3),
+            "vram_peak_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2)
+            if args.device != "cpu" else None}
+
+
 def run(args) -> dict:
     results = {}
-    for n in [int(x) for x in args.procs.split(",")]:
+    for n in [int(x) for x in args.threads.split(",") if x]:
+        results[f"threads={n}"] = run_threads(args, n)
+        print(f"threads={n}: {results[f'threads={n}']}")
+    for n in [int(x) for x in args.procs.split(",") if x]:
         start = time.time() + args.warm_s
         procs = []
         for i in range(n):
@@ -110,6 +170,7 @@ def run(args) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--procs", default="1,2,4")
+    ap.add_argument("--threads", default="", help="thread counts to run in ONE process, e.g. 4")
     ap.add_argument("--sentences", type=int, default=80, help="per process")
     ap.add_argument("--device", default="cuda", help="cuda (also ROCm) or cpu")
     ap.add_argument("--voice", default="af_heart")

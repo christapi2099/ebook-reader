@@ -50,6 +50,27 @@ and PyPI's CUDA torch would win.
 
 Docker stays CUDA-only; there is no ROCm image.
 
+## Parallel render workers (GPU)
+
+A book render on the GPU engine (torch Kokoro on CUDA/ROCm) runs **4 synthesis worker
+processes** by default, each with its own Kokoro model (~1.8 GB VRAM each, spawned when a
+render starts and released when it ends). Measured on an RX 6700 XT (12 GB): 1 process 24x
+real time, 4 processes 45x; 6 is slower and 8 runs out of memory. Threads inside one process
+were tried and lose to the GIL (about 29x), hence processes. The CTC aligner stays shared in the
+main process.
+
+- `RENDER_SYNTH_WORKERS=N` (environment, read at render start) always wins; `1` restores the
+  old serial render. It is an environment variable, not a persisted app setting (the repo has no
+  settings mechanism for render knobs; `RENDER_STALL_TIMEOUT_S` is the same). Other engines
+  still default to 1.
+- VRAM safety: at render start the worker count is capped at
+  `floor((free VRAM - 1 GiB) / per-worker footprint)` and the reduction is logged
+  (`RENDER_GPU_WORKER_VRAM_GB`, default 1.8, overrides the footprint). If a worker still hits an
+  out-of-memory error, that worker exits, the count drops by one (down to 1) and the sentence is
+  retried; nothing fails the render.
+- Output is identical to a 1-worker render: sentences are consumed in order and the manifest is
+  unchanged.
+
 ## Troubleshooting
 
 - `torch.cuda.is_available()` is False: check `groups` includes `render` and `video`
