@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Run a throwaway backend (plus optional frontend preview) from ANY worktree, isolated from prod.
 
     # GPU branch on the AMD env, engine GPU, fresh DB, own renders dir, port 8012:
@@ -61,6 +62,9 @@ def main() -> None:
     ap.add_argument("--stop", action="store_true")
     a = ap.parse_args()
     wt = Path(a.worktree).resolve()
+    a.python = os.path.abspath(a.python)  # abspath, not resolve(): a venv python is a symlink
+    if a.frontend_build:
+        a.frontend_build = os.path.abspath(a.frontend_build)
     data = Path(a.data or f"/tmp/ebook-test-{a.port}")
     if a.stop:
         for p in pids(a.port) + pids(a.preview_port):
