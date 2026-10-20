@@ -3,6 +3,7 @@ and unchanged output order. No torch and no GPU: the worker processes are replac
 import json
 import sys
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -61,6 +62,8 @@ def _clean(monkeypatch):
     FakeHandle.created = []
     monkeypatch.delenv("RENDER_SYNTH_WORKERS", raising=False)
     monkeypatch.delenv("RENDER_GPU_WORKER_VRAM_GB", raising=False)
+    monkeypatch.delenv("RENDER_GPU_WORKERS_MAX", raising=False)
+    monkeypatch.setattr(kpp, "mem_available_bytes", lambda: 64 * GIB)  # host RAM is not the limit
     monkeypatch.setattr(rw, "_warned_serial", False)
 
 
@@ -197,16 +200,147 @@ def test_lone_worker_oom_restarts_and_succeeds():
         return h
 
     pool = kpp.KokoroProcessPool("cuda", 2, spawn=spawn, free_vram=lambda d: 12 * GIB)
-    pool.active = 1
-    pool._all = [pool._all[0]]
-    pool._idle.get()  # drop the second handle: one worker left
+    # leave ONLY the OOMing worker (made[0]) in rotation: drop the healthy one
+    first, second = pool._idle.get(), pool._idle.get()
+    assert first is made[0] and second is made[1]
+    pool._idle.put(first)
+    pool._all, pool.active = [first], 1
     audio, _ = pool.synthesize("t", "v")
     assert audio.size > 0 and pool.active == 1
+    assert len(made) == 3, "the restart path never ran"
+    assert made[0].closed and not made[2].closed
+
+
+def test_oom_on_every_worker_in_turn_restarts_the_last_instead_of_raising():
+    made = []
+
+    def spawn(device):
+        # the first four handles all OOM once on "s"; replacements are healthy
+        h = FakeHandle(device, oom_texts={"s"} if len(made) < 4 else ())
+        made.append(h)
+        return h
+
+    pool = kpp.KokoroProcessPool("cuda", 4, spawn=spawn, free_vram=lambda d: 12 * GIB)
+    audio, _ = pool.synthesize("s", "v")
+    assert audio.size > 0
+    assert pool.active == 1 and len(made) == 5
+    assert all(h.closed for h in made[:4])
+    # no dead handle was put back in rotation: the next requests work
+    idle = list(pool._idle.queue)
+    assert idle == [made[4]]
+    for _ in range(3):
+        assert pool.synthesize("again", "v")[0].size > 0
+
+
+def test_non_oom_death_replaces_the_worker_and_fails_only_that_sentence():
+    made = []
+
+    class Dies(FakeHandle):
+        def request(self, text, voice):
+            if not made[0].closed and self is made[0]:
+                return ("dead", "GPU worker process died")
+            return super().request(text, voice)
+
+    def spawn(device):
+        h = Dies(device)
+        made.append(h)
+        return h
+
+    pool = kpp.KokoroProcessPool("cuda", 2, spawn=spawn, free_vram=lambda d: 12 * GIB)
+    with pytest.raises(RuntimeError, match="died"):
+        pool.synthesize("x", "v")
+    assert made[0].closed and len(made) == 3 and pool.active == 2
+    assert made[0] not in list(pool._idle.queue)
+    assert pool.synthesize("y", "v")[0].size > 0
+
+
+def test_unrecoverable_pool_raises_for_every_waiter_instead_of_hanging():
+    class NoRestart(FakeHandle):
+        def wait_ready(self, timeout=0):
+            return len(FakeHandle.created) <= 1, "gone"
+
+    class SlowOOM(FakeHandle):
+        def request(self, text, voice):
+            time.sleep(0.4)   # keeps both workers busy so the other threads block in acquire
+            return super().request(text, voice)
+
+    pool = kpp.KokoroProcessPool("cuda", 2, spawn=lambda d: SlowOOM(d, {"s"}),
+                                 free_vram=lambda d: 12 * GIB)
+    pool._spawn = NoRestart
+    errs = []
+
+    def call():
+        try:
+            pool.synthesize("s", "v")
+        except RuntimeError as e:
+            errs.append(str(e))
+
+    ths = [threading.Thread(target=call, daemon=True) for _ in range(4)]
+    [t.start() for t in ths]
+    [t.join(20) for t in ths]
+    assert not any(t.is_alive() for t in ths), "a render thread is stuck in _idle.get()"
+    assert len(errs) == 4
+    with pytest.raises(RuntimeError, match="unusable"):
+        pool.synthesize("z", "v")
+
+
+def test_unreadable_vram_limits_to_one_worker():
+    pool = kpp.KokoroProcessPool("cuda", 4, spawn=FakeHandle, free_vram=lambda d: None)
+    assert pool.active == 0 and FakeHandle.created == []
+
+
+def test_host_ram_caps_workers():
+    pool = kpp.KokoroProcessPool("cuda", 4, spawn=FakeHandle, free_vram=lambda d: 12 * GIB,
+                                 avail_ram=lambda: int(6 * GIB))
+    assert pool.active == 2
+    assert kpp.ram_worker_cap(None) is None
+    assert kpp.ram_worker_cap(int(1 * GIB)) == 1
+
+
+def test_only_cuda_devices_get_the_gpu_default():
+    for dev in ("xpu:0", "mps", "cpu", "hip"):
+        assert gpu_engine(dev).default_render_workers() == 1
+        assert not gpu_engine(dev).parallel_safe
+    assert gpu_engine("cuda:0").default_render_workers() == 4
+
+
+def test_explicit_count_above_four_is_capped_unless_overridden(monkeypatch):
+    monkeypatch.setattr(kpp, "ProcessWorker", FakeHandle)
+    monkeypatch.setattr(kpp, "free_vram_bytes", lambda d: 12 * GIB)
+    eng = gpu_engine()
+    assert eng.open_render_workers(8) == 4
+    eng.close_render_workers()
+    monkeypatch.setenv("RENDER_GPU_WORKERS_MAX", "6")
+    assert eng.open_render_workers(8) == 6   # VRAM allows (12-1)/1.8 = 6
+    eng.close_render_workers()
+
+
+def test_request_timeout_terminates_a_hung_child():
+    class Conn:
+        def send(self, m):
+            pass
+
+        def poll(self, t):
+            return False
+
+    class Proc:
+        terminated = False
+
+        def terminate(self):
+            self.terminated = True
+
+    w = kpp.ProcessWorker.__new__(kpp.ProcessWorker)
+    w.conn, w.proc = Conn(), Proc()
+    kind, why = w.request("t", "v", timeout=0.01)
+    assert kind == "dead" and "hung" in why and w.proc.terminated
 
 
 def test_is_oom_matches_torch_class_and_hip_text():
     assert kpp.is_oom(FakeOOM("x"))
     assert kpp.is_oom(RuntimeError("HIP error: out of memory"))
+    assert kpp.is_oom(RuntimeError("HIP error: hipErrorOutOfMemory"))
+    assert kpp.is_oom(RuntimeError("MIOpen: ALLOC_FAILED"))
+    assert kpp.is_oom(RuntimeError("rocblas_status_memory_error"))
     assert not kpp.is_oom(RuntimeError("something else"))
 
 
@@ -270,3 +404,64 @@ def test_four_gpu_workers_give_same_order_manifest_and_audio_as_one(env, real_ff
     assert pcm4 == pcm1
     assert m4["tiers"] == m1["tiers"]
     assert sum(1 for h in h4 if h.threads) > 1   # work really was spread over several workers
+
+
+def _run_in_thread(fn, timeout=60):
+    box = {}
+
+    def go():
+        try:
+            box["ok"] = fn()
+        except BaseException as e:  # noqa: BLE001
+            box["err"] = e
+    t = threading.Thread(target=go)
+    t.start()
+    t.join(timeout)
+    assert not t.is_alive(), "render hung"
+    return box
+
+
+@pytestmark_ffmpeg
+def test_pool_that_cannot_restart_fails_the_render_and_all_threads_exit(env, real_ffmpeg,
+                                                                      monkeypatch):
+    """Was a deadlock: the last worker OOMs, its replacement cannot start, nothing goes back on
+    the idle queue and the other render threads block for ever."""
+    bad = "Sentence number 3 is read aloud here."
+    n = {"made": 0}
+
+    class H(FakeHandle):
+        def __init__(self, device):
+            super().__init__(device, oom_texts={bad})
+            n["made"] += 1
+            self.ok = n["made"] <= 2
+
+        def wait_ready(self, timeout=0):
+            return self.ok, None if self.ok else "no vram"
+
+    mk_book(env, 12, "b1")
+    monkeypatch.setattr(kpp, "ProcessWorker", H)
+    monkeypatch.setattr(kpp, "free_vram_bytes", lambda d: 12 * GIB)
+    monkeypatch.setenv("RENDER_SYNTH_WORKERS", "2")
+    synth = rw.engine_synthesizer(gpu_engine())
+    assert rj.claim_next("w1", T0 + timedelta(days=1), debounce_s=0) == "b1"
+    box = _run_in_thread(lambda: rw.render_book(
+        "b1", "w1", synthesizer=synth, aligner=rb.FakeAligner(), tiers=(1.5,), raise_errors=True))
+    assert isinstance(box.get("err"), RuntimeError)
+    assert not [t for t in threading.enumerate() if t.name.startswith("render-synth")]
+    assert synth.engine._render_pool is None
+
+
+@pytestmark_ffmpeg
+def test_setup_failure_after_pool_start_closes_the_pool(env, real_ffmpeg, monkeypatch):
+    mk_book(env, 6, "b1")
+    monkeypatch.setattr(kpp, "ProcessWorker", FakeHandle)
+    monkeypatch.setattr(kpp, "free_vram_bytes", lambda d: 12 * GIB)
+    monkeypatch.setattr(rw, "_shared_aligner", lambda w: (_ for _ in ()).throw(
+        RuntimeError("aligner setup failed")))
+    eng = gpu_engine()
+    synth = rw.engine_synthesizer(eng)
+    assert rj.claim_next("w1", T0 + timedelta(days=1), debounce_s=0) == "b1"
+    with pytest.raises(RuntimeError, match="aligner setup failed"):
+        rw.render_book("b1", "w1", synthesizer=synth, tiers=(1.5,), raise_errors=True)
+    assert len(FakeHandle.created) == 4 and all(h.closed for h in FakeHandle.created)
+    assert eng._render_pool is None

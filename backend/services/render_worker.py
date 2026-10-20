@@ -102,10 +102,13 @@ class _Stop(Exception):
 # ----------------------------------------------------------------- defaults
 class _EngineSynth:
     """Blocking one-sentence seam over ``tts_engine.synthesize_render_result`` (one task
-    on the shared ``_synthesis_pool``). Carries no tokens, so words are CTC-aligned.
+    on the shared ``_synthesis_pool``). The serial path returns the engine's native timings or
+    Kokoro tokens with the audio; whatever it returns, words are CTC-aligned downstream.
 
-    ``parallel_safe``/``for_worker`` let the render fan out over independent engine
-    clones when the engine allows it (Piper); live playback keeps the shared pool."""
+    ``parallel_safe``/``for_worker`` let the render fan out when the engine allows it: Piper and
+    Kokoro ONNX clone per thread, the torch GPU engine uses its worker-process pool
+    (``open_workers``/``close_workers``/``default_workers``/``window_threads``). Live playback
+    keeps the shared pool."""
 
     def __init__(self, engine=None, speed: float = 1.0):
         self.engine, self.speed = engine, speed
@@ -697,19 +700,6 @@ def _render(book_id, worker_id, synthesizer, aligner, fallback, extractor, box_p
     last_renew = clock()
     chunks: list[dict] = []
     window: Optional[_SynthWindow] = None
-    workers = resolve_synth_workers(synthesizer)
-    opener = getattr(synthesizer, "open_workers", None)
-    if workers > 1 and callable(opener):
-        workers = opener(workers)  # may start GPU processes; VRAM-capped, can come back as 1
-    if workers > 1:
-        threads = max(1, min(MAX_THREADS_PER_WORKER, synth_threads_total() // workers))
-        logger.info("[render] %s: %d synthesis workers x %d threads", book_id, workers, threads)
-        wt = getattr(synthesizer, "window_threads", None)
-        window = _SynthWindow(todo, voice, synth, synthesizer.for_worker,
-                              wt(workers) if callable(wt) else workers, threads,
-                              lambda i: _chunk_done(tmp, i), heartbeat.touch,
-                              aligner or _shared_aligner(workers))
-
     def await_synth(fut: cf.Future):
         """Wait for a window result, still honouring pause/cancel/supersede promptly."""
         while not cf.wait([fut], timeout=0.25).done:
@@ -717,6 +707,19 @@ def _render(book_id, worker_id, synthesizer, aligner, fallback, extractor, box_p
         return fut.result()
 
     try:
+        # Inside the try: a failure after the GPU worker processes started must still close them.
+        workers = resolve_synth_workers(synthesizer)
+        opener = getattr(synthesizer, "open_workers", None)
+        if workers > 1 and callable(opener):
+            workers = opener(workers)  # may start GPU processes; capped, can come back as 1
+        if workers > 1:
+            threads = max(1, min(MAX_THREADS_PER_WORKER, synth_threads_total() // workers))
+            logger.info("[render] %s: %d synthesis workers x %d threads", book_id, workers, threads)
+            wt = getattr(synthesizer, "window_threads", None)
+            window = _SynthWindow(todo, voice, synth, synthesizer.for_worker,
+                                  wt(workers) if callable(wt) else workers, threads,
+                                  lambda i: _chunk_done(tmp, i), heartbeat.touch,
+                                  aligner or _shared_aligner(workers))
         n = len(todo)
         for k, r in enumerate(todo):
             checkpoint_job()

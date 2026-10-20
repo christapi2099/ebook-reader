@@ -68,8 +68,15 @@ main process.
   (`RENDER_GPU_WORKER_VRAM_GB`, default 1.8, overrides the footprint). If a worker still hits an
   out-of-memory error, that worker exits, the count drops by one (down to 1) and the sentence is
   retried; nothing fails the render.
-- Output is identical to a 1-worker render: sentences are consumed in order and the manifest is
-  unchanged.
+- Sentence order, chunking and the manifest structure are the same as a 1-worker render. The
+  audio itself is not bit-reproducible between runs (Kokoro on the GPU is not), so durations and
+  word timings agree within the usual statistical tolerance, not byte for byte.
+- Ceilings: an explicit `RENDER_SYNTH_WORKERS` above 4 is capped at 4 on the GPU engine
+  (`RENDER_GPU_WORKERS_MAX` raises it); the count is also capped by host RAM (~2.5 GB per worker
+  from `MemAvailable`) and limited to 1 when free VRAM cannot be read. Only `cuda*` devices
+  (CUDA and ROCm) use worker processes.
+- A worker that crashes or hangs (no answer in 600 s) is replaced; if none can restart, the render
+  fails instead of hanging.
 
 ## Troubleshooting
 

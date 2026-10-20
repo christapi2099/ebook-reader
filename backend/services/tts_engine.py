@@ -514,10 +514,11 @@ class TTSEngine:
         return duration_ms / 1000.0
 
     def _gpu_device(self) -> str | None:
-        """The torch device when ``self.kokoro`` is an in-process Kokoro on a GPU (CUDA/ROCm).
-        ``build_local`` tags its pipeline; anything else (CPU, Piper, Modal, fakes) is None."""
+        """The torch device when ``self.kokoro`` is an in-process Kokoro on CUDA/ROCm (torch's
+        ``cuda*`` names; HIP builds use the same). ``build_local`` tags its pipeline; anything
+        else (CPU, xpu/mps, Piper, Modal, fakes) is None and keeps the serial render."""
         dev = getattr(self.kokoro, "render_device", None)
-        return dev if isinstance(dev, str) and dev != "cpu" else None
+        return dev if isinstance(dev, str) and dev.startswith("cuda") else None
 
     @property
     def parallel_safe(self) -> bool:
@@ -554,6 +555,12 @@ class TTSEngine:
         from services import kokoro_process_pool as kpp
 
         self.close_render_workers()
+        ceiling = kpp.max_gpu_workers()
+        if requested > ceiling:
+            logger.warning(
+                "[render] %d GPU workers requested; capped at %d (RENDER_GPU_WORKERS_MAX "
+                "overrides)", requested, ceiling)
+            requested = ceiling
         pool = kpp.KokoroProcessPool(device, requested)
         if pool.active <= 1:
             pool.close()
