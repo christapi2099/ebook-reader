@@ -287,6 +287,20 @@ def test_a_failed_chunk_raises_render_error_and_leaves_nothing(need_ffmpeg, tmp_
     assert threading.active_count() == before
 
 
+def test_garbage_from_an_encoder_is_a_render_error(need_ffmpeg, tmp_path, monkeypatch):
+    base = _chunked_setup(monkeypatch, tmp_path)
+
+    def garbage(job, bitrate_k):
+        oo.read_packets(b"OggS but not really")
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(te, "_encode_chunk", garbage)
+    with pytest.raises(ra.RenderError, match="chunked tier encode failed") as ei:
+        ra.build_tiers(base["path"], base["segments"], (1.5,), tmp_path)
+    assert ei.value.phase == "encode"
+    assert _leftovers(tmp_path) == []
+
+
 def test_a_failing_decoder_is_reported(need_ffmpeg, tmp_path, monkeypatch):
     base = _chunked_setup(monkeypatch, tmp_path)
     monkeypatch.setattr(ra, "atempo_filter_chain", lambda f: "atempo=nonsense")

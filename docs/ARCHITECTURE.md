@@ -1031,8 +1031,10 @@ heartbeat thread) it:
    the sentence duration (`'estimated'`). The manifest's `timing_quality` is the worst source present
    (`exact`, `aligned` or `estimated`), and the player skips word highlighting when it is `estimated`.
    PDF word boxes are mapped onto the words (`word_boxes.map_words_to_boxes`).
-4. **Encodes** `base.flac` and one Opus file per tier in `book_processor.TIERS` with ffmpeg `atempo`, then
-   **audits drift** with marker tones before writing `manifest.json`.
+4. **Encodes** `base.flac` and one Opus file per tier in `book_processor.TIERS` (1.0 plus 1.5, 2.0,
+   2.5, 3.0) with ffmpeg `atempo`, long books in parallel chunks spliced into one Ogg stream per tier
+   (`tier_encode`, see "Speed tiers" below), then **audits drift** on the published tier files before
+   writing `manifest.json`.
 5. **Publishes** atomically: `renders/{book}/{generation}/`, sentences replaced with the old-to-new remap
    computed, `ready_generation` bumped, `job_status='idle'`. A published generation never changes.
 
@@ -1041,6 +1043,37 @@ Progress writes double as the stall signal: if none arrive for `RENDER_STALL_TIM
 is marked `error` rather than showing a frozen bar. A book is **readable iff `ready_generation` is not
 null**; a re-render (new voice, engine family or `POST /library/{id}/reprocess`) leaves the previous
 generation readable until the new one is published.
+
+#### Speed tiers, the fingerprint pin, and the chunked encode
+
+* **Tier set.** New renders contain `audio_1.0.opus` plus `book_processor.TIERS` = 1.5, 2.0, 2.5, 3.0
+  (0.75, 1.25 and 1.75 were dropped on 2026-10-20). Older renders keep all eight of their files and the
+  renders router still serves them (`book_processor.SERVABLE_TIERS`). The reader's speed buttons are the
+  loaded manifest's tier keys, so an old render offers more speeds than a new one; a saved speed the
+  render lacks snaps to the nearest tier (ties go to the slower one).
+* **Fingerprint pin.** The fingerprint hashes `FINGERPRINT_TIERS`, frozen at the old list
+  (0.75, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0), not `TIERS`. Changing the tiers a render builds therefore does
+  not mark every published book stale (which would requeue them all, including a running render).
+  `tests/test_fingerprint.py` pins the hash of a fixed sample. Change `FINGERPRINT_TIERS` only to force
+  every book to re-render.
+* **Chunked encode** (`services/tier_encode.py`, `services/ogg_opus.py`). libopus is >90% of the tier cost
+  and single-threaded, so for a book of at least 1.5 chunks (90 s) with sentence gaps, each tier's atempo
+  PCM is streamed from one ffmpeg, split every ~60 s on the 20 ms frame grid where the encoder hand-over
+  falls in exact digital silence (a sentence gap), and each piece is encoded by its own ffmpeg with 1 s
+  of warm-up. The packets are spliced into one Ogg stream laid out like ffmpeg's own (same packet count,
+  final granule, decoded length and timeline as one ffmpeg per tier; packet bytes after the first split
+  differ because the VBR state differs). A shared pool of `RENDER_ENCODE_WORKERS` encoders (default
+  `min(48, cpus // 2)`) runs every tier; `1` restores one ffmpeg per tier (`RENDER_TIER_WORKERS` of them in
+  parallel). Progress is reported per spliced chunk, which keeps the stall watchdog fed. Any failure
+  removes the call's outputs and raises `RenderError(phase="encode")`.
+* **Drift audit** (`render_artifacts.drift_audit`) reads the real tier files: every Ogg page is checked
+  (CRC, sequence, EOS), the length must be base / factor within 150 ms, and at every 200th sentence gap
+  plus the first and last three, the 1x energy envelope (4 ms window, 1 ms hop) time-scaled by the factor
+  is cross-correlated with the tier file around the manifest's claimed position (search +/-150 ms). A
+  boundary fails above 60 ms or below 0.5 correlation; the first and last three are judged on their
+  median against 30 ms, because a single envelope match can be a few ms off while a real offset moves all
+  of them, and atempo loses 15-33 ms at the end of a file, which biases `actual_factor` on short books.
+  Silent windows are replaced by an audible neighbour, never passed silently.
 
 ### 7.1 Stage 1 — Ingestion (PDF)
 

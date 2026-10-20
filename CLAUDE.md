@@ -20,7 +20,8 @@ cd frontend && pnpm install && pnpm run dev
 | `backend/services/render_worker.py` | Render pipeline: extract, synthesize 1x, align, encode, publish; leased, resumable, stall watchdog |
 | `backend/services/render_jobs.py` | Claim/lease/pause/requeue/supersede state transitions (pure DB logic) |
 | `backend/services/render_triggers.py` | Target fingerprint (voice, engine family, pipeline) and when a book needs a (re)render |
-| `backend/services/render_artifacts.py` | base.flac, atempo speed tiers, drift audit, sync manifest |
+| `backend/services/render_artifacts.py` | base.flac, atempo speed tiers, drift audit of the published tier files, sync manifest |
+| `backend/services/tier_encode.py` | Chunked parallel libopus encode of the tiers, spliced into one Ogg stream (`ogg_opus.py`); `RENDER_ENCODE_WORKERS` |
 | `backend/services/render_store.py` | `RENDERS_DIR` layout, immutable generations, cleanup |
 | `backend/routers/renders.py` | `GET /api/renders/{book}/{gen}/audio_{tier}.opus` (Range) and the manifest |
 | `backend/services/tts_engine.py` | Kokoro synthesis, AudioCache, SynthJob(speed=); the render engine is set via `set_render_engine` |
@@ -33,7 +34,9 @@ cd frontend && pnpm install && pnpm run dev
 | `frontend/src/lib/api.ts` | All HTTP calls (renders, manifest, library, voices); legacy `TTSSocket` |
 
 ## Architecture: process-first
-A book is read only from a complete, immutable render: the sentences plus one voice rendered at 1x to Ogg Opus, speed tiers (`book_processor.TIERS`: 0.75, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0) built from the lossless base with ffmpeg `atempo`, and a sync manifest with word timings and PDF boxes. A published render never changes; a new voice, engine family, codec or pipeline fingerprint produces a new generation while the previous one stays readable. Books with no render yet are locked behind the processing screen. Compute device (CPU/GPU/Modal) does not trigger a re-render.
+A book is read only from a complete, immutable render: the sentences plus one voice rendered at 1x to Ogg Opus, speed tiers (`book_processor.TIERS`: 1.5, 2.0, 2.5, 3.0; renders before 2026-10-20 also have 0.75, 1.25, 1.75) built from the lossless base with ffmpeg `atempo`, and a sync manifest with word timings and PDF boxes. A published render never changes; a new voice, engine family, codec or pipeline fingerprint produces a new generation while the previous one stays readable. Books with no render yet are locked behind the processing screen. Compute device (CPU/GPU/Modal) does not trigger a re-render.
+
+Tiers and the fingerprint: the fingerprint hashes `book_processor.FINGERPRINT_TIERS` (frozen at the old seven-tier list), not `TIERS`, so changing the tier set never makes published books stale. The reader's speed buttons come from the loaded manifest's tiers. Long books encode tiers in parallel chunks (`RENDER_ENCODE_WORKERS`, default `min(48, cpus // 2)`; `1` = one ffmpeg per tier). Details: `docs/ARCHITECTURE.md`, "Speed tiers, the fingerprint pin, and the chunked encode".
 
 Plan: `docs/plans/process-first-architecture.md` (kept out of git; it is in the primary checkout). Read it before changing playback, caching, upload, render or reprocess code. Don't add on-demand synthesis to the reader path. The per-chapter precompile pipeline (`ChapterAudio`) was removed in favour of this; it lives on in history at `agent/precompiled-audio`.
 

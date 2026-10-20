@@ -243,7 +243,8 @@ def build_tiers(base_flac, segments: list[dict], tiers=None, work_dir=None, on_s
                 base_samples=base_samples, factors=unique, workers=workers,
                 bitrate_k=BITRATE_K,
                 on_progress=(lambda f: on_step(0.99 * f)) if on_step else None)
-        except tier_encode.ChunkEncodeError as exc:
+        except (tier_encode.ChunkEncodeError, ogg_opus.OggError, OSError,
+                subprocess.SubprocessError) as exc:
             raise RenderError(f"chunked tier encode failed: {exc}", phase="encode") from exc
         for key, t in unique.items():
             out[key] = _entry(t, work / f"audio_{key}.opus")
