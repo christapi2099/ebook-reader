@@ -594,3 +594,49 @@ def test_a_hung_synthesis_call_surfaces_as_an_error_not_a_frozen_bar(env):
     assert b.job_status == "error" and "stalled" in b.error_message
     assert b.ready_generation is None
     assert len(synth.calls) == 1  # the render bailed out once the call came back
+
+
+# ------------------------------------------------- chunked encode + watchdog
+def test_chunked_encode_feeds_the_stall_watchdog(env, real_ffmpeg, monkeypatch):
+    """A long book's tiers are encoded in parallel chunks; each spliced chunk is a
+    progress step in the encode phase (bar + heartbeat touch), and the audit then
+    checks the spliced files themselves."""
+    from services import tier_encode as te
+    ffmpeg_required()
+    monkeypatch.setenv("RENDER_ENCODE_WORKERS", "3")
+    monkeypatch.setattr(te, "CHUNK_S", 1.0)
+    monkeypatch.setattr(te, "PROGRESS_EVERY_S", 0.0)
+    runs = []
+    real_encode = te.encode_tiers
+    monkeypatch.setattr(te, "encode_tiers", lambda *a, **k: runs.append(real_encode(*a, **k))
+                        or runs[-1])
+    touches = []
+    real_touch = rw._Heartbeat.touch
+
+    def touch(self, phase=None):
+        touches.append(phase)
+        real_touch(self, phase)
+
+    monkeypatch.setattr(rw._Heartbeat, "touch", touch)
+    marks = []
+    real_mark = rj.mark_progress
+
+    def mark(book_id, frac, phase):
+        marks.append((frac, phase))
+        return real_mark(book_id, frac, phase)
+
+    monkeypatch.setattr(rj, "mark_progress", mark)
+    mk_book(env, n=8)
+    assert run(FakeSynth(), tiers=(1.5, 2.0)) == rw.READY
+    assert len(runs) == 1
+    chunks = sum(t["chunks"] for t in runs[0].values())
+    assert chunks >= 10
+    enc = [f for f, ph in marks if ph == "encode"]
+    assert all(0.90 <= f <= 0.95 + 1e-9 for f in enc), enc
+    in_tiers = [f for f in enc if 0.92 < f < 0.95]
+    assert in_tiers == sorted(in_tiers)
+    assert len(in_tiers) >= chunks - 1     # one step per spliced chunk
+    assert touches.count("encode") >= len(enc)
+    files = gen_files("b1", 1)
+    assert {"audio_1.0.opus", "audio_1.5.opus", "audio_2.0.opus"} <= set(files)
+    assert not any(n.endswith(".part") or n.startswith("audit_") for n in files)

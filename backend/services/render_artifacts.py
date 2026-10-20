@@ -1,7 +1,9 @@
 """Render artifacts: base.flac, atempo tiers, drift audit, manifest.json.
 
 Built from already-synthesized per-sentence chunks. Every Opus tier is encoded
-from ``base.flac`` (never Opus -> Opus) with libopus 24 kbps / 24 kHz mono.
+from ``base.flac`` (never Opus -> Opus) with libopus 24 kbps / 24 kHz mono; long
+books are encoded in parallel chunks spliced into one stream per tier
+(``services.tier_encode``), short ones with one ffmpeg per tier.
 Tier file names are ``audio_{str(float)}.opus`` and the same string is the key
 in ``manifest["tiers"]`` (``render_store.reconcile`` relies on that).
 """
@@ -16,7 +18,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from services import book_processor, ogg_opus
+from services import book_processor, ogg_opus, tier_encode
 from services.env_config import positive_int
 
 SR = 24000
@@ -183,11 +185,24 @@ def _encode(src: Path, dst: Path, factor: float) -> None:
     _run(cmd)
 
 
+def _use_chunked(base_ms: float, segments: list[dict]) -> int:
+    """Chunk-encoder pool size, or 0 for the monolithic path (one ffmpeg per tier):
+    a single worker, a book shorter than 1.5 chunks, or no sentence gap to split in."""
+    workers = tier_encode.encode_workers()
+    if workers <= 1 or base_ms < 1.5 * tier_encode.CHUNK_S * 1000:
+        return 0
+    if not any(s.get("gap_ms", 0) >= 80 for s in segments):
+        return 0
+    return workers
+
+
 def build_tiers(base_flac, segments: list[dict], tiers=None, work_dir=None, on_step=None) -> dict:
     """Encode audio_1.0.opus + one file per tier from base.flac.
 
     Returns {key: {requested_factor, actual_factor, max_drift_ms, duration_ms,
     path, segments}} where segment/word times are 1x times / actual_factor.
+    ``on_step(fraction)`` reports 0..1 from the calling thread; the chunked path
+    reports as chunks are spliced, so the stall watchdog sees steady progress.
     """
     base = Path(base_flac)
     work = Path(work_dir) if work_dir else base.parent
@@ -195,6 +210,8 @@ def build_tiers(base_flac, segments: list[dict], tiers=None, work_dir=None, on_s
     base_ms = ffprobe_duration_ms(base)
     out = {}
     factors = (1.0, *[float(x) for x in tiers if float(x) != 1.0])
+    for stale in work.glob("audio_*.opus.part"):  # a crash mid-encode in a resumed tmp dir
+        stale.unlink(missing_ok=True)
 
     def _entry(t: float, path: Path) -> dict:
         if t == 1.0:
@@ -209,6 +226,30 @@ def build_tiers(base_flac, segments: list[dict], tiers=None, work_dir=None, on_s
                                      "end_ms": w["end_ms"] / actual} for w in s["words"]]}
                          for s in segments],
         }
+
+    workers = _use_chunked(base_ms, segments)
+    if workers:
+        unique: dict[str, float] = {}
+        for t in factors:
+            unique.setdefault(tier_key(t), t)
+        if on_step:
+            on_step(0.0)
+        try:
+            with sf.SoundFile(base) as f:
+                base_samples = f.frames
+            tier_encode.encode_tiers(
+                base, [(k, atempo_filter_chain(t) if t != 1.0 else None, work / f"audio_{k}.opus")
+                       for k, t in unique.items()],
+                base_samples=base_samples, factors=unique, workers=workers,
+                bitrate_k=BITRATE_K,
+                on_progress=(lambda f: on_step(0.99 * f)) if on_step else None)
+        except tier_encode.ChunkEncodeError as exc:
+            raise RenderError(f"chunked tier encode failed: {exc}", phase="encode") from exc
+        for key, t in unique.items():
+            out[key] = _entry(t, work / f"audio_{key}.opus")
+        if on_step:
+            on_step(1.0)
+        return out
 
     workers = tier_workers()
     if workers <= 1 or len(factors) <= 1:
