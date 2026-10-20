@@ -559,3 +559,40 @@ class TestPiperVoices:
             "gender": "unknown", "quality": "medium", "built_in": True,
         }
         assert piper_voice_info("en_GB-alba")["quality"] == "unknown"
+
+
+class TestConfigureRocm:
+    """MIOpen is turned off for Kokoro on ROCm only (new-shape JIT cost ~18 s per sentence)."""
+
+    @staticmethod
+    def _torch(hip):
+        import types
+
+        return types.SimpleNamespace(
+            version=types.SimpleNamespace(hip=hip),
+            backends=types.SimpleNamespace(cudnn=types.SimpleNamespace(enabled=True)),
+        )
+
+    def test_rocm_gpu_disables_miopen(self, monkeypatch):
+        monkeypatch.delenv("ENABLE_MIOPEN", raising=False)
+        torch = self._torch("7.1")
+        engine_manager._configure_rocm(torch, "cuda")
+        assert torch.backends.cudnn.enabled is False
+
+    def test_cuda_build_is_untouched(self, monkeypatch):
+        monkeypatch.delenv("ENABLE_MIOPEN", raising=False)
+        torch = self._torch(None)
+        engine_manager._configure_rocm(torch, "cuda")
+        assert torch.backends.cudnn.enabled is True
+
+    def test_cpu_is_untouched(self, monkeypatch):
+        monkeypatch.delenv("ENABLE_MIOPEN", raising=False)
+        torch = self._torch("7.1")
+        engine_manager._configure_rocm(torch, "cpu")
+        assert torch.backends.cudnn.enabled is True
+
+    def test_env_override_keeps_miopen(self, monkeypatch):
+        monkeypatch.setenv("ENABLE_MIOPEN", "1")
+        torch = self._torch("7.1")
+        engine_manager._configure_rocm(torch, "cuda")
+        assert torch.backends.cudnn.enabled is True

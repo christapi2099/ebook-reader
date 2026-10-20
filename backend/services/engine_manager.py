@@ -154,6 +154,24 @@ class EngineOption:
 # --------------------------------------------------------------------------
 
 
+def _configure_rocm(torch: Any, device: str) -> None:
+    """Turn MIOpen off for Kokoro on AMD GPUs (ROCm builds only).
+
+    With MIOpen on, every new sentence length makes it JIT-compile its kernels: a
+    new sentence cost ~18 s against ~0.9 s with it off (measured on an RX 6700 XT,
+    and the same fix as upstream Kokoro-FastAPI PR #518). Sentences are all
+    different lengths, so a book render spent its time compiling. NVIDIA builds
+    (``torch.version.hip`` unset) and CPU are untouched. ``ENABLE_MIOPEN=1`` keeps
+    MIOpen on.
+    """
+    if device == "cpu" or not getattr(torch.version, "hip", None):
+        return
+    if os.environ.get("ENABLE_MIOPEN", "").strip().lower() in ("1", "true", "yes", "on"):
+        return
+    torch.backends.cudnn.enabled = False
+    logger.info("[kokoro] ROCm: MIOpen disabled (ENABLE_MIOPEN=1 to keep it)")
+
+
 def build_local(device: str) -> tuple[Any | None, str | None]:
     """Build an in-process ``KPipeline`` on an explicit device.
 
@@ -162,9 +180,10 @@ def build_local(device: str) -> tuple[Any | None, str | None]:
     instead of "cuda if it happens to be there".
     """
     try:
-        import torch  # noqa: F401  (imported for its side effect on the device)
+        import torch
         from kokoro import KPipeline
 
+        _configure_rocm(torch, device)
         os.environ.setdefault("HF_HUB_OFFLINE", "1")
         logger.info("[kokoro] initializing local pipeline on %s", device)
         pipeline = KPipeline(
