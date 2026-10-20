@@ -41,6 +41,7 @@ from sqlmodel import Session, SQLModel, create_engine  # noqa: E402
 import db.database as _db  # noqa: E402
 import storage  # noqa: E402
 from db.models import Book, Sentence  # noqa: E402
+from services.render_manifest import expand_v1  # noqa: E402
 
 SR = 24000
 TIERS = (1.5, 2.0)
@@ -311,7 +312,9 @@ def snapshot(gen_dir: Path, engine_name: str, corpus: list[str], aligned: dict |
     """Everything a listener or the highlighter depends on, from the published files."""
     from scripts.verify_render import verify_render  # noqa: E402  (after sandbox is set)
 
-    manifest = json.loads((gen_dir / "manifest.json").read_text())
+    # The schema 1 view (every tier with its segments), whatever the file's schema,
+    # so goldens captured before the slim manifest still compare.
+    manifest = expand_v1(json.loads((gen_dir / "manifest.json").read_text()))
     files = {}
     for p in sorted(gen_dir.iterdir()):
         if p.is_file() and p.suffix in (".opus", ".flac", ".wav"):
@@ -516,8 +519,9 @@ def diff_snapshots(golden: dict, fresh: dict, *, exact: bool = False, engine: st
         elif g["bytes"] and abs(f["bytes"] - g["bytes"]) / g["bytes"] > tol["size_frac"]:
             rep.fail(f"{name}: size {g['bytes']} -> {f['bytes']} "
                      f"(> {tol['size_frac']:.0%})")
-    _diff_manifest(golden["manifest"], fresh["manifest"], rep, exact=exact, tol=tol)
-    _check_tiers(fresh["manifest"], rep)
+    _diff_manifest(expand_v1(golden["manifest"]), expand_v1(fresh["manifest"]), rep,
+                   exact=exact, tol=tol)
+    _check_tiers(expand_v1(fresh["manifest"]), rep)
     _check_aligned(golden, fresh, rep, exact=exact, tol=tol)
     return rep
 

@@ -22,6 +22,7 @@ from sqlmodel import Session, select  # noqa: E402
 import db.database as _db  # noqa: E402
 import storage  # noqa: E402
 from db.models import Book, Sentence  # noqa: E402
+from services.render_manifest import SCHEMA_SLIM, SCHEMA_V1, expand_v1, is_slim  # noqa: E402
 
 DURATION_TOL_MS = 50.0
 FACTOR_TOL = 0.005
@@ -108,7 +109,12 @@ def verify_render(book_id: str, generation: int | None = None) -> VerifyReport:
     except (OSError, ValueError) as e:
         check(False, f"manifest.json unreadable: {e}")
         return rep
-    check(m.get("schema") == 1, f"manifest schema {m.get('schema')!r} != 1")
+    check(m.get("schema") in (SCHEMA_V1, SCHEMA_SLIM),
+          f"manifest schema {m.get('schema')!r} not {SCHEMA_V1} or {SCHEMA_SLIM}")
+    if is_slim(m):
+        check(isinstance(m.get("segments"), list) and bool(m.get("segments")),
+              "slim manifest has no 1x segments")
+    m = expand_v1(m)  # every check below reads each tier's own timeline
     check(m.get("base_effective_speed") == 1.0,
           f"base_effective_speed {m.get('base_effective_speed')!r} != 1.0")
     check((gdir / "base.flac").is_file(), "base.flac missing")

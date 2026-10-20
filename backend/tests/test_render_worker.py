@@ -16,7 +16,7 @@ import db.database as _db  # noqa: E402
 import storage  # noqa: E402
 from db.models import AudioCache, Book, Sentence  # noqa: E402
 from services import export_encoding, render_artifacts as ra, render_jobs as rj  # noqa: E402
-from services import render_worker as rw  # noqa: E402
+from services import render_manifest, render_worker as rw  # noqa: E402
 
 SR = 24000
 T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -132,7 +132,8 @@ def test_upload_pending_processing_ready(env, real_ffmpeg):
     assert len(sentence_rows(env)) == 6  # ...but it is kept as a row
     m = json.loads(files["manifest.json"])
     assert m["fingerprint"] == "fpA" and m["mixed_backends"] is False
-    segs = m["tiers"]["1.0"]["segments"]
+    assert m["schema"] == 2
+    segs = render_manifest.tier_segments(m, "1.0")
     assert [s["index"] for s in segs] == [0, 1, 2, 3, 5]
     assert all(s["words"] for s in segs)  # every sentence has word entries
     for a, b2 in zip(segs, segs[1:]):

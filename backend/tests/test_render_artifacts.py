@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from services import export_encoding, render_artifacts as ra
+from services import export_encoding, render_artifacts as ra, render_manifest
 
 SR = 24000
 
@@ -76,9 +76,14 @@ def test_tiers_audit_manifest(need_ffmpeg, tmp_path):
                           duration_ms=base["duration_ms"], voice="af_heart", voice_file_sha256="ab",
                           fingerprint="fp")
     disk = json.loads((tmp_path / "manifest.json").read_text())
-    assert disk["schema"] == 1 and disk["timing_quality"] == "exact" and disk["container"] == "ogg-opus"
+    assert disk["schema"] == 2 and disk["timing_quality"] == "exact" and disk["container"] == "ogg-opus"
     assert disk["base_effective_speed"] == 1.0 and set(disk["tiers"]) == set(tiers)
-    assert len(disk["tiers"]["1.5"]["segments"]) == 12
+    assert disk == m
+    # Slim: the 1x timeline once, and every tier is exactly it / actual_factor.
+    assert len(disk["segments"]) == 12
+    assert all("segments" not in t for t in disk["tiers"].values())
+    for k, t in tiers.items():
+        assert render_manifest.tier_segments(disk, k) == render_manifest.clean_segments(t["segments"])
     assert m["tiers"]["1.0"]["max_drift_ms"] <= 30
 
 

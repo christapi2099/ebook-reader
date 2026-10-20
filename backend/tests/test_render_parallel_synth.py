@@ -24,7 +24,7 @@ import db.database as _db  # noqa: E402
 import storage  # noqa: E402
 from db.models import Book, Sentence  # noqa: E402
 from scripts import render_baseline as rb  # noqa: E402
-from services import export_encoding, render_jobs as rj, render_pause  # noqa: E402
+from services import export_encoding, render_jobs as rj, render_manifest, render_pause  # noqa: E402
 from services import render_worker as rw  # noqa: E402
 
 SR = 24000
@@ -141,7 +141,7 @@ def test_results_are_consumed_in_index_order_despite_random_delays(env, real_ffm
     assert chunk_order == list(range(16))
     assert len(order) == 16
     assert synth.max_active > 1, "never ran two syntheses at once"
-    assert [s["index"] for s in manifest()["tiers"]["1.0"]["segments"]] == list(range(16))
+    assert [s["index"] for s in render_manifest.tier_segments(manifest(), "1.0")] == list(range(16))
     assert not synth_threads_alive()
 
 

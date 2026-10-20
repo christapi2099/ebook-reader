@@ -12,7 +12,7 @@ from sqlmodel import Session
 import db.database as _db
 import storage
 from db.models import Book, Sentence
-from services import export_encoding, render_artifacts as ra
+from services import export_encoding, render_artifacts as ra, render_manifest
 
 _spec = importlib.util.spec_from_file_location(
     "verify_render", Path(__file__).resolve().parent.parent / "scripts" / "verify_render.py")
@@ -64,10 +64,15 @@ def render(real_ffmpeg, tmp_path, monkeypatch):
 
 
 def _edit_manifest(gdir, fn):
+    """Edit the schema 1 view (every tier with segments) and write it back slim:
+    a tier edited out of step with 1x / actual_factor keeps its own segments."""
     p = gdir / "manifest.json"
-    m = json.loads(p.read_text())
+    m = render_manifest.expand_v1(json.loads(p.read_text()))
     fn(m)
-    p.write_text(json.dumps(m))
+    slim = render_manifest.slim_manifest(m)
+    if m.get("schema") != 1:
+        slim["schema"] = m["schema"]
+    p.write_text(json.dumps(slim))
 
 
 def _fails(substr):
@@ -122,7 +127,7 @@ def test_missing_segment(render):
 def test_misc_invariants(render):
     def bad(m):
         m["base_effective_speed"] = 0.9
-        m["schema"] = 2
+        m["schema"] = 3
         m["timing_quality"] = "estimated"
         m["tiers"]["2.0"]["max_drift_ms"] = 99.0
         m["tiers"]["2.0"]["actual_factor"] = 1.9

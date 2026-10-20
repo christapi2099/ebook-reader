@@ -6,6 +6,8 @@ books are encoded in parallel chunks spliced into one stream per tier
 (``services.tier_encode``), short ones with one ffmpeg per tier.
 Tier file names are ``audio_{str(float)}.opus`` and the same string is the key
 in ``manifest["tiers"]`` (``render_store.reconcile`` relies on that).
+manifest.json is the slim schema 2 (``services.render_manifest``): the 1x
+timeline once, tiers as factors; schema 1 renders stay readable.
 """
 from __future__ import annotations
 
@@ -19,7 +21,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from services import book_processor, ogg_opus, tier_encode
+from services import book_processor, ogg_opus, render_manifest, tier_encode
 from services.env_config import positive_int
 
 logger = logging.getLogger(__name__)
@@ -548,6 +550,8 @@ def write_manifest(work_dir, *, base_segments: list[dict], tier_results: dict, d
                    voice: str, voice_file_sha256: str, fingerprint: str,
                    base_effective_speed: float = 1.0, mixed_backends: bool = False,
                    gap_policy: str = GAP_POLICY, sample_rate: int = SR) -> dict:
+    """Write manifest.json in the slim form (schema 2, ``services/render_manifest.py``):
+    the 1x timeline once, each tier its factors. Returns what was written."""
     if base_effective_speed != 1.0:
         raise RenderError(f"base effective_speed {base_effective_speed} != 1.0",
                           phase="base_speed_mismatch")
@@ -557,18 +561,19 @@ def write_manifest(work_dir, *, base_segments: list[dict], tier_results: dict, d
             "requested_factor": info["requested_factor"],
             "actual_factor": info["actual_factor"],
             "max_drift_ms": info["max_drift_ms"],
-            "segments": [{"index": s["index"], "start_ms": s["start_ms"], "end_ms": s["end_ms"],
-                          "gap_ms": s["gap_ms"],
-                          "words": [{"start_ms": w["start_ms"], "end_ms": w["end_ms"],
-                                     "box": w.get("box"), "timing_source": w.get("timing_source")}
-                                    for w in s["words"]]} for s in info["segments"]],
+            "segments": render_manifest.clean_segments(info["segments"]),
         }
-    manifest = {
-        "schema": 1, "duration_ms": duration_ms, "base_effective_speed": base_effective_speed,
+    v1 = {
+        "schema": render_manifest.SCHEMA_V1, "duration_ms": duration_ms,
+        "base_effective_speed": base_effective_speed,
         "voice": voice, "voice_file_sha256": voice_file_sha256, "fingerprint": fingerprint,
         "container": "ogg-opus", "sample_rate": sample_rate,
         "timing_quality": _timing_quality(base_segments), "mixed_backends": mixed_backends,
         "gap_policy": gap_policy, "tiers": tiers,
     }
-    (Path(work_dir) / "manifest.json").write_text(json.dumps(manifest))
+    # Every tier is checked against 1x / actual_factor (one that is not keeps its
+    # own segments), so the slim file loses nothing schema 1 had.
+    manifest = render_manifest.slim_manifest(v1)
+    manifest.pop("source_schema", None)
+    (Path(work_dir) / "manifest.json").write_text(json.dumps(manifest, separators=(",", ":")))
     return manifest

@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import numpy as np  # noqa: E402
 
 from services import ogg_opus, render_artifacts as ra, tier_encode as te  # noqa: E402
+from services.render_manifest import tier_segments  # noqa: E402
 
 SR = 24000
 
@@ -85,7 +86,7 @@ def main(argv=None) -> int:
     ap.add_argument("--keep", type=Path, default=None, metavar="DIR")
     args = ap.parse_args(argv)
     man = json.loads((args.render / "manifest.json").read_text())
-    segs = man["tiers"]["1.0"]["segments"]
+    segs = tier_segments(man, "1.0")  # either manifest schema
     base = args.render / "base.flac"
     tiers = tuple(float(t) for t in args.tiers.split(","))
     print(f"{args.render}: {man['duration_ms'] / 60000:.1f} min, tiers 1.0+{tiers}, "
