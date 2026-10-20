@@ -25,5 +25,6 @@ Do not do this while another book is rendering: switching the engine restarts th
 2. Add a short book (a few chapters), wait for it to finish on the current engine, note `processing.json`
    `phase_timings` in `backend/renders/<book>/`.
 3. Switch the engine to GPU: `curl -XPOST localhost:8000/api/system/engine -H 'content-type: application/json' -d '{"engine":"gpu"}'`
-   (check the body shape in `routers/system.py`), then `POST /library/<id>/reprocess`.
+   (verified in `routers/system.py`), **restart the backend** (the choice is saved, not swapped live), then
+   `POST /library/<id>/reprocess`.
 4. Compare the new `phase_timings` and listen to the result.
