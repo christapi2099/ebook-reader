@@ -1,3 +1,4 @@
+import gzip
 import hashlib
 import json
 from datetime import datetime, timezone
@@ -5,14 +6,14 @@ from datetime import datetime, timezone
 from fastapi.concurrency import run_in_threadpool
 import logging
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
 from sqlmodel import Session, select
 
 from db.database import get_session
 import storage
 from db.models import Book, Sentence
 from routers.deps import require_book
-from services import render_triggers
+from services import manifest_cache, render_triggers
 from services.epub_engine import EPUBEngine
 from services.pdf_engine import PDFEngine
 from services.text_engine import TextEngine
@@ -22,6 +23,8 @@ from services.text_filter import TextFilter
 router = APIRouter(prefix="/documents")
 UPLOAD_DIR = storage.UPLOADS_DIR
 logger = logging.getLogger(__name__)
+# Below this a sentences payload goes out uncompressed.
+GZIP_MIN_BYTES = 1024
 
 
 def _trigger_render(book_id: str, voice: str | None = None) -> None:
@@ -128,28 +131,36 @@ async def upload_document(
 
 
 @router.get("/{book_id}/sentences")
-def get_sentences(book_id: str, response: Response,
+def get_sentences(book_id: str, request: Request,
                   generation: int | None = Query(None),
                   session: Session = Depends(get_session)):
     """Sentences of the ready generation; 409 while the book has none.
 
     Only the ready generation's sentences are stored, so ``generation`` is
     advisory: the generation actually served is in ``X-Render-Generation``.
+
+    Serialized with json.dumps directly (FastAPI's jsonable_encoder took 2 of the
+    3.9 s for the 19.8k-sentence, 29 MB Deep Learning book) and gzipped (level 1,
+    ~0.2 s, 29 -> 6.7 MB) when the client accepts it.
     """
     book = require_book(session, book_id)
     if book.ready_generation is None:
         raise HTTPException(status_code=409, detail="Book has no ready render")
-    response.headers["X-Render-Generation"] = str(book.ready_generation)
     rows = session.exec(
         select(Sentence).where(Sentence.book_id == book_id).order_by(Sentence.index)
     ).all()
-    return [
+    body = json.dumps([
         {"index": s.index, "text": s.text, "page": s.page,
          "x0": s.x0, "y0": s.y0, "x1": s.x1, "y1": s.y1, "filtered": s.filtered,
          "words": json.loads(s.words) if s.words else [],
          "chapter": s.chapter, "chapter_title": s.chapter_title}
         for s in rows
-    ]
+    ], ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode()
+    headers = {"X-Render-Generation": str(book.ready_generation), "Vary": "Accept-Encoding"}
+    if len(body) > GZIP_MIN_BYTES and manifest_cache.accepts_gzip(request.headers.get("accept-encoding")):
+        body = gzip.compress(body, compresslevel=1, mtime=0)
+        headers["Content-Encoding"] = "gzip"
+    return Response(body, media_type="application/json", headers=headers)
 
 
 @router.post("/text")
