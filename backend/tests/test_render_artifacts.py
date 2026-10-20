@@ -148,9 +148,9 @@ def test_windowed_detect_matches_whole_signal_and_reads_files(tmp_path):
         y[c - n // 2:c - n // 2 + n] += tone
     ref = _detect_whole_signal(y, expected)
     assert np.allclose(ra._detect(y, expected), ref, atol=1e-6)
-    wav = tmp_path / "m.wav"
-    sf.write(wav, y, sr, subtype="FLOAT")
-    assert np.allclose(ra._detect_file(wav, expected), ref, atol=1e-6)
+    pcm = tmp_path / "m.pcm"  # raw s16le: what the audit decodes to (WAV breaks past 4 GiB)
+    np.clip(np.round(y * 32768.0), -32768, 32767).astype("<i2").tofile(pcm)
+    assert np.allclose(ra._detect_file(pcm, expected), ref, atol=0.2)
     assert np.allclose(ref, expected, atol=2.0)  # and it actually finds the markers
 
 
@@ -171,3 +171,17 @@ def test_build_base_streams_same_samples_as_concatenation(tmp_path):
     expect, _ = sf.read(ref, dtype="float32")
     assert sr == ra.SR and len(got) == len(expect) and np.array_equal(got, expect)
     assert base["segments"][-1]["end_ms"] == pytest.approx(base["duration_ms"])
+
+
+def test_finished_tier_survives_a_restart_and_only_for_the_same_base(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(ra, "_encode", lambda src, dst, f: (calls.append(f), dst.write_bytes(b"x")))
+    path = tmp_path / "audio_1.5.opus"
+    ra._encode_tier(tmp_path / "base.flac", path, 1.5, 1000.0)
+    ra._encode_tier(tmp_path / "base.flac", path, 1.5, 1000.0)  # restart: reused
+    assert calls == [1.5]
+    ra._encode_tier(tmp_path / "base.flac", path, 1.5, 1000.5)   # different base: redone
+    assert calls == [1.5, 1.5]
+    path.with_name(path.name + ".done").unlink()                  # no marker: never trusted
+    ra._encode_tier(tmp_path / "base.flac", path, 1.5, 1000.5)
+    assert calls == [1.5, 1.5, 1.5]

@@ -175,6 +175,28 @@ def _encode(src: Path, dst: Path, factor: float) -> None:
     _run(cmd)
 
 
+def _done_marker(path: Path) -> Path:
+    return path.with_name(path.name + ".done")
+
+
+def _reusable(path: Path, base_ms: float) -> bool:
+    """A tier encoded from this exact base survives a restart (same length to the ms)."""
+    m = _done_marker(path)
+    try:
+        return path.is_file() and path.stat().st_size > 0 and m.read_text().strip() == f"{base_ms:.3f}"
+    except OSError:
+        return False
+
+
+def _encode_tier(base: Path, path: Path, t: float, base_ms: float) -> None:
+    """Encode one tier, unless a finished one from this base is already there."""
+    if _reusable(path, base_ms):
+        return
+    _done_marker(path).unlink(missing_ok=True)
+    _encode(base, path, t)
+    _done_marker(path).write_text(f"{base_ms:.3f}")
+
+
 def build_tiers(base_flac, segments: list[dict], tiers=None, work_dir=None, on_step=None) -> dict:
     """Encode audio_1.0.opus + one file per tier from base.flac.
 
@@ -209,7 +231,7 @@ def build_tiers(base_flac, segments: list[dict], tiers=None, work_dir=None, on_s
             path = work / f"audio_{key}.opus"
             if on_step:
                 on_step(done / len(factors))
-            _encode(base, path, t)
+            _encode_tier(base, path, t, base_ms)
             out[key] = _entry(t, path)
         if on_step:
             on_step(1.0)
@@ -227,10 +249,11 @@ def build_tiers(base_flac, segments: list[dict], tiers=None, work_dir=None, on_s
         key, t = item
         path = work / f"audio_{key}.opus"
         try:
-            _encode(base, path, t)
+            _encode_tier(base, path, t, base_ms)
             return _entry(t, path)
         except BaseException:
             path.unlink(missing_ok=True)
+            _done_marker(path).unlink(missing_ok=True)
             raise
 
     if on_step:
@@ -289,11 +312,15 @@ def _detect_windows(read, n: int, expected_ms: np.ndarray, half_ms: float = 150.
 
 
 def _detect_file(path, expected_ms: np.ndarray) -> np.ndarray:
-    with sf.SoundFile(path) as f:
-        def read(lo, hi):
-            f.seek(lo)
-            return f.read(hi - lo, dtype="float32")
-        return _detect_windows(read, f.frames, expected_ms)
+    """Detect markers in a raw mono s16le file. Raw, not WAV: a WAV header cannot describe
+    more than 4 GiB, which a book over ~24.8 h of 24 kHz audio exceeds (the audit read a
+    truncated file and reported an empty marker window)."""
+    pcm = np.memmap(path, dtype="<i2", mode="r")
+    try:
+        return _detect_windows(lambda lo, hi: pcm[lo:hi].astype(np.float32) / 32768.0,
+                               len(pcm), expected_ms)
+    finally:
+        del pcm
 
 
 def drift_audit(base_flac, segments: list[dict], tier_results: dict, work_dir=None,
@@ -320,9 +347,10 @@ def drift_audit(base_flac, segments: list[dict], tier_results: dict, work_dir=No
     def _audit_one(item):
         key, info = item
         opus = work / f"audit_{key}.opus"
-        wav = work / f"audit_{key}.wav"
+        wav = work / f"audit_{key}.pcm"
         _encode(mbase, opus, info["requested_factor"])
-        _run(["ffmpeg", "-y", "-v", "error", "-i", str(opus), "-ar", str(SR), "-ac", "1", str(wav)])
+        _run(["ffmpeg", "-y", "-v", "error", "-i", str(opus), "-ar", str(SR), "-ac", "1",
+              "-f", "s16le", str(wav)])
         lin = exp / info["actual_factor"]
         drift = _detect_file(wav, lin) - lin
         for j, d in enumerate(drift):
