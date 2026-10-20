@@ -139,27 +139,29 @@ def build_base(chunks: list[dict], work_dir, *, effective_speed: float = 1.0,
         raise RenderError("no chunks", phase="base")
     work = Path(work_dir)
     (work / "chunks").mkdir(parents=True, exist_ok=True)
-    pieces, segments, pos = [], [], 0  # pos in samples
-    for i, c in enumerate(chunks):
-        if on_step:
-            on_step(i / len(chunks))
-        a = np.asarray(c["audio"], dtype=np.float32)
-        sf.write(work / "chunks" / f"{c['index']}.flac", a, SR, format="FLAC", subtype="PCM_16")
-        gap = gap_after(c, chunks[i + 1] if i + 1 < len(chunks) else None)
-        start_ms = pos * 1000.0 / SR
-        end_ms = (pos + len(a)) * 1000.0 / SR
-        words = [{**w, "start_ms": start_ms + w["start_ms"], "end_ms": start_ms + w["end_ms"]}
-                 for w in c.get("words", [])]
-        segments.append({"index": c["index"], "start_ms": start_ms, "end_ms": end_ms,
-                         "gap_ms": gap, "words": words})
-        pieces.append(a)
-        pos += len(a)
-        if gap:
-            n = int(round(gap * SR / 1000))
-            pieces.append(np.zeros(n, dtype=np.float32))
-            pos += n
+    segments, pos = [], 0  # pos in samples
     path = work / "base.flac"
-    sf.write(path, np.concatenate(pieces), SR, format="FLAC", subtype="PCM_16")
+    # Stream into base.flac: concatenating every chunk first doubled the book in RAM.
+    with sf.SoundFile(path, mode="w", samplerate=SR, channels=1, format="FLAC",
+                      subtype="PCM_16") as out:
+        for i, c in enumerate(chunks):
+            if on_step:
+                on_step(i / len(chunks))
+            a = np.asarray(c["audio"], dtype=np.float32)
+            sf.write(work / "chunks" / f"{c['index']}.flac", a, SR, format="FLAC", subtype="PCM_16")
+            gap = gap_after(c, chunks[i + 1] if i + 1 < len(chunks) else None)
+            start_ms = pos * 1000.0 / SR
+            end_ms = (pos + len(a)) * 1000.0 / SR
+            words = [{**w, "start_ms": start_ms + w["start_ms"], "end_ms": start_ms + w["end_ms"]}
+                     for w in c.get("words", [])]
+            segments.append({"index": c["index"], "start_ms": start_ms, "end_ms": end_ms,
+                             "gap_ms": gap, "words": words})
+            out.write(a)
+            pos += len(a)
+            if gap:
+                n = int(round(gap * SR / 1000))
+                out.write(np.zeros(n, dtype=np.float32))
+                pos += n
     if on_step:
         on_step(1.0)
     return {"path": path, "duration_ms": segments[-1]["end_ms"], "segments": segments}

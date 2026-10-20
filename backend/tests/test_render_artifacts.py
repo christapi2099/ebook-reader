@@ -152,3 +152,22 @@ def test_windowed_detect_matches_whole_signal_and_reads_files(tmp_path):
     sf.write(wav, y, sr, subtype="FLOAT")
     assert np.allclose(ra._detect_file(wav, expected), ref, atol=1e-6)
     assert np.allclose(ref, expected, atol=2.0)  # and it actually finds the markers
+
+
+def test_build_base_streams_same_samples_as_concatenation(tmp_path):
+    import soundfile as sf
+    chunks = _chunks()
+    base = ra.build_base(chunks, tmp_path)
+    got, sr = sf.read(base["path"], dtype="float32")
+    pieces = []
+    for i, c in enumerate(chunks):
+        pieces.append(np.asarray(c["audio"], dtype=np.float32))
+        gap = ra.gap_after(c, chunks[i + 1] if i + 1 < len(chunks) else None)
+        if gap:
+            pieces.append(np.zeros(int(round(gap * ra.SR / 1000)), dtype=np.float32))
+    want = np.concatenate(pieces)
+    ref = tmp_path / "ref.flac"
+    sf.write(ref, want, ra.SR, format="FLAC", subtype="PCM_16")
+    expect, _ = sf.read(ref, dtype="float32")
+    assert sr == ra.SR and len(got) == len(expect) and np.array_equal(got, expect)
+    assert base["segments"][-1]["end_ms"] == pytest.approx(base["duration_ms"])
