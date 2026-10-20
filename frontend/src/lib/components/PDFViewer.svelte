@@ -74,7 +74,18 @@
   let scrollDebounce: ReturnType<typeof setTimeout> | null = null
   let prevHighlightIndex = -1
   let intersectionObserver: IntersectionObserver | null = null
+  let renderObserver: IntersectionObserver | null = null
   let resizeObserver: ResizeObserver | null = null
+  // Pages within this margin of the viewport are painted; the rest are sized
+  // placeholders. Painting all 771 pages of a long PDF kept the main thread busy
+  // for minutes and its canvases grew the tab past 5 GB.
+  const RENDER_MARGIN = '150% 0px'
+  /** Pages the render observer currently wants painted. */
+  let nearPages = new Set<number>()
+  /** Pages whose paint is in flight. */
+  let paintingPages = new Set<number>()
+  /** Bumped on every relayout (zoom, fit); a paint from an older layout is dropped. */
+  let layoutToken = 0
   let bionicDebounce: ReturnType<typeof setTimeout> | null = null
 
   const MAX_WIDTH_PX = 900
@@ -122,8 +133,8 @@
   })
 
   function fitToWidth(width: number) {
-    // Get natural page width from the first page's viewport with BASE_SCALE
-    const firstPageViewport = renderedPages.get(0)?.viewport || pdfDoc.getPage(1).then((p: any) => p.getViewport({ scale: BASE_SCALE }))
+    // Natural page width: the first page's viewport at BASE_SCALE.
+    const firstPageViewport = pdfDoc.getPage(1).then((p: any) => p.getViewport({ scale: BASE_SCALE }))
     Promise.resolve(firstPageViewport).then(viewport => {
       const naturalPageWidth = viewport.width
       let newScale = BASE_SCALE
@@ -138,19 +149,40 @@
 
       if (Math.abs(newScale - effectiveScale) / effectiveScale > SCALE_CHANGE_THRESHOLD) {
         effectiveScale = newScale
-        // Re-render all pages when scale changes significantly
-        clearRenderedPages()
-        renderAllPages()
+        // Lay the pages out again at the new scale; the window repaints itself.
+        relayout()
       }
     })
   }
 
   function clearRenderedPages() {
-    pagesEl.innerHTML = ''
+    layoutToken++
+    renderObserver?.disconnect()
+    intersectionObserver?.disconnect()
+    for (const { canvas } of renderedPages.values()) { canvas.width = 0; canvas.height = 0 }
+    if (pagesEl) pagesEl.innerHTML = ''
     renderedPages.clear()
     sentenceElements.clear()
     wordElements.clear()
-    intersectionObserver?.disconnect()
+    nearPages = new Set()
+    paintingPages = new Set()
+  }
+
+  /** Page whose wrapper is at the top of the scroll view, to keep it there across a relayout. */
+  function topPage(): number | null {
+    if (!scrollEl || !pagesEl) return null
+    const top = scrollEl.scrollTop
+    for (const w of pagesEl.children) {
+      const el = w as HTMLElement
+      if (el.offsetTop + el.offsetHeight > top) return Number(el.dataset.page)
+    }
+    return null
+  }
+
+  function relayout() {
+    const keep = topPage()
+    clearRenderedPages()
+    void layoutPages(keep)
   }
 
   async function loadPDF() {
@@ -161,73 +193,137 @@
       pageCount = pdfDoc.numPages
       loading = false
       pendingResumePage = resumePage
-      renderAllPages()
       setupIntersectionObserver()
       setupResizeObserver()
+      await layoutPages(null)
     } catch (e: any) {
       error = e?.message ?? 'Failed to load PDF'
       loading = false
     }
   }
 
-  async function renderAllPages() {
-    for (let i = 1; i <= pageCount; i++) {
-      if (!pdfDoc) break
-      await renderPage(i)
+  /**
+   * One sized placeholder per page (the first page's size until a page is painted
+   * with its own), so scrolling, page jumps and the resume position work at once;
+   * the render observer paints only the pages near the viewport.
+   */
+  async function layoutPages(scrollToPage: number | null) {
+    if (!pdfDoc || !pagesEl) return
+    const token = layoutToken
+    const first = await pdfDoc.getPage(1)
+    if (token !== layoutToken || !pagesEl) return
+    const est = first.getViewport({ scale: finalScale })
+    setupRenderObserver()
+    const frag = document.createDocumentFragment()
+    for (let i = 0; i < pageCount; i++) {
+      const wrapper = document.createElement('div')
+      wrapper.className = 'relative mb-4'
+      wrapper.style.width = est.width + 'px'
+      wrapper.style.height = est.height + 'px'
+      wrapper.dataset.page = String(i)
+
+      const overlay = document.createElement('div')
+      overlay.className = 'absolute inset-0 pointer-events-auto'
+      overlay.dataset.overlay = String(i)
+      wrapper.appendChild(overlay)
+
+      const bionicOverlay = document.createElement('div')
+      bionicOverlay.className = 'absolute inset-0 pointer-events-none'
+      bionicOverlay.dataset.bionicOverlay = String(i)
+      bionicOverlay.style.zIndex = '1'
+      bionicOverlay.style.display = bionicMode ? '' : 'none'
+      bionicOverlay.setAttribute('aria-hidden', 'true')
+      wrapper.appendChild(bionicOverlay)
+      frag.appendChild(wrapper)
     }
-    // The highlight effects re-run against the rebuilt overlays.
+    pagesEl.appendChild(frag)
+    for (const w of pagesEl.children) {
+      intersectionObserver?.observe(w)
+      renderObserver?.observe(w)
+    }
+    // Open where the reader was (or where a relayout was), instantly.
+    const target = pendingResumePage ?? scrollToPage
+    pendingResumePage = null
+    if (target !== null) {
+      const w = pagesEl.querySelector(`[data-page="${target}"]`) as HTMLElement | null
+      if (w) scrollEl?.scrollTo({ top: w.offsetTop })
+    }
     layoutVersion++
   }
 
+  function setupRenderObserver() {
+    renderObserver?.disconnect()
+    renderObserver = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          const p = Number((e.target as HTMLElement).dataset.page)
+          if (e.isIntersecting) {
+            nearPages.add(p)
+            void renderPage(p + 1)
+          } else {
+            nearPages.delete(p)
+            releasePage(p)
+          }
+        }
+      },
+      { root: scrollEl, rootMargin: RENDER_MARGIN },
+    )
+  }
+
+  /** Paint one page into its placeholder, if it is still wanted when the paint ends. */
   async function renderPage(pageNum: number) {
-    if (!pdfDoc || renderedPages.has(pageNum - 1)) return
-    const page = await pdfDoc.getPage(pageNum)
-    const viewport = page.getViewport({ scale: finalScale })
-
-    const canvas = document.createElement('canvas')
-    canvas.width = viewport.width
-    canvas.height = viewport.height
-    const ctx = canvas.getContext('2d')!
-    await page.render({ canvasContext: ctx, viewport }).promise
-
-    renderedPages.set(pageNum - 1, { canvas, viewport })
-
-    const wrapper = document.createElement('div')
-    wrapper.className = 'relative mb-4'
-    wrapper.style.width = viewport.width + 'px'
-    wrapper.style.height = viewport.height + 'px'
-    wrapper.dataset.page = String(pageNum - 1)
-    wrapper.appendChild(canvas)
-
-    const overlay = document.createElement('div')
-    overlay.className = 'absolute inset-0 pointer-events-auto'
-    overlay.dataset.overlay = String(pageNum - 1)
-    wrapper.appendChild(overlay)
-
-    const bionicOverlay = document.createElement('div')
-    bionicOverlay.className = 'absolute inset-0 pointer-events-none'
-    bionicOverlay.dataset.bionicOverlay = String(pageNum - 1)
-    bionicOverlay.style.zIndex = '1'
-    bionicOverlay.style.display = bionicMode ? '' : 'none'
-    bionicOverlay.setAttribute('aria-hidden', 'true')
-    wrapper.appendChild(bionicOverlay)
-
-    pagesEl?.appendChild(wrapper)
-    // Pages render in order, so the resume page's wrapper has every page above it
-    // in place: scroll there once, instantly, instead of animating from the top.
-    if (pendingResumePage === pageNum - 1) {
-      scrollEl?.scrollTo({ top: wrapper.offsetTop })
-      pendingResumePage = null
+    const idx = pageNum - 1
+    if (!pdfDoc || renderedPages.has(idx) || paintingPages.has(idx)) return
+    const token = layoutToken
+    paintingPages.add(idx)
+    try {
+      const page = await pdfDoc.getPage(pageNum)
+      if (token !== layoutToken || !nearPages.has(idx)) return
+      const viewport = page.getViewport({ scale: finalScale })
+      const canvas = document.createElement('canvas')
+      canvas.width = viewport.width
+      canvas.height = viewport.height
+      const ctx = canvas.getContext('2d')!
+      await page.render({ canvasContext: ctx, viewport }).promise
+      const wrapper = pagesEl?.querySelector(`[data-page="${idx}"]`) as HTMLElement | null
+      if (token !== layoutToken || !nearPages.has(idx) || !wrapper) {
+        canvas.width = 0
+        canvas.height = 0
+        return
+      }
+      wrapper.style.width = viewport.width + 'px'
+      wrapper.style.height = viewport.height + 'px'
+      wrapper.insertBefore(canvas, wrapper.firstChild)
+      renderedPages.set(idx, { canvas, viewport })
+      drawHighlights(idx)
+      drawBionicText(idx)
+      if (bionicMode) {
+        canvas.style.opacity = String(BIONIC_CANVAS_OPACITY)
+        canvas.style.transition = 'opacity 0.3s ease'
+      }
+      // The highlight effects re-apply to the new page's overlays.
+      layoutVersion++
+    } finally {
+      if (token === layoutToken) paintingPages.delete(idx)
     }
-    drawHighlights(pageNum - 1)
-    drawBionicText(pageNum - 1)
+  }
 
-    if (bionicMode) {
-      canvas.style.opacity = String(BIONIC_CANVAS_OPACITY)
-      canvas.style.transition = 'opacity 0.3s ease'
+  /** Drop a page that left the window: its canvas memory, overlays and lookups. */
+  function releasePage(idx: number) {
+    const r = renderedPages.get(idx)
+    if (!r) return
+    r.canvas.width = 0
+    r.canvas.height = 0
+    r.canvas.remove()
+    renderedPages.delete(idx)
+    const overlay = pagesEl?.querySelector(`[data-overlay="${idx}"]`) as HTMLElement | null
+    if (overlay) overlay.innerHTML = ''
+    const bionicOverlay = pagesEl?.querySelector(`[data-bionic-overlay="${idx}"]`) as HTMLElement | null
+    if (bionicOverlay) bionicOverlay.innerHTML = ''
+    for (const s of sentencesByPage.get(idx) ?? []) {
+      sentenceElements.delete(s.index)
+      for (let wi = 0; wi < (s.words?.length ?? 0); wi++) wordElements.delete(wordKey(s.index, wi))
     }
-
-    intersectionObserver?.observe(wrapper)
   }
 
   function wordKey(sentenceIndex: number, wordIndex: number): string {
@@ -291,6 +387,9 @@
       overlay.appendChild(div)
       if (s.index === currentIndex && highlightEnabled) {
         div.style.backgroundColor = `color-mix(in oklab, ${highlightColor} calc(var(--highlight-alpha) * 100%), transparent)`
+      } else if (searchMatchSet.has(s.index)) {
+        // A page painted after the search ran still shows its matches.
+        applySearchHighlight(div, searchMatches.indexOf(s.index) === currentSearchIndex)
       }
       if (s.words) {
         for (let wi = 0; wi < s.words.length; wi++) {
@@ -534,8 +633,7 @@
 
   function applyZoom(level: number) {
     zoomLevel = level
-    clearRenderedPages()
-    renderAllPages()
+    relayout()
   }
 
   function zoomIn() {
@@ -568,8 +666,10 @@
   onDestroy(() => {
     window.removeEventListener('keydown', onKeyDown)
     if (bionicDebounce) clearTimeout(bionicDebounce)
+    layoutToken++
     pdfDoc?.destroy()
     intersectionObserver?.disconnect()
+    renderObserver?.disconnect()
     resizeObserver?.disconnect()
   })
 </script>
