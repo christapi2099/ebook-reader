@@ -53,6 +53,7 @@ describe('reader lifecycle', () => {
     await loadBook('b')
     await seek(5)
     await seek(3)
+    flushProgress()
     vi.mocked(api.saveProgress).mockClear()
     await loadBook('a') // a's server position is 3
     readerStore.update(s => ({ ...s, currentIndex: 3 }))

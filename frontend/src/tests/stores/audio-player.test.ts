@@ -20,6 +20,7 @@ class FakeAudio {
   muted = false
   duration = 1000
   ended = false
+  paused = true
   preload = ''
   bufferedEnd = 0
   listeners: Record<string, (() => void)[]> = {}
@@ -31,8 +32,8 @@ class FakeAudio {
   addEventListener(n: string, f: () => void) { (this.listeners[n] ??= []).push(f) }
   emit(n: string) { (this.listeners[n] ?? []).forEach(f => f()) }
   canPlayType() { return canPlay }
-  play() { log.push(`play:${this.src}`); return Promise.resolve() }
-  pause() { log.push(`pause:${this.src}`) }
+  play() { log.push(`play:${this.src}`); this.paused = false; return Promise.resolve() }
+  pause() { log.push(`pause:${this.src}`); this.paused = true }
   removeAttribute() {}
   load() {}
 }
@@ -94,21 +95,58 @@ describe('render tier player', () => {
     expect(get(audioStore).buffering).toBe(true)
   })
 
-  it('pauses before seeking before playing on click', async () => {
+  it('seeking while playing into buffered audio does not pause', async () => {
     setup()
     const e = (audioStore.play(0), el('1.0'))
     e.bufferedEnd = 5
     await flush()
     log.length = 0
-    let seeked = -1
-    Object.defineProperty(e, 'currentTime', {
-      get: () => 0, set: (v: number) => { seeked = v; log.push('seek') }, configurable: true,
-    })
+    audioStore.seek(1)
+    expect(e.currentTime).toBeCloseTo(1.1)
+    expect(get(audioStore).currentIndex).toBe(1)
+    await flush()
+    expect(log).toEqual([])
+    expect(e.paused).toBe(false)
+    expect(get(audioStore).isPlaying).toBe(true)
+  })
+
+  it('seeking into unbuffered audio keeps playing and shows buffering', async () => {
+    setup()
+    const e = (audioStore.play(0), el('1.0'))
+    e.bufferedEnd = 0.5
+    await flush()
+    log.length = 0
+    audioStore.seek(1)
+    expect(log.some(l => l.startsWith('pause'))).toBe(false)
+    expect(get(audioStore).buffering).toBe(true)
+    expect(get(audioStore).isPlaying).toBe(true)
+    e.emit('playing')
+    expect(get(audioStore).buffering).toBe(false)
+  })
+
+  it('rapid seeks: the last click wins and the highlight does not snap back', async () => {
+    setup()
+    const e = (audioStore.play(0), el('1.0'))
+    e.bufferedEnd = 5
+    await flush()
+    audioStore.seek(1)
+    audioStore.seek(0)
+    audioStore.seek(1)
+    tickAll()
+    expect(get(audioStore).currentIndex).toBe(1)
+    expect(e.currentTime).toBeCloseTo(1.1)
+  })
+
+  it('seeking while paused gates then plays', async () => {
+    setup()
+    const e = (audioStore.play(0), el('1.0'))
+    e.bufferedEnd = 5
+    await flush()
+    audioStore.pause()
+    log.length = 0
     audioStore.seek(1)
     await flush()
-    expect(seeked).toBeCloseTo(1.1)
-    expect(log.map(l => l.split(':')[0]).slice(0, 3)).toEqual(['pause', 'seek', 'play'])
-    expect(get(audioStore).currentIndex).toBe(1)
+    expect(log.map(l => l.split(':')[0])).toEqual(['pause', 'play'])
   })
 
   it('tier swap seeks to the current word start with zero socket calls', async () => {
