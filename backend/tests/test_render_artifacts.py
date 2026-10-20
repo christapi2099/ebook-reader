@@ -314,3 +314,57 @@ def test_finished_tier_survives_a_restart_and_only_for_the_same_base(tmp_path, m
     path.with_name(path.name + ".done").unlink()                  # no marker: never trusted
     ra._encode_tier(tmp_path / "base.flac", path, 1.5, 1000.5)
     assert calls == [1.5, 1.5, 1.5]
+
+
+def _fake_tier(monkeypatch, tmp_path, drift_corr):
+    """_audit_tier over 10 boundaries with _content_drift stubbed to (drift, corr)."""
+    import soundfile as sf
+    path = tmp_path / "t.flac"
+    sf.write(path, np.zeros(24000 * 20, np.float32), 24000)
+    monkeypatch.setattr(ra.ogg_opus, "check_stream", lambda p: {})
+    monkeypatch.setattr(ra, "_content_drift", lambda env, ft, c, f, claimed: drift_corr)
+    centers = np.arange(1, 11) * 1000.0
+    return lambda: ra._audit_tier("1.0", {"requested_factor": 1.0, "actual_factor": 1.0}, path,
+                                  20000.0, centers, {i: None for i in range(10)})
+
+
+def test_the_correlation_gate_alone_fails_mismatched_audio(monkeypatch, tmp_path):
+    """Zero drift is not enough: audio that does not look like the base must fail."""
+    assert ra.AUDIT_MIN_CORR == 0.6
+    assert _fake_tier(monkeypatch, tmp_path, (0.0, 0.65))() == 0.0
+    with pytest.raises(ra.RenderAuditError, match="does not match the base"):
+        _fake_tier(monkeypatch, tmp_path, (0.0, 0.55))()
+
+
+def test_skipped_flat_boundaries_are_logged(need_ffmpeg, tmp_path, caplog):
+    chunks = _chunks()
+    for i in range(0, 7):  # sentences 0..6 silent: boundary 0 and its 5 neighbours are flat
+        chunks[i] = {**chunks[i], "audio": np.zeros_like(chunks[i]["audio"])}
+    base = ra.build_base(chunks, tmp_path)
+    tiers = ra.build_tiers(base["path"], base["segments"], (1.5,), tmp_path)
+    with caplog.at_level("WARNING", logger=ra.__name__):
+        ra.drift_audit(base["path"], base["segments"], tiers, tmp_path)
+    assert any("flat" in r.getMessage() and "skipped" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("chunked", [False, True])
+def test_tiers_outside_the_current_set_are_removed(need_ffmpeg, tmp_path, monkeypatch, chunked):
+    """A tmp dir resumed from an older tier set must not publish orphan tiers."""
+    from services import tier_encode as te
+    monkeypatch.setenv("RENDER_ENCODE_WORKERS", "3" if chunked else "1")
+    monkeypatch.setattr(te, "CHUNK_S", 2.0)
+    base = ra.build_base(_chunks(), tmp_path)
+    for k in ("0.75", "1.25", "1.75"):
+        (tmp_path / f"audio_{k}.opus").write_bytes(b"old")
+        (tmp_path / f"audio_{k}.opus.done").write_text("1.000")
+    ra.build_tiers(base["path"], base["segments"], (1.5,), tmp_path)
+    left = sorted(p.name for p in tmp_path.glob("audio_*"))
+    assert all(n.startswith(("audio_1.0.opus", "audio_1.5.opus")) for n in left), left
+    assert "audio_1.5.opus" in left and "audio_1.0.opus" in left
+
+
+def test_a_hung_ffmpeg_times_out_as_an_encode_error(monkeypatch):
+    monkeypatch.setattr(ra, "FFMPEG_TIMEOUT_S", 0.2)
+    with pytest.raises(ra.RenderError, match="timed out") as ei:
+        ra._run(["sleep", "5"])
+    assert ei.value.phase == "encode"

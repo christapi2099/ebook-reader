@@ -10,6 +10,7 @@ in ``manifest["tiers"]`` (``render_store.reconcile`` relies on that).
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -20,6 +21,8 @@ import soundfile as sf
 
 from services import book_processor, ogg_opus, tier_encode
 from services.env_config import positive_int
+
+logger = logging.getLogger(__name__)
 
 SR = 24000
 BITRATE_K = 24
@@ -35,7 +38,7 @@ AUDIT_SEARCH_MS = 150.0    # lag search +/- around the manifest's claimed positi
 AUDIT_FLOOR_DB = -60.0     # envelope floor
 AUDIT_FLAT_DB = 3.0        # base window envelope std below this: nothing to align on
 AUDIT_FLAT_PROBE = 5       # neighbours tried in place of a flat boundary
-AUDIT_MIN_CORR = 0.5       # envelope correlation below this: the audio is not the base's
+AUDIT_MIN_CORR = 0.6       # envelope correlation below this: the audio is not the base's
 AUDIT_EDGE_N = 3           # the first/last N boundaries are judged on their median
 AUDIT_FACTOR_TOL = 0.01    # actual_factor within 1% of requested (or timeline within TOL_DURATION_MS)
 TOL_DURATION_MS = 150.0    # tier length vs base / factor (atempo loses ~15-33 ms)
@@ -96,8 +99,17 @@ def tier_key(t: float) -> str:
     return str(float(t))
 
 
+# A whole-tier ffmpeg on the one-ffmpeg-per-tier path (a 29 h 1.0 tier takes ~30 min
+# at libopus' ~60x real time); past this it is hung, not slow.
+FFMPEG_TIMEOUT_S = float(os.environ.get("RENDER_FFMPEG_TIMEOUT_S", str(4 * 3600)))
+
+
 def _run(cmd: list[str]) -> None:
-    r = subprocess.run(cmd, capture_output=True)
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=FFMPEG_TIMEOUT_S)
+    except subprocess.TimeoutExpired as exc:
+        raise RenderError(f"{cmd[0]} timed out after {FFMPEG_TIMEOUT_S:.0f} s",
+                          phase="encode") from exc
     if r.returncode != 0:
         raise RenderError(f"{cmd[0]} failed: {r.stderr.decode(errors='replace')[-400:]}", phase="encode")
 
@@ -234,6 +246,11 @@ def build_tiers(base_flac, segments: list[dict], tiers=None, work_dir=None, on_s
     factors = (1.0, *[float(x) for x in tiers if float(x) != 1.0])
     for stale in work.glob("audio_*.opus.part"):  # a crash mid-encode in a resumed tmp dir
         stale.unlink(missing_ok=True)
+    # A tmp dir resumed from an older tier set (0.75/1.25/1.75) must not publish orphans.
+    current = {f"audio_{tier_key(t)}.opus" for t in factors}
+    for old in [*work.glob("audio_*.opus"), *work.glob("audio_*.opus.done")]:
+        if old.name.removesuffix(".done") not in current:
+            old.unlink(missing_ok=True)
 
     def _entry(t: float, path: Path) -> dict:
         if t == 1.0:
@@ -256,6 +273,8 @@ def build_tiers(base_flac, segments: list[dict], tiers=None, work_dir=None, on_s
             unique.setdefault(tier_key(t), t)
         if on_step:
             on_step(0.0)
+        for k in unique:  # the chunked path re-encodes; a restart marker would be stale
+            _done_marker(work / f"audio_{k}.opus").unlink(missing_ok=True)
         try:
             with sf.SoundFile(base) as f:
                 base_samples = f.frames
@@ -493,6 +512,9 @@ def drift_audit(base_flac, segments: list[dict], tier_results: dict, work_dir=No
     if len(centers) and not points:
         raise RenderAuditError(
             f"no audible content near any of the {flat} sampled boundaries; nothing to audit")
+    if flat:
+        logger.warning("[audit] %d sampled boundaries skipped: flat (silent) with no audible "
+                       "neighbour; %d checked", flat, len(points))
     items = list(tier_results.items())
 
     def _one(item):
