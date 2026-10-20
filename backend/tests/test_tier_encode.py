@@ -248,6 +248,7 @@ def test_short_books_and_books_without_gaps_use_one_ffmpeg_per_tier(monkeypatch)
 
 def test_encode_workers_env(monkeypatch):
     monkeypatch.delenv("RENDER_ENCODE_WORKERS", raising=False)
+    monkeypatch.delattr(te.os, "sched_getaffinity", raising=False)
     for cpus, want in ((112, 48), (16, 8), (3, 1), (1, 1), (None, 1)):
         monkeypatch.setattr(te.os, "cpu_count", lambda c=cpus: c)
         assert te.encode_workers() == want, cpus
@@ -370,3 +371,54 @@ def test_check_stream_catches_damage(need_ffmpeg, tmp_path):
         bad.write_bytes(data)
         with pytest.raises(oo.OggError):
             oo.check_stream(bad)
+
+
+# ------------------------------------------------------------ review follow-ups
+def test_a_hung_chunk_encoder_times_out(need_ffmpeg, tmp_path, monkeypatch):
+    base = _chunked_setup(monkeypatch, tmp_path)
+    monkeypatch.setattr(te, "CHUNK_TIMEOUT_S", 0.001)
+    with pytest.raises(ra.RenderError, match="timed out") as ei:
+        ra.build_tiers(base["path"], base["segments"], (1.5,), tmp_path)
+    assert ei.value.phase == "encode"
+    assert _leftovers(tmp_path) == []
+
+
+def test_finished_tiers_are_removed_when_a_later_one_fails(need_ffmpeg, tmp_path, monkeypatch):
+    """A failure after another tier was already renamed into place removes it too."""
+    import time
+    base = _chunked_setup(monkeypatch, tmp_path)
+    real = te._encode_chunk
+
+    def late_failure(job, bitrate_k):
+        if job.tier.key == "3.0" and job.last:
+            deadline = time.monotonic() + 20
+            while not (tmp_path / "audio_1.0.opus").exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert (tmp_path / "audio_1.0.opus").exists()
+            raise te.ChunkEncodeError("tier 3.0: late boom")
+        return real(job, bitrate_k)
+
+    monkeypatch.setattr(te, "_encode_chunk", late_failure)
+    with pytest.raises(ra.RenderError, match="late boom"):
+        ra.build_tiers(base["path"], base["segments"], TIERS, tmp_path)
+    assert _leftovers(tmp_path) == []
+
+
+def test_the_final_granule_self_check_rejects_a_wrong_splice(tmp_path):
+    t = te._Tier("1.5", None, tmp_path / "x.opus", 0, 100)
+    t.head = b"OpusHead" + bytes([1, 1]) + (312).to_bytes(2, "little") + bytes(7)
+    t.total = 24000                                   # 1 s -> granule 312 + 48000
+    t._check(51, 312 + 48000)                         # consistent: no error
+    with pytest.raises(te.ChunkEncodeError, match="inconsistent"):
+        t._check(51, 312 + 48000 - 960)               # a packet's worth short
+    with pytest.raises(te.ChunkEncodeError, match="inconsistent"):
+        t._check(40, 312 + 48000)                     # too few packets for that granule
+
+
+def test_encode_workers_respects_cpu_affinity(monkeypatch):
+    monkeypatch.delenv("RENDER_ENCODE_WORKERS", raising=False)
+    monkeypatch.setattr(te.os, "cpu_count", lambda: 112)
+    monkeypatch.setattr(te.os, "sched_getaffinity", lambda pid: set(range(10)), raising=False)
+    assert te.encode_workers() == 5
+    monkeypatch.delattr(te.os, "sched_getaffinity", raising=False)
+    assert te.encode_workers() == 48

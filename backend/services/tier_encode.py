@@ -48,11 +48,21 @@ SPLIT_MARGIN = 240          # exact zeros needed each side of the splice instant
 CHUNK_S = 60.0              # target chunk length (seconds of tier audio)
 READ_SAMPLES = SR * 4       # PCM read from the atempo pipe at a time
 PROGRESS_EVERY_S = 0.5      # min spacing of progress callbacks
+CHUNK_TIMEOUT_S = 600.0     # one ~61 s chunk takes ~1 s; past this the ffmpeg is hung
+
+
+def _cpus() -> int:
+    """CPUs this process may run on (affinity / cgroup cpusets), else the machine's count."""
+    try:
+        return len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        return os.cpu_count() or 2
 
 
 def encode_workers() -> int:
-    """Concurrent chunk encodes: ``RENDER_ENCODE_WORKERS`` or ``min(48, cpus // 2)``."""
-    return positive_int("RENDER_ENCODE_WORKERS", min(48, max(1, (os.cpu_count() or 2) // 2)))
+    """Concurrent chunk encodes: ``RENDER_ENCODE_WORKERS`` or ``min(48, cpus // 2)``,
+    cpus being the ones this process may use."""
+    return positive_int("RENDER_ENCODE_WORKERS", min(48, max(1, _cpus() // 2)))
 
 
 class ChunkEncodeError(RuntimeError):
@@ -168,7 +178,11 @@ class _Tier:
 def _encode_chunk(job: _Job, bitrate_k: int) -> tuple[list[bytes], bytes, bytes, int, int | None]:
     cmd = ["ffmpeg", "-nostdin", "-v", "error", "-f", "s16le", "-ar", str(SR), "-ac", "1",
            "-i", "pipe:0", "-c:a", "libopus", "-b:a", f"{bitrate_k}k", "-f", "ogg", "pipe:1"]
-    r = subprocess.run(cmd, input=job.data, capture_output=True)
+    try:
+        r = subprocess.run(cmd, input=job.data, capture_output=True, timeout=CHUNK_TIMEOUT_S)
+    except subprocess.TimeoutExpired as exc:
+        raise ChunkEncodeError(f"tier {job.tier.key} chunk {job.k}: ffmpeg timed out after "
+                               f"{CHUNK_TIMEOUT_S:.0f} s") from exc
     if r.returncode != 0:
         raise ChunkEncodeError(f"tier {job.tier.key} chunk {job.k}: ffmpeg failed: "
                                f"{r.stderr.decode(errors='replace')[-300:]}")
