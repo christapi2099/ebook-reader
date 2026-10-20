@@ -243,3 +243,34 @@ def test_kokoro_onnx_engines_are_registered_with_tolerances():
         seg["words"][-1]["end_ms"] = seg["end_ms"]
     assert rb.diff_snapshots(_snap("kokoro-onnx"), fresh, engine="kokoro-onnx").ok
     assert not rb.diff_snapshots(_snap("kokoro-onnx"), fresh, engine="kokoro-cpu").ok
+
+
+def test_unspeakable_sentence_becomes_silence_instead_of_failing_the_render(tmp_path, monkeypatch):
+    """A lone "-1" lifted from a figure yields no phonemes (empty audio); that must not abort a
+    multi-hour render. It is rendered as a short silent gap with estimated word times."""
+    import numpy as np
+
+    import db.database as _db
+    import storage
+    from services import render_worker as rw
+
+    monkeypatch.setattr(_db, "engine", _db.engine)
+    monkeypatch.setattr(storage, "RENDERS_DIR", storage.RENDERS_DIR)
+    real_call = rb.FakeSynth.__call__
+
+    def call(self, text, voice):
+        if text == "-1":
+            return rw.SynthResult(np.zeros(0, dtype=np.float32), 1.0)
+        return real_call(self, text, voice)
+
+    monkeypatch.setattr(rb.FakeSynth, "__call__", call)
+    corpus = list(rb.CORPUS[:3]) + ["-1"] + list(rb.CORPUS[3:5])
+    root = tmp_path / "r"
+    root.mkdir()
+    gen, aligned = rb.render_once("fake", corpus, root)
+    snap = rb.snapshot(gen, "fake", corpus, aligned)
+    assert snap["verify"]["ok"], snap["verify"]
+    segments = next(iter(snap["manifest"]["tiers"].values()))["segments"]
+    silent = [s for s in segments if s["end_ms"] - s["start_ms"] <= rw.SILENT_SENTENCE_MS + 50
+              and s["words"] and s["words"][0]["timing_source"] == "estimated"]
+    assert silent, "the unspeakable sentence should appear as a short estimated-timing segment"

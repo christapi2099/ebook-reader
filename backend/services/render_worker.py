@@ -51,7 +51,7 @@ from db.models import Book, Sentence
 from services import (
     book_processor, render_artifacts as ra, render_jobs as rj, render_store as rs,
 )
-from services.aligner import align_sentence
+from services.aligner import align_sentence, distribute_by_syllables
 from services.env_config import positive_int
 from services.remap import compute_remap
 from services.render_state import JOB_ERROR, JOB_PENDING
@@ -260,6 +260,8 @@ class _SynthWindow:
 
 
 STATS_EVERY = 10
+# A sentence the engine cannot speak (no phonemes) is rendered as this much silence.
+SILENT_SENTENCE_MS = 300
 
 
 def _stats(book_id: str, **kw) -> None:
@@ -702,8 +704,16 @@ def _render(book_id, worker_id, synthesizer, aligner, fallback, extractor, box_p
                         f"base effective_speed {res.effective_speed} != 1.0",
                         phase="base_speed_mismatch")
                 if audio.size == 0:
-                    raise ra.RenderError(f"sentence {idx} synthesized no audio",
-                                         phase="synthesize")
+                    # Nothing speakable (a lone "-1" or "0" lifted from a figure or
+                    # matrix): the engine's G2P yields no phonemes. One such sentence
+                    # must not abort a multi-hour render, so give it a short silent
+                    # gap with estimated word times; the reader still steps through it.
+                    logger.warning("[render] %s sentence %s %r synthesized no audio; "
+                                   "using %d ms of silence", book_id, idx, r["text"][:40],
+                                   SILENT_SENTENCE_MS)
+                    audio = np.zeros(int(SR * SILENT_SENTENCE_MS / 1000), dtype=np.float32)
+                    timings = distribute_by_syllables(
+                        SILENT_SENTENCE_MS, r["text"].split() or [r["text"]])
                 dur_ms = len(audio) * 1000.0 / SR
                 if timings is None:
                     timings = align_sentence(audio, SR, r["text"],
