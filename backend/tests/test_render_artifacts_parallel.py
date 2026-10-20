@@ -118,21 +118,20 @@ def test_failure_aborts_cleanly(tmp_path, monkeypatch):
     assert threading.active_count() == before
 
 
-def test_audit_failure_aborts(tmp_path, monkeypatch):
-    _fake_env(tmp_path, monkeypatch, 4)
-    base = tmp_path / "base.flac"
-    sf.write(base, np.zeros(24000 * 3, np.float32), 24000)
-    segs = [{"index": i, "start_ms": i * 1000.0, "end_ms": i * 1000.0 + 800, "gap_ms": 200,
-             "words": []} for i in range(2)]
-    results = {k: {"requested_factor": float(k), "actual_factor": float(k), "segments": []}
-               for k in ("1.0", "1.5", "2.0")}
-    monkeypatch.setattr(ra, "_run", lambda cmd: None)
-    monkeypatch.setattr(ra, "_detect_file",
-                        lambda p, exp: ra._detect(np.zeros(24000 * 3, np.float32), exp))
+def test_audit_failure_aborts(need_ffmpeg, tmp_path, monkeypatch):
+    """One bad tier fails the parallel audit cleanly: drift_audit phase, no
+    threads left behind, no scratch files (the audit only reads)."""
+    monkeypatch.setenv("RENDER_TIER_WORKERS", "4")
+    base = ra.build_base(_chunks(), tmp_path)
+    tiers = ra.build_tiers(base["path"], base["segments"], (1.5, 2.0, 3.0), tmp_path)
+    (tmp_path / "audio_2.0.opus").write_bytes(b"x")
+    before_files = set(tmp_path.iterdir())
+    before = threading.active_count()
     with pytest.raises(ra.RenderError) as ei:
-        ra.drift_audit(base, segs, results, tmp_path)
-    assert ei.value.phase == "drift_audit"
-    assert not (tmp_path / "audit_markers.flac").exists()
+        ra.drift_audit(base["path"], base["segments"], tiers, tmp_path)
+    assert ei.value.phase == "drift_audit" and "tier 2.0" in str(ei.value)
+    assert threading.active_count() == before
+    assert set(tmp_path.iterdir()) == before_files
 
 
 def test_env_parsing(monkeypatch):

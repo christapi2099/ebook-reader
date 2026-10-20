@@ -764,6 +764,8 @@ def _render(book_id, worker_id, synthesizer, aligner, fallback, extractor, box_p
             fingerprint=target, base_effective_speed=1.0,
             mixed_backends=synth.mixed)
         del manifest
+        # The audit no longer writes scratch files; this only clears leftovers of
+        # the old marker audit from a tmp dir resumed after an upgrade.
         for p in tmp.glob("audit_*"):
             p.unlink(missing_ok=True)
 

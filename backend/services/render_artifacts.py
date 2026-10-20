@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from services import book_processor
+from services import book_processor, ogg_opus
 from services.env_config import positive_int
 
 SR = 24000
@@ -27,8 +27,16 @@ GAP_POLICY = book_processor.DEFAULT_GAP_POLICY
 SAMPLE_EVERY = 200
 TOL_SAMPLED_MS = 60.0
 TOL_EDGE_MS = 30.0
-MARK_HZ = 5000.0
-MARK_MS = 40.0
+# Drift audit on the published tier files (content match, no markers).
+AUDIT_HALF_MS = 500.0      # 1x audio compared each side of a boundary
+AUDIT_SEARCH_MS = 150.0    # lag search +/- around the manifest's claimed position
+AUDIT_FLOOR_DB = -60.0     # envelope floor
+AUDIT_FLAT_DB = 3.0        # base window envelope std below this: nothing to align on
+AUDIT_FLAT_PROBE = 5       # neighbours tried in place of a flat boundary
+AUDIT_MIN_CORR = 0.5       # envelope correlation below this: the audio is not the base's
+AUDIT_EDGE_N = 3           # the first/last N boundaries are judged on their median
+AUDIT_FACTOR_TOL = 0.01    # actual_factor must be within 1% of requested
+TOL_DURATION_MS = 150.0    # tier length vs base / factor (atempo loses ~15-33 ms)
 
 
 class RenderError(RuntimeError):
@@ -245,119 +253,193 @@ def build_tiers(base_flac, segments: list[dict], tiers=None, work_dir=None, on_s
 
 
 def _boundaries(segments: list[dict]) -> list[float]:
-    """Gap-center times (1x ms) of boundaries that have a gap to hold a marker."""
+    """Gap-centre times (1x ms) of the boundaries with a real pause (>= 80 ms)."""
     return [s["end_ms"] + s["gap_ms"] / 2 for s in segments if s["gap_ms"] >= 80]
 
 
-def _detect(y: np.ndarray, expected_ms: np.ndarray, half_ms: float = 150.0) -> np.ndarray:
-    return _detect_windows(lambda lo, hi: y[lo:hi], len(y), expected_ms, half_ms)
+def _read_window(f, lo: int, hi: int) -> np.ndarray:
+    """Samples ``[lo, hi)`` of an open SoundFile, zero-padded outside the file.
+
+    Only this window is decoded, so memory stays flat however long the book is
+    (whole-book arrays were ~80 GB for a 29 h book)."""
+    out = np.zeros(max(0, hi - lo), dtype=np.float32)
+    a, b = max(0, lo), min(f.frames, hi)
+    if b > a:
+        f.seek(a)
+        got = f.read(b - a, dtype="float32", always_2d=True)[:, 0]
+        out[a - lo:a - lo + len(got)] = got
+    return out
 
 
-def _detect_windows(read, n: int, expected_ms: np.ndarray, half_ms: float = 150.0) -> np.ndarray:
-    """Locate each marker tone near its expected time.
-
-    ``read(lo, hi)`` returns samples ``[lo, hi)`` of an ``n``-sample signal. Only a window
-    around each marker is demodulated, so memory stays flat however long the book is
-    (whole-book arrays were ~80 GB for a 29 h book).
-    """
-    k = int(SR * 0.004)
-    found = []
-    for e in expected_ms:
-        lo = int(max(0, e - half_ms) / 1000 * SR)
-        hi = int(min(n / SR * 1000, e + half_ms) / 1000 * SR)
-        if hi - lo < 3:
-            raise RenderAuditError(f"marker window empty near {e:.0f} ms")
-        start, stop = max(0, lo - k), min(n, hi + k)  # margin so the smoothing edge is exact
-        seg = np.asarray(read(start, stop), dtype=np.float64)
-        t = (start + np.arange(len(seg))) / SR
-        z = seg * np.exp(-2j * np.pi * MARK_HZ * t)
-        env = np.abs(np.convolve(z, np.ones(k) / k, mode="same"))
-        w = env[lo - start:lo - start + (hi - lo)]
-        pk = w.max()
-        a0 = int(np.argmax(w))
-        if pk < 6 * np.median(w) + 0.01 or a0 in (0, len(w) - 1):
-            raise RenderAuditError(f"marker not detected near {e:.0f} ms")
-        m = w > 0.5 * pk
-        l = r = a0
-        while l > 0 and m[l - 1]:
-            l -= 1
-        while r < len(w) - 1 and m[r + 1]:
-            r += 1
-        idx = np.arange(l, r + 1)
-        found.append((lo + float((idx * w[idx]).sum() / w[idx].sum())) / SR * 1000)
-    return np.array(found)
+def _envelope(f, lo_ms: float, hi_ms: float) -> tuple[np.ndarray, np.ndarray]:
+    """dB RMS envelope (4 ms window, 1 ms hop) of ``f`` over [lo_ms, hi_ms]: (times_ms, db)."""
+    sr = f.samplerate
+    hop, win = sr // 1000, 4 * sr // 1000
+    lo, hi = int(lo_ms * sr / 1000), int(hi_ms * sr / 1000)
+    x = _read_window(f, lo, hi).astype(np.float64)
+    n = (len(x) - win) // hop + 1
+    if n <= 0:
+        return np.zeros(0), np.zeros(0)
+    c = np.concatenate([[0.0], np.cumsum(x * x)])
+    starts = np.arange(n) * hop
+    rms = np.sqrt(np.maximum(c[starts + win] - c[starts], 0.0) / win)
+    db = np.maximum(20 * np.log10(np.maximum(rms, 1e-9)), AUDIT_FLOOR_DB)
+    t = (lo + starts + win / 2) / sr * 1000
+    return t, db
 
 
-def _detect_file(path, expected_ms: np.ndarray) -> np.ndarray:
-    with sf.SoundFile(path) as f:
-        def read(lo, hi):
-            f.seek(lo)
-            return f.read(hi - lo, dtype="float32")
-        return _detect_windows(read, f.frames, expected_ms)
+def _base_window(fb, c_ms: float):
+    """1x envelope around a boundary, or None when it is flat (nothing to align on)."""
+    t, db = _envelope(fb, c_ms - AUDIT_HALF_MS - 10, c_ms + AUDIT_HALF_MS + 10)
+    inside = (t >= c_ms - AUDIT_HALF_MS) & (t <= c_ms + AUDIT_HALF_MS)
+    if len(t) == 0 or db[inside].std() < AUDIT_FLAT_DB:
+        return None
+    return t, db
+
+
+def _content_drift(base_env, ft, c_ms: float, factor: float, claimed_ms: float):
+    """Where the 1x content around ``c_ms`` really sits in the tier file.
+
+    The base envelope, time-scaled by ``1/factor``, is cross-correlated with the tier
+    envelope around ``claimed_ms`` (lags +/-AUDIT_SEARCH_MS, parabolic refinement).
+    Returns (drift_ms, correlation)."""
+    tb, eb = base_env
+    half = AUDIT_HALF_MS / factor
+    v = np.arange(-half, half, 1.0)
+    ref = np.interp(c_ms + v * factor, tb, eb)
+    ref = ref - ref.mean()
+    tt, et = _envelope(ft, claimed_ms - half - AUDIT_SEARCH_MS - 10,
+                       claimed_ms + half + AUDIT_SEARCH_MS + 10)
+    lags = np.arange(-AUDIT_SEARCH_MS, AUDIT_SEARCH_MS + 1, 1.0)
+    if len(tt) == 0:
+        return float("nan"), 0.0
+    y = np.interp(claimed_ms + lags[:, None] + v[None, :], tt, et)
+    y = y - y.mean(axis=1, keepdims=True)
+    den = np.linalg.norm(y, axis=1) * np.linalg.norm(ref)
+    sc = np.where(den > 1e-9, (y @ ref) / np.maximum(den, 1e-12), 0.0)
+    k = int(np.argmax(sc))
+    d = float(lags[k])
+    if 0 < k < len(sc) - 1:
+        a, b, c = sc[k - 1], sc[k], sc[k + 1]
+        den2 = a - 2 * b + c
+        if den2 < 0:
+            d += 0.5 * (a - c) / den2
+    return d, float(sc[k])
+
+
+def _audit_points(fb, centers: np.ndarray) -> tuple[dict, int]:
+    """Boundaries to check: every SAMPLE_EVERY-th plus the first and last
+    AUDIT_EDGE_N, each with its 1x envelope. A flat (silent) window is replaced by
+    the next boundary with audible content (up to AUDIT_FLAT_PROBE tries); the ones
+    that stay flat are counted, never silently passed."""
+    n = len(centers)
+    wanted = sorted(set(range(0, n, SAMPLE_EVERY)) | set(range(min(AUDIT_EDGE_N, n)))
+                    | set(range(max(0, n - AUDIT_EDGE_N), n)))
+    points: dict[int, tuple] = {}
+    flat = 0
+    for i in wanted:
+        step = -1 if i >= n - AUDIT_EDGE_N else 1  # end boundaries probe inwards
+        for j in (i + step * k for k in range(AUDIT_FLAT_PROBE + 1)):
+            if not 0 <= j < n or j in points:
+                continue
+            env = _base_window(fb, centers[j])
+            if env is not None:
+                points[j] = env
+                break
+        else:
+            flat += 1
+    return dict(sorted(points.items())), flat
+
+
+def _audit_tier(key: str, info: dict, path: Path, base_ms: float, centers: np.ndarray,
+                points: dict) -> float:
+    """Audit one published tier file against the base; returns its max |drift| (ms)."""
+    req, act = float(info["requested_factor"]), float(info["actual_factor"])
+    if abs(act / req - 1) > AUDIT_FACTOR_TOL:
+        raise RenderAuditError(
+            f"tier {key}: actual_factor {act:.4f} is more than "
+            f"{AUDIT_FACTOR_TOL:.0%} off requested {req}")
+    try:
+        ogg_opus.check_stream(path)  # every page: CRC, sequence, EOS (no decode, ~1 s for 29 h)
+    except (OSError, ogg_opus.OggError) as exc:
+        raise RenderAuditError(f"tier {key}: {path.name} is corrupt: {exc}") from exc
+    try:
+        ft = sf.SoundFile(path)
+    except Exception as exc:  # noqa: BLE001 - any decode failure is an audit failure
+        raise RenderAuditError(f"tier {key}: cannot read {path.name}: {exc}") from exc
+    with ft:
+        tier_ms = ft.frames / ft.samplerate * 1000
+        want = base_ms / req
+        if abs(tier_ms - want) > TOL_DURATION_MS:
+            raise RenderAuditError(
+                f"tier {key}: {path.name} lasts {tier_ms:.0f} ms, expected {want:.0f} ms "
+                f"(base / {req}); truncated or the wrong tier")
+        drifts: dict[int, float] = {}
+        try:
+            for i, env in points.items():
+                d, corr = _content_drift(env, ft, centers[i], req, centers[i] / act)
+                if not np.isfinite(d) or corr < AUDIT_MIN_CORR:
+                    raise RenderAuditError(
+                        f"tier {key}: audio does not match the base at boundary {i} "
+                        f"(correlation {corr:.2f} < {AUDIT_MIN_CORR})")
+                if abs(d) > TOL_SAMPLED_MS:
+                    raise RenderAuditError(
+                        f"tier {key}: drift {d:+.1f} ms at boundary {i} exceeds "
+                        f"{TOL_SAMPLED_MS:.0f} ms")
+                drifts[i] = d
+        except sf.LibsndfileError as exc:
+            raise RenderAuditError(f"tier {key}: cannot decode {path.name}: {exc}") from exc
+    if not drifts:
+        return 0.0
+    idx = list(drifts)
+    # The ends are judged on the median of a few boundaries: one envelope match
+    # can be a few ms off on its own, while a real offset moves all of them.
+    for name, group in (("first", idx[:AUDIT_EDGE_N]), ("last", idx[-AUDIT_EDGE_N:])):
+        m = float(np.median([drifts[i] for i in group]))
+        if abs(m) > TOL_EDGE_MS:
+            raise RenderAuditError(
+                f"tier {key}: drift {m:+.1f} ms (median of the {name} {len(group)} "
+                f"boundaries) exceeds {TOL_EDGE_MS:.0f} ms")
+    return float(max(abs(d) for d in drifts.values()))
 
 
 def drift_audit(base_flac, segments: list[dict], tier_results: dict, work_dir=None,
                 on_step=None) -> dict:
-    """Marker-tone drift audit; fills max_drift_ms per tier, raises RenderAuditError."""
+    """Audit the real tier files; fills max_drift_ms per tier, raises RenderAuditError.
+
+    Every Ogg page of each tier file is checked (CRC, sequence, EOS), then the
+    file is decoded only around sampled sentence boundaries (seeked windows,
+    flat memory). Its content there is matched against the 1x base
+    time-scaled by the tier's factor, and must sit where the manifest's timeline
+    (1x time / actual_factor) says it does. The file must also decode and last
+    base / factor. ``on_step(fraction)`` reports 0..1 as tiers finish.
+    """
     base = Path(base_flac)
     work = Path(work_dir) if work_dir else base.parent
     centers = np.array(_boundaries(segments))
-    if len(centers) == 0:
-        return {}
-    pick = sorted(set(range(0, len(centers), SAMPLE_EVERY)) | {0, len(centers) - 1})
-    x, _ = sf.read(base, dtype="float32")
-    n = int(SR * MARK_MS / 1000)
-    tone = (0.6 * np.hanning(n) * np.sin(2 * np.pi * MARK_HZ * np.arange(n) / SR)).astype(np.float32)
-    for i in pick:
-        c = int(centers[i] / 1000 * SR)
-        x[c - n // 2:c - n // 2 + n] += tone
-    mbase = work / "audit_markers.flac"
-    np.clip(x, -1, 1, out=x)
-    sf.write(mbase, x, SR, format="FLAC", subtype="PCM_16")
-    exp = centers[pick]
-    report = {}
+    with sf.SoundFile(base) as fb:
+        base_ms = fb.frames / fb.samplerate * 1000
+        points, flat = _audit_points(fb, centers) if len(centers) else ({}, 0)
+    if len(centers) and not points:
+        raise RenderAuditError(
+            f"no audible content near any of the {flat} sampled boundaries; nothing to audit")
+    items = list(tier_results.items())
 
-    def _audit_one(item):
+    def _one(item):
         key, info = item
-        opus = work / f"audit_{key}.opus"
-        wav = work / f"audit_{key}.wav"
-        _encode(mbase, opus, info["requested_factor"])
-        _run(["ffmpeg", "-y", "-v", "error", "-i", str(opus), "-ar", str(SR), "-ac", "1", str(wav)])
-        lin = exp / info["actual_factor"]
-        drift = _detect_file(wav, lin) - lin
-        for j, d in enumerate(drift):
-            edge = pick[j] in (0, len(centers) - 1)
-            tol = TOL_EDGE_MS if edge else TOL_SAMPLED_MS
-            if abs(d) > tol:
-                raise RenderAuditError(
-                    f"tier {key}: drift {d:+.1f} ms at boundary {pick[j]} exceeds {tol:.0f} ms")
-        opus.unlink(missing_ok=True)
-        wav.unlink(missing_ok=True)
-        return float(np.abs(drift).max())
+        path = Path(info.get("path") or work / f"audio_{key}.opus")
+        return _audit_tier(key, info, path, base_ms, centers, points)
 
-    try:
-        items = list(tier_results.items())
-        workers = tier_workers()
-        if workers <= 1 or len(items) <= 1:
-            for done, item in enumerate(items):
-                if on_step:
-                    on_step(done / len(items))
-                item[1]["max_drift_ms"] = _audit_one(item)
-                report[item[0]] = item[1]["max_drift_ms"]
-        else:
-            # audit_<key>.{opus,wav} are keyed by the unique tier_results key, and
-            # mbase is only read, so concurrent tiers share no writable file.
-            if on_step:
-                on_step(0.0)
-            drifts = _run_ordered(items, _audit_one, workers,
-                                  (lambda n: on_step(n / len(items))) if on_step else None)
-            for (key, info), d in zip(items, drifts):
-                info["max_drift_ms"] = d
-                report[key] = d
-        if on_step:
-            on_step(1.0)
-    finally:
-        mbase.unlink(missing_ok=True)
+    if on_step:
+        on_step(0.0)
+    drifts = _run_ordered(items, _one, tier_workers(),
+                          (lambda n: on_step(n / len(items))) if on_step else None)
+    report = {}
+    for (key, info), d in zip(items, drifts):
+        info["max_drift_ms"] = d
+        report[key] = d
+    if on_step:
+        on_step(1.0)
     return report
 
 
