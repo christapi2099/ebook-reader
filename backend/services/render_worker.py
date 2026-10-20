@@ -102,10 +102,13 @@ class _Stop(Exception):
 # ----------------------------------------------------------------- defaults
 class _EngineSynth:
     """Blocking one-sentence seam over ``tts_engine.synthesize_render_result`` (one task
-    on the shared ``_synthesis_pool``). Carries no tokens, so words are CTC-aligned.
+    on the shared ``_synthesis_pool``). The serial path returns the engine's native timings or
+    Kokoro tokens with the audio; whatever it returns, words are CTC-aligned downstream.
 
-    ``parallel_safe``/``for_worker`` let the render fan out over independent engine
-    clones when the engine allows it (Piper); live playback keeps the shared pool."""
+    ``parallel_safe``/``for_worker`` let the render fan out when the engine allows it: Piper and
+    Kokoro ONNX clone per thread, the torch GPU engine uses its worker-process pool
+    (``open_workers``/``close_workers``/``default_workers``/``window_threads``). Live playback
+    keeps the shared pool."""
 
     def __init__(self, engine=None, speed: float = 1.0):
         self.engine, self.speed = engine, speed
@@ -118,6 +121,26 @@ class _EngineSynth:
     def parallel_safe(self) -> bool:
         eng = self._engine()
         return bool(eng is not None and getattr(eng, "parallel_safe", False))
+
+    @property
+    def default_workers(self) -> int:
+        """Workers when ``RENDER_SYNTH_WORKERS`` is unset (the engine's own default, else 1)."""
+        fn = getattr(self._engine(), "default_render_workers", None)
+        return int(fn()) if callable(fn) else 1
+
+    def open_workers(self, requested: int) -> int:
+        """Let the engine start its worker resources (GPU processes); -> usable workers."""
+        fn = getattr(self._engine(), "open_render_workers", None)
+        return int(fn(requested)) if callable(fn) else requested
+
+    def window_threads(self, workers: int) -> int:
+        fn = getattr(self._engine(), "render_window_threads", None)
+        return int(fn(workers)) if callable(fn) else workers
+
+    def close_workers(self) -> None:
+        fn = getattr(self._engine(), "close_render_workers", None)
+        if callable(fn):
+            fn()
 
     def __call__(self, text: str, voice: str) -> SynthResult:
         import asyncio
@@ -140,10 +163,12 @@ class _EngineSynth:
 
         def _synth(text: str, voice: str) -> SynthResult:
             asyncio.run(render_throttle.await_playback_idle())  # still yield to playback
-            audio, native = clone.synthesize_for_render(text, voice)
+            audio, native, *rest = clone.synthesize_for_render(text, voice)
             if audio is None:
                 raise ra.RenderError("synthesis produced no audio", phase="synthesize")
-            return SynthResult(np.asarray(audio, dtype=np.float32), 1.0, native, None)
+            # The GPU worker pool also returns Kokoro tokens (3rd item), like the serial path.
+            return SynthResult(np.asarray(audio, dtype=np.float32), 1.0, native,
+                               rest[0] if rest else None)
 
         return _synth
 
@@ -160,6 +185,13 @@ def synth_workers_setting() -> int:
     return positive_int("RENDER_SYNTH_WORKERS", 1)
 
 
+def synth_workers_explicit() -> Optional[int]:
+    """The value of ``RENDER_SYNTH_WORKERS`` when it is set to something usable, else None."""
+    from services.env_config import positive_number
+    v = positive_number(os.environ.get("RENDER_SYNTH_WORKERS"), "RENDER_SYNTH_WORKERS")
+    return None if v is None else int(v)
+
+
 def synth_threads_total() -> int:
     """``RENDER_THREADS_TOTAL`` (default: cpu count), split across synthesis workers."""
     return positive_int("RENDER_THREADS_TOTAL", os.cpu_count() or 1)
@@ -172,9 +204,13 @@ _warned_serial = False
 
 
 def resolve_synth_workers(synthesizer) -> int:
-    """Workers actually used: the setting, but 1 unless the synthesizer is parallel-safe."""
+    """Workers actually used: an explicit ``RENDER_SYNTH_WORKERS`` always wins, otherwise the
+    engine's own default (4 on the torch GPU engine, 1 elsewhere); 1 unless the synthesizer is
+    parallel-safe."""
     global _warned_serial
-    n = synth_workers_setting()
+    n = synth_workers_explicit()
+    if n is None:
+        n = int(getattr(synthesizer, "default_workers", 1) or 1)
     if n <= 1:
         return 1
     if not (getattr(synthesizer, "parallel_safe", False)
@@ -664,14 +700,6 @@ def _render(book_id, worker_id, synthesizer, aligner, fallback, extractor, box_p
     last_renew = clock()
     chunks: list[dict] = []
     window: Optional[_SynthWindow] = None
-    workers = resolve_synth_workers(synthesizer)
-    if workers > 1:
-        threads = max(1, min(MAX_THREADS_PER_WORKER, synth_threads_total() // workers))
-        logger.info("[render] %s: %d synthesis workers x %d threads", book_id, workers, threads)
-        window = _SynthWindow(todo, voice, synth, synthesizer.for_worker, workers, threads,
-                              lambda i: _chunk_done(tmp, i), heartbeat.touch,
-                              aligner or _shared_aligner(workers))
-
     def await_synth(fut: cf.Future):
         """Wait for a window result, still honouring pause/cancel/supersede promptly."""
         while not cf.wait([fut], timeout=0.25).done:
@@ -679,6 +707,19 @@ def _render(book_id, worker_id, synthesizer, aligner, fallback, extractor, box_p
         return fut.result()
 
     try:
+        # Inside the try: a failure after the GPU worker processes started must still close them.
+        workers = resolve_synth_workers(synthesizer)
+        opener = getattr(synthesizer, "open_workers", None)
+        if workers > 1 and callable(opener):
+            workers = opener(workers)  # may start GPU processes; capped, can come back as 1
+        if workers > 1:
+            threads = max(1, min(MAX_THREADS_PER_WORKER, synth_threads_total() // workers))
+            logger.info("[render] %s: %d synthesis workers x %d threads", book_id, workers, threads)
+            wt = getattr(synthesizer, "window_threads", None)
+            window = _SynthWindow(todo, voice, synth, synthesizer.for_worker,
+                                  wt(workers) if callable(wt) else workers, threads,
+                                  lambda i: _chunk_done(tmp, i), heartbeat.touch,
+                                  aligner or _shared_aligner(workers))
         n = len(todo)
         for k, r in enumerate(todo):
             checkpoint_job()
@@ -778,6 +819,9 @@ def _render(book_id, worker_id, synthesizer, aligner, fallback, extractor, box_p
     finally:
         if window is not None:
             window.close()
+        closer = getattr(synthesizer, "close_workers", None)
+        if callable(closer):
+            closer()  # frees the GPU worker processes' VRAM
         close = getattr(provider, "close", None)
         if close:
             close()

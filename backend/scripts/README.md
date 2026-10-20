@@ -7,7 +7,8 @@ All of these leave the app database and the renders directory untouched unless n
 | Script | Purpose | Example | Output / cost |
 |---|---|---|---|
 | `render_baseline.py` | Golden compare of a full real render (synth, CTC align, tiers, manifest). Engines: `piper`, `kokoro-cpu`, `kokoro-onnx`, `kokoro-gpu`, `*-replay`, `fake`. | `render_baseline.py compare --engine kokoro-gpu --golden .baseline/kokoro-cpu.json` | exit 0 = within tolerance. ~40 s. Goldens in `.baseline/` (not in git). |
-| `bench_gpu_synth.py` | Kokoro speed on real book sentences with 1..N parallel processes. | `HSA_OVERRIDE_GFX_VERSION=10.3.0 .venv-rocm/bin/python scripts/bench_gpu_synth.py --book-prefix 6f2c --procs 1,2,4 --out ../docs/research/gpu-synth-bench.json` | speed_x per process count. ~3 min. Read-only DB. |
+| `bench_gpu_synth.py` | Kokoro speed on real book sentences with 1..N parallel processes, or N threads (own pipeline each) in one process (`--threads 4`). | `HSA_OVERRIDE_GFX_VERSION=10.3.0 .venv-rocm/bin/python scripts/bench_gpu_synth.py --book-prefix 6f2c --procs 1,2,4 --out ../docs/research/gpu-synth-bench.json` | speed_x per process count. ~3 min. Read-only DB. |
+| `render_timed.py` | Timed real render of N sentences of a book (sandbox DB, real GPU engine) for a given `RENDER_SYNTH_WORKERS`: wall, speed_x, peak VRAM/RAM. | `RENDER_SYNTH_WORKERS=4 HSA_OVERRIDE_GFX_VERSION=10.3.0 .venv-rocm/bin/python scripts/render_timed.py --book-prefix 6f2c --sentences 300` | ~3 min per run. Read-only app DB. |
 | `bench_modal.py` | Time the deployed Modal Kokoro app (cold/warm, chapter in K requests). | `scripts/bench_modal.py book.pdf --parallel 1,4,8` | Spends real GPU money (cents). |
 | `serve_test_instance.py` | Throwaway backend (+ optional frontend preview) from ANY worktree, own DB/renders dir under /tmp, refuses prod ports 8000/4173. | `scripts/serve_test_instance.py --worktree .worktrees/gpu-synth-workers --port 8012 --python backend/.venv-rocm/bin/python --engine gpu --rocm --frontend-build <dir> --preview-port 4175`; `--stop` to end. | URLs printed. |
 | `verify_render.py` | Check a published render on disk. | see `--help` | read-only |
@@ -32,6 +33,14 @@ All of these leave the app database and the renders directory untouched unless n
   schema 1 file 357.8 MB (the old endpoint re-serialized it: 334.8 MB, 40.9 s to first byte); slim 38.4 MB,
   6.1 MB gzipped; 8 tiers x 18,539 segments x 246,201 words checked, max |err| 0 ms (the division is bit-identical).
   node `JSON.parse`: schema 1 ~1.7 s and ~360 MB heap, slim ~170 ms and ~38 MB.
+
+- 2026-10-20, same card, 80 sentences/worker, other render using the CPU (load ~12): 4 threads in
+  one process (own KPipeline each) 29.1-29.2x vs 4 processes 45.4-46.0x (threads = 64%, so the GPU
+  render uses worker processes, `services/kokoro_process_pool.py`). 1 thread 23.7x.
+- 2026-10-20, `render_timed.py`, 300 Deep Learning sentences (2100 s of audio), tier encode + drift audit included,
+  CPU busy with another render: 1 worker 188 s wall (synthesize phase 126 s, 16.7x), 4 workers about 159 s wall
+  (synthesize phase 85 s incl. ~20 s process start-up, 24.7x; about 33x after start-up). Peak VRAM 1.5 GB vs 9.0 GB
+  above idle; peak RAM (PSS, process tree) 4.8 GB vs 12.6 GB.
 
 ## Testing a full GPU render in the app
 
