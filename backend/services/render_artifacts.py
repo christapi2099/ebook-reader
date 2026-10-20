@@ -37,7 +37,7 @@ AUDIT_FLAT_DB = 3.0        # base window envelope std below this: nothing to ali
 AUDIT_FLAT_PROBE = 5       # neighbours tried in place of a flat boundary
 AUDIT_MIN_CORR = 0.5       # envelope correlation below this: the audio is not the base's
 AUDIT_EDGE_N = 3           # the first/last N boundaries are judged on their median
-AUDIT_FACTOR_TOL = 0.01    # actual_factor must be within 1% of requested
+AUDIT_FACTOR_TOL = 0.01    # actual_factor within 1% of requested (or timeline within TOL_DURATION_MS)
 TOL_DURATION_MS = 150.0    # tier length vs base / factor (atempo loses ~15-33 ms)
 
 
@@ -397,10 +397,15 @@ def _audit_tier(key: str, info: dict, path: Path, base_ms: float, centers: np.nd
                 points: dict) -> float:
     """Audit one published tier file against the base; returns its max |drift| (ms)."""
     req, act = float(info["requested_factor"]), float(info["actual_factor"])
-    if abs(act / req - 1) > AUDIT_FACTOR_TOL:
+    # atempo gains or drops a few tens of ms at the end of a file, which moves
+    # actual_factor by >1% on a 1-2 sentence book; only a factor that is both
+    # relatively AND absolutely (timeline length) off is wrong.
+    if (abs(act / req - 1) > AUDIT_FACTOR_TOL
+            and abs(base_ms / act - base_ms / req) > TOL_DURATION_MS):
         raise RenderAuditError(
             f"tier {key}: actual_factor {act:.4f} is more than "
-            f"{AUDIT_FACTOR_TOL:.0%} off requested {req}")
+            f"{AUDIT_FACTOR_TOL:.0%} off requested {req} "
+            f"({abs(base_ms / act - base_ms / req):.0f} ms of timeline)")
     try:
         ogg_opus.check_stream(path)  # every page: CRC, sequence, EOS (no decode, ~1 s for 29 h)
     except (OSError, ogg_opus.OggError) as exc:

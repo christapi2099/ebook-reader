@@ -278,3 +278,25 @@ def test_build_base_streams_same_samples_as_concatenation(tmp_path):
     expect, _ = sf.read(ref, dtype="float32")
     assert sr == ra.SR and len(got) == len(expect) and np.array_equal(got, expect)
     assert base["segments"][-1]["end_ms"] == pytest.approx(base["duration_ms"])
+
+
+@pytest.mark.parametrize("n", [1, 2])
+@pytest.mark.parametrize("factor", [2.0, 2.5])
+def test_very_short_books_pass_the_audit(need_ffmpeg, tmp_path, n, factor):
+    """atempo drops 15-33 ms at the end of a file, so a 1-2 sentence book's
+    actual_factor is >1% off requested (2.0 -> ~2.024) although nothing is wrong:
+    a short pasted text must still become readable."""
+    base = ra.build_base(_chunks(n=n, chapter_at=9), tmp_path)
+    tiers = ra.build_tiers(base["path"], base["segments"], (factor,), tmp_path)
+    report = ra.drift_audit(base["path"], base["segments"], tiers, tmp_path)
+    assert set(report) == {"1.0", str(factor)}
+
+
+def test_a_wrong_factor_on_a_short_book_still_fails(need_ffmpeg, tmp_path):
+    """The relaxed factor check still catches a tier whose claimed factor puts its
+    timeline more than TOL_DURATION_MS away."""
+    base = ra.build_base(_chunks(n=2, chapter_at=9), tmp_path)
+    tiers = ra.build_tiers(base["path"], base["segments"], (2.0,), tmp_path)
+    tiers["2.0"]["actual_factor"] = 1.5
+    with pytest.raises(ra.RenderAuditError, match="actual_factor"):
+        ra.drift_audit(base["path"], base["segments"], tiers, tmp_path)
