@@ -1070,10 +1070,16 @@ generation readable until the new one is published.
   (CRC, sequence, EOS), the length must be base / factor within 150 ms, and at every 200th sentence gap
   plus the first and last three, the 1x energy envelope (4 ms window, 1 ms hop) time-scaled by the factor
   is cross-correlated with the tier file around the manifest's claimed position (search +/-150 ms). A
-  boundary fails above 60 ms or below 0.5 correlation; the first and last three are judged on their
+  boundary fails above 60 ms or below 0.6 correlation; the first and last three are judged on their
   median against 30 ms, because a single envelope match can be a few ms off while a real offset moves all
   of them, and atempo loses 15-33 ms at the end of a file, which biases `actual_factor` on short books.
   Silent windows are replaced by an audible neighbour, never passed silently.
+  `actual_factor` fails only when it is both >1% off the requested factor and puts the timeline more
+  than 150 ms off (atempo's end effect alone moves a 1-2 sentence book's factor by >1%).
+  Tier files outside the current set (and their `.done` restart markers) are deleted before encoding, so a
+  resumed tmp dir never publishes old tiers. Each chunk ffmpeg times out after 600 s and a whole-tier
+  ffmpeg after `RENDER_FFMPEG_TIMEOUT_S` (4 h), both as `RenderError(phase="encode")`. The default pool
+  size counts the CPUs in this process's affinity mask.
 
 ### 7.1 Stage 1 — Ingestion (PDF)
 
