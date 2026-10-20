@@ -1,9 +1,10 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
-import json
+import gzip
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from sqlmodel import Session, func, select
 
@@ -11,7 +12,7 @@ from db.database import get_session
 from storage import RENDERS_DIR
 from db.models import Book, Bookmark, Folder, MP3Export, Progress, Sentence, UserSettings
 from routers.deps import require_book
-from services import render_jobs, render_stats, render_triggers
+from services import manifest_cache, render_jobs, render_stats, render_triggers
 import storage
 
 router = APIRouter(prefix="/library")
@@ -375,16 +376,32 @@ def reprocess_book(book_id: str, cancel: bool = Query(False),
 
 
 @router.get("/{book_id}/render")
-def get_render_manifest(book_id: str, session: Session = Depends(get_session)):
-    """The ready generation's manifest.json."""
+def get_render_manifest(book_id: str, request: Request,
+                        session: Session = Depends(get_session)):
+    """The ready generation's manifest in the slim form (schema 2), gzipped when accepted.
+
+    Old (schema 1) renders are converted once and cached outside the generation
+    (services/manifest_cache.py); the published file is only read. The ETag
+    changes with the generation, so a revalidation is a 304.
+    """
     book = require_book(session, book_id)
     if book.ready_generation is None:
         raise HTTPException(status_code=409, detail="Book has no ready render")
-    path = Path(storage.RENDERS_DIR) / book_id / str(book.ready_generation) / "manifest.json"
+    gen = book.ready_generation
+    path = Path(storage.RENDERS_DIR) / book_id / str(gen) / "manifest.json"
     try:
-        return json.loads(path.read_text())
+        cached = manifest_cache.get(book_id, gen, path)
     except (OSError, ValueError):
         raise HTTPException(status_code=404, detail="Manifest missing")
+    headers = {"ETag": cached.etag, "Cache-Control": "no-cache", "Vary": "Accept-Encoding",
+               "X-Render-Generation": str(gen)}
+    if manifest_cache.etag_matches(request.headers.get("if-none-match"), cached.etag):
+        return Response(status_code=304, headers=headers)
+    if manifest_cache.accepts_gzip(request.headers.get("accept-encoding")):
+        return FileResponse(cached.path, media_type="application/json",
+                            headers={**headers, "Content-Encoding": "gzip"})
+    return Response(gzip.decompress(cached.path.read_bytes()), media_type="application/json",
+                    headers=headers)
 
 
 @router.get("/{book_id}/processing")
@@ -414,6 +431,7 @@ def _remove_renders(book_id: str) -> None:
     target = (root / book_id).resolve()
     if target != root and target.is_relative_to(root):
         shutil.rmtree(target, ignore_errors=True)
+    manifest_cache.remove_book(book_id)
 
 
 @router.delete("/{book_id}")

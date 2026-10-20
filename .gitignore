@@ -12,6 +12,7 @@ venv/
 *.db
 uploads/
 renders/
+render-cache/
 
 # Node
 node_modules/
