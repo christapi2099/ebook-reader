@@ -127,9 +127,8 @@ def test_audit_failure_aborts(tmp_path, monkeypatch):
     results = {k: {"requested_factor": float(k), "actual_factor": float(k), "segments": []}
                for k in ("1.0", "1.5", "2.0")}
     monkeypatch.setattr(ra, "_run", lambda cmd: None)
-    real_read = sf.read
-    monkeypatch.setattr(sf, "read", lambda p, dtype=None: (np.zeros(24000 * 3, np.float32), 24000)
-                        if str(p).endswith(".wav") else real_read(p, dtype=dtype))
+    monkeypatch.setattr(ra, "_detect_file",
+                        lambda p, exp: ra._detect(np.zeros(24000 * 3, np.float32), exp))
     with pytest.raises(ra.RenderError) as ei:
         ra.drift_audit(base, segs, results, tmp_path)
     assert ei.value.phase == "drift_audit"

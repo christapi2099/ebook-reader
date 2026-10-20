@@ -248,17 +248,29 @@ def _boundaries(segments: list[dict]) -> list[float]:
 
 
 def _detect(y: np.ndarray, expected_ms: np.ndarray, half_ms: float = 150.0) -> np.ndarray:
-    t = np.arange(len(y)) / SR
-    z = y * np.exp(-2j * np.pi * MARK_HZ * t)
+    return _detect_windows(lambda lo, hi: y[lo:hi], len(y), expected_ms, half_ms)
+
+
+def _detect_windows(read, n: int, expected_ms: np.ndarray, half_ms: float = 150.0) -> np.ndarray:
+    """Locate each marker tone near its expected time.
+
+    ``read(lo, hi)`` returns samples ``[lo, hi)`` of an ``n``-sample signal. Only a window
+    around each marker is demodulated, so memory stays flat however long the book is
+    (whole-book arrays were ~80 GB for a 29 h book).
+    """
     k = int(SR * 0.004)
-    env = np.abs(np.convolve(z, np.ones(k) / k, mode="same"))
     found = []
     for e in expected_ms:
         lo = int(max(0, e - half_ms) / 1000 * SR)
-        hi = int(min(len(y) / SR * 1000, e + half_ms) / 1000 * SR)
-        w = env[lo:hi]
-        if len(w) < 3:
+        hi = int(min(n / SR * 1000, e + half_ms) / 1000 * SR)
+        if hi - lo < 3:
             raise RenderAuditError(f"marker window empty near {e:.0f} ms")
+        start, stop = max(0, lo - k), min(n, hi + k)  # margin so the smoothing edge is exact
+        seg = np.asarray(read(start, stop), dtype=np.float64)
+        t = (start + np.arange(len(seg))) / SR
+        z = seg * np.exp(-2j * np.pi * MARK_HZ * t)
+        env = np.abs(np.convolve(z, np.ones(k) / k, mode="same"))
+        w = env[lo - start:lo - start + (hi - lo)]
         pk = w.max()
         a0 = int(np.argmax(w))
         if pk < 6 * np.median(w) + 0.01 or a0 in (0, len(w) - 1):
@@ -272,6 +284,14 @@ def _detect(y: np.ndarray, expected_ms: np.ndarray, half_ms: float = 150.0) -> n
         idx = np.arange(l, r + 1)
         found.append((lo + float((idx * w[idx]).sum() / w[idx].sum())) / SR * 1000)
     return np.array(found)
+
+
+def _detect_file(path, expected_ms: np.ndarray) -> np.ndarray:
+    with sf.SoundFile(path) as f:
+        def read(lo, hi):
+            f.seek(lo)
+            return f.read(hi - lo, dtype="float32")
+        return _detect_windows(read, f.frames, expected_ms)
 
 
 def drift_audit(base_flac, segments: list[dict], tier_results: dict, work_dir=None,
@@ -290,7 +310,8 @@ def drift_audit(base_flac, segments: list[dict], tier_results: dict, work_dir=No
         c = int(centers[i] / 1000 * SR)
         x[c - n // 2:c - n // 2 + n] += tone
     mbase = work / "audit_markers.flac"
-    sf.write(mbase, np.clip(x, -1, 1), SR, format="FLAC", subtype="PCM_16")
+    np.clip(x, -1, 1, out=x)
+    sf.write(mbase, x, SR, format="FLAC", subtype="PCM_16")
     exp = centers[pick]
     report = {}
 
@@ -300,9 +321,8 @@ def drift_audit(base_flac, segments: list[dict], tier_results: dict, work_dir=No
         wav = work / f"audit_{key}.wav"
         _encode(mbase, opus, info["requested_factor"])
         _run(["ffmpeg", "-y", "-v", "error", "-i", str(opus), "-ar", str(SR), "-ac", "1", str(wav)])
-        y, _ = sf.read(wav, dtype="float32")
         lin = exp / info["actual_factor"]
-        drift = _detect(y, lin) - lin
+        drift = _detect_file(wav, lin) - lin
         for j, d in enumerate(drift):
             edge = pick[j] in (0, len(centers) - 1)
             tol = TOL_EDGE_MS if edge else TOL_SAMPLED_MS

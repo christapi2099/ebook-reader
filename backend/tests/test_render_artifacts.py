@@ -109,3 +109,46 @@ def test_encode_stages_report_increasing_progress(tmp_path):
     for name, values in steps.items():
         assert values and values[-1] == 1.0, name
         assert values == sorted(values), name
+
+
+def _detect_whole_signal(y, expected_ms, half_ms=150.0):
+    """The pre-windowing implementation, kept as the reference the windowed one must match."""
+    t = np.arange(len(y)) / ra.SR
+    z = y * np.exp(-2j * np.pi * ra.MARK_HZ * t)
+    k = int(ra.SR * 0.004)
+    env = np.abs(np.convolve(z, np.ones(k) / k, mode="same"))
+    out = []
+    for e in expected_ms:
+        lo = int(max(0, e - half_ms) / 1000 * ra.SR)
+        hi = int(min(len(y) / ra.SR * 1000, e + half_ms) / 1000 * ra.SR)
+        w = env[lo:hi]
+        pk = w.max()
+        a0 = int(np.argmax(w))
+        m = w > 0.5 * pk
+        l = r = a0
+        while l > 0 and m[l - 1]:
+            l -= 1
+        while r < len(w) - 1 and m[r + 1]:
+            r += 1
+        idx = np.arange(l, r + 1)
+        out.append((lo + float((idx * w[idx]).sum() / w[idx].sum())) / ra.SR * 1000)
+    return np.array(out)
+
+
+def test_windowed_detect_matches_whole_signal_and_reads_files(tmp_path):
+    import soundfile as sf
+    rng = np.random.default_rng(0)
+    sr, secs = ra.SR, 20
+    y = (0.05 * rng.standard_normal(sr * secs)).astype(np.float32)
+    n = int(sr * ra.MARK_MS / 1000)
+    tone = (0.6 * np.hanning(n) * np.sin(2 * np.pi * ra.MARK_HZ * np.arange(n) / sr)).astype(np.float32)
+    expected = np.array([300.0, 5000.0, 12345.0, 19800.0])  # near both ends and in between
+    for e in expected:
+        c = int(e / 1000 * sr)
+        y[c - n // 2:c - n // 2 + n] += tone
+    ref = _detect_whole_signal(y, expected)
+    assert np.allclose(ra._detect(y, expected), ref, atol=1e-6)
+    wav = tmp_path / "m.wav"
+    sf.write(wav, y, sr, subtype="FLOAT")
+    assert np.allclose(ra._detect_file(wav, expected), ref, atol=1e-6)
+    assert np.allclose(ref, expected, atol=2.0)  # and it actually finds the markers
