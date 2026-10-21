@@ -1081,6 +1081,20 @@ generation readable until the new one is published.
   ffmpeg after `RENDER_FFMPEG_TIMEOUT_S` (4 h), both as `RenderError(phase="encode")`. The default pool
   size counts the CPUs in this process's affinity mask.
 
+* **WebM copies** (`services/webm_remux.py`). Firefox on Linux (measured on 158) mishandles an Ogg Opus file
+  longer than 2^31 / 48000 s = 44,739 s: the reported duration is cut there, metadata takes seconds and
+  seeks are slow (Bug 1810378; MDN lists it under container notes). The same packets in WebM play correctly
+  (6 ms open, exact duration, 40-55 ms seeks on a 14.7 h tier). After the drift audit the worker stream-copies
+  every Ogg tier to `audio_{tier}.webm` (`ffmpeg -c copy`, ~11 s per 150 MB, atomic `.part` rename, duration
+  within 50 ms of the source); a failure publishes Ogg only, `RENDER_WEBM=0` disables it. The Ogg files stay.
+  `available_formats(gen_dir)` returns `("webm", "opus")` only when every Ogg tier has a non-empty copy, and
+  `GET /library/{id}/render` then adds `audio_formats` to the manifest it serves (it is part of the manifest
+  cache key and ETag; Ogg-only books are untouched). The published manifest still says `container:
+  "ogg-opus"`: the container is not in the fingerprint, so adding copies never makes a book stale.
+  `scripts/convert_to_webm.py <book>` adds the copies to an already published generation (adds files, edits
+  none). Range replies on tier audio are cut to 4 MB (`MAX_RANGE_BYTES`): Firefox reads each element to EOF
+  otherwise (2.7 GB for five speed switches, 71.5 MB capped).
+
 ### 7.1 Stage 1 — Ingestion (PDF)
 
 `POST /documents/upload` (`routers/documents.py:21-85`):

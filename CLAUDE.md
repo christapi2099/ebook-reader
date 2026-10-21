@@ -23,7 +23,8 @@ cd frontend && pnpm install && pnpm run dev
 | `backend/services/render_artifacts.py` | base.flac, atempo speed tiers, drift audit of the published tier files, sync manifest |
 | `backend/services/tier_encode.py` | Chunked parallel libopus encode of the tiers, spliced into one Ogg stream (`ogg_opus.py`); `RENDER_ENCODE_WORKERS` |
 | `backend/services/render_store.py` | `RENDERS_DIR` layout, immutable generations, cleanup |
-| `backend/routers/renders.py` | `GET /api/renders/{book}/{gen}/audio_{tier}.opus` (Range) and the manifest |
+| `backend/services/webm_remux.py` | WebM (Opus) stream copies of the Ogg tiers (`ffmpeg -c copy`); `available_formats`; `RENDER_WEBM`, `RENDER_WEBM_WORKERS`. `scripts/convert_to_webm.py <book>` adds them to a published render |
+| `backend/routers/renders.py` | `GET /api/renders/{book}/{gen}/audio_{tier}.opus` and `.webm` (Range, 4 MB cap per reply) and the manifest |
 | `backend/services/tts_engine.py` | Kokoro synthesis, AudioCache, SynthJob(speed=); the render engine is set via `set_render_engine` |
 | `backend/services/engine_manager.py` | cpu / gpu / modal / piper engines; switching saves and restarts the render |
 | `backend/routers/tts.py` | Legacy WebSocket /ws/tts/{id} (live synthesis); not the reader path |
@@ -63,7 +64,7 @@ Plan: `docs/plans/process-first-architecture.md` (kept out of git; it is in the 
 **Audio**
 - Reader speed = switching to the matching atempo tier `<audio>` element; browser `playbackRate` stays at `1.0`. Kokoro is only ever asked for `speed=1.0` when rendering a book (the worker rejects any other base speed)
 - Sync comes from the manifest and `audio.currentTime` (rAF loop), not from wall-clock timers or WebSocket events
-- Browsers: Chrome and Firefox (Ogg Opus). Safari shows an explicit "unsupported browser" message
+- Browsers: Chrome and Firefox. Every tier also has a WebM copy (same Opus packets): Firefox on Linux mishandles Ogg Opus longer than 12 h 25 m (Bug 1810378), so the manifest's `audio_formats` lists `webm` first when every tier has a copy and the player (`pickFormat`) takes the first format the browser can decode. Safari is excluded for Ogg; WebM there is untested. Ogg files stay (the audit and old clients read them)
 - pdfjs-dist v5: `import * as pdfjsLib` + `import workerUrl from '...?url'` at **module level** (not inside function)
 
 ## Dispatch (OpenCode)
