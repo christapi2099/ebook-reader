@@ -1,5 +1,5 @@
 import { writable, get } from 'svelte/store'
-import { renderAudioUrl, type RenderManifest } from '$lib/api'
+import { renderAudioUrl, type AudioFormat, type RenderManifest } from '$lib/api'
 import { nearestSpeed } from '$lib/utils/speed-tiers'
 import { toastStore } from '$lib/stores/toast'
 import {
@@ -99,16 +99,31 @@ function initialState(): AudioState {
   }
 }
 
-function detectUnsupported(): boolean {
+const MIME: Record<AudioFormat, string> = {
+  opus: 'audio/ogg; codecs=opus',
+  webm: 'audio/webm; codecs=opus',
+}
+
+/**
+ * The container to play: the first format the render offers that this browser can
+ * decode (WebM before Ogg), or null when it can play none of them. Safari is
+ * excluded outright (it reports Ogg Opus as playable but cannot decode it).
+ */
+export function pickFormat(offered: string[] | undefined): AudioFormat | null {
   try {
-    if (typeof Audio === 'undefined') return true
+    if (typeof Audio === 'undefined') return null
     const probe = new Audio()
-    if (probe.canPlayType('audio/ogg; codecs=opus') === '') return true
+    const ua = typeof navigator !== 'undefined' ? navigator.userAgent : ''
+    const safari = /Safari\//.test(ua) && !/Chrome\/|Chromium\/|Edg\/|Firefox\/|Android/.test(ua) && /Version\//.test(ua)
+    for (const f of (offered?.length ? offered : ['opus']) as string[]) {
+      if (f !== 'opus' && f !== 'webm') continue
+      if (f === 'opus' && safari) continue // Safari mis-reports Ogg Opus
+      if (probe.canPlayType(MIME[f]) !== '') return f
+    }
   } catch {
-    return true
+    return null
   }
-  const ua = typeof navigator !== 'undefined' ? navigator.userAgent : ''
-  return /Safari\//.test(ua) && !/Chrome\/|Chromium\/|Edg\/|Firefox\/|Android/.test(ua) && /Version\//.test(ua)
+  return null
 }
 
 function createAudioStore() {
@@ -141,6 +156,8 @@ function createAudioStore() {
   let generation = 0
   let manifest: RenderManifest | null = null
   let tiers: TierInfo[] = []
+  // The container every tier element loads (see `pickFormat`).
+  let format: AudioFormat = 'opus'
   let activeKey: string | null = null
   let elements = new Map<string, HTMLAudioElement>()
 
@@ -175,7 +192,7 @@ function createAudioStore() {
   function ensureElement(key: string): HTMLAudioElement {
     let el = elements.get(key)
     if (el) return el
-    el = new Audio(renderAudioUrl(bookId as string, generation, key))
+    el = new Audio(renderAudioUrl(bookId as string, generation, key, format))
     el.preload = 'auto'
     el.volume = volume
     el.muted = muted
@@ -455,7 +472,9 @@ function createAudioStore() {
         .filter((t): t is TierInfo => Number.isFinite(t.factor) && t.tl !== null)
         .sort((a, b) => a.factor - b.factor)
       primed = false
-      const bad = detectUnsupported()
+      const picked = pickFormat(m.audio_formats)
+      format = picked ?? 'opus'
+      const bad = picked === null
       unsupported.set(bad)
       const speed = cur().speed
       const tier = nearestTier(speed)

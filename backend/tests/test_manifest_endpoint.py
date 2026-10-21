@@ -163,3 +163,28 @@ def test_unwritable_cache_still_serves(client, db_engine, seed_book, renders_dir
         assert ident.status_code == 200 and ident.headers["etag"] != r.headers["etag"]
     finally:
         root.chmod(0o755)
+
+
+def test_audio_formats_appear_once_every_tier_has_a_webm_copy(client, db_engine, seed_book, renders_dir):
+    seed_book(db_engine, ready_generation=1)
+    p = _publish(renders_dir, _v1())
+    gen = p.parent
+    (gen / "audio_1.0.opus").write_bytes(b"o1")
+    (gen / "audio_2.0.opus").write_bytes(b"o2")
+    before = _tree_digest(renders_dir)
+
+    r = client.get(f"/library/{BID}/render")
+    assert "audio_formats" not in r.json()
+    etag = r.headers["etag"]
+
+    (gen / "audio_1.0.webm").write_bytes(b"w1")
+    assert "audio_formats" not in client.get(f"/library/{BID}/render").json()  # half converted
+
+    (gen / "audio_2.0.webm").write_bytes(b"w2")
+    r = client.get(f"/library/{BID}/render")
+    assert r.json()["audio_formats"] == ["webm", "opus"]
+    assert r.headers["etag"] != etag  # a client holding the old ETag refetches
+    assert client.get(f"/library/{BID}/render", headers={"If-None-Match": etag}).status_code == 200
+    # the published manifest.json and Ogg files are untouched
+    after = _tree_digest(renders_dir)
+    assert {k: v for k, v in after.items() if not k.endswith(".webm")} == before

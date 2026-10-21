@@ -55,18 +55,25 @@ def encode(manifest: dict) -> bytes:
     return json.dumps(manifest, separators=(",", ":")).encode()
 
 
-def slim_gzip(source: Path) -> bytes:
+def slim_gzip(source: Path, formats: tuple[str, ...] = ()) -> bytes:
     """Gzipped slim JSON of the manifest at ``source`` (read only)."""
     m = json.loads(source.read_bytes())
-    body = encode(render_manifest.slim_manifest(m))
-    del m
+    slim = render_manifest.slim_manifest(m)
+    if formats:
+        # not part of the published file: what this generation can serve, best first
+        slim["audio_formats"] = list(formats)
+    body = encode(slim)
+    del m, slim
     return gzip.compress(body, compresslevel=GZIP_LEVEL, mtime=0)
 
 
-def get(book_id: str, gen: int, source: Path) -> CachedManifest:
-    """The cached slim manifest of ``source``; built on first use. Raises OSError/ValueError."""
+def get(book_id: str, gen: int, source: Path, formats: tuple[str, ...] = ()) -> CachedManifest:
+    """The cached slim manifest of ``source``; built on first use. Raises OSError/ValueError.
+
+    ``formats`` (audio containers the generation offers) is part of the entry and the
+    ETag, so adding a WebM copy to a published generation is picked up by clients."""
     st = source.stat()
-    stamp = f"{int(gen)}-{st.st_size}-{st.st_mtime_ns}"
+    stamp = f"{int(gen)}-{st.st_size}-{st.st_mtime_ns}" + (f"-{'+'.join(formats)}" if formats else "")
     book_cache = cache_dir() / book_id
     path = book_cache / f"{stamp}.json.gz"
     etag = f'"slim{render_manifest.SCHEMA_SLIM}-{stamp}"'
@@ -75,7 +82,7 @@ def get(book_id: str, gen: int, source: Path) -> CachedManifest:
     with _lock_for(path):
         if path.is_file():  # another request built it while we waited
             return CachedManifest(path, etag)
-        data = slim_gzip(source)
+        data = slim_gzip(source, formats) if formats else slim_gzip(source)
         try:
             book_cache.mkdir(parents=True, exist_ok=True)
             tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")

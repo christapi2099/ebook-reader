@@ -4,7 +4,7 @@ import { get } from 'svelte/store'
 const { socketCtor } = vi.hoisted(() => ({ socketCtor: vi.fn() }))
 vi.mock('$lib/api', () => ({
   TTSSocket: class { constructor() { socketCtor() } },
-  renderAudioUrl: (b: string, g: number, t: string) => `/api/renders/${b}/${g}/audio_${t}.opus`,
+  renderAudioUrl: (b: string, g: number, t: string, f = 'opus') => `/api/renders/${b}/${g}/audio_${t}.${f}`,
 }))
 
 import { audioStore, speedRevertStore } from '$lib/stores/audio'
@@ -12,7 +12,7 @@ import { toastStore } from '$lib/stores/toast'
 
 const log: string[] = []
 const made: FakeAudio[] = []
-let canPlay = 'maybe'
+let canPlay: string | ((mime: string) => string) = 'maybe'
 
 class FakeAudio {
   src: string
@@ -32,7 +32,7 @@ class FakeAudio {
   }
   addEventListener(n: string, f: () => void) { (this.listeners[n] ??= []).push(f) }
   emit(n: string) { (this.listeners[n] ?? []).forEach(f => f()) }
-  canPlayType() { return canPlay }
+  canPlayType(mime = '') { return typeof canPlay === 'function' ? canPlay(mime) : canPlay }
   play() { log.push(`play:${this.src}`); this.paused = false; return Promise.resolve() }
   pause() { log.push(`pause:${this.src}`); this.paused = true }
   removeAttribute() {}
@@ -388,6 +388,41 @@ describe('render tier player', () => {
     expect(log).toContain(`pause:${url('1.0')}`)
     audioStore.play(0)
     expect(get(audioStore).isPlaying).toBe(false)
+  })
+})
+
+describe('audio container', () => {
+  const withFormats = (formats?: string[]) => ({ ...manifest(), ...(formats ? { audio_formats: formats } : {}) })
+  const start = (m: any) => { audioStore.init('b'); audioStore.load(1, m); audioStore.play(0) }
+
+  it('plays WebM when the render offers it and the browser can decode it', () => {
+    start(withFormats(['webm', 'opus']))
+    expect(made.some(m => m.src === '/api/renders/b/1/audio_1.0.webm')).toBe(true)
+    expect(get(audioStore).unsupportedMessage).toBeNull()
+  })
+
+  it('keeps Ogg when the render offers nothing else', () => {
+    start(withFormats())
+    expect(made.some(m => m.src === '/api/renders/b/1/audio_1.0.opus')).toBe(true)
+  })
+
+  it('falls back to Ogg when the browser cannot decode WebM', () => {
+    canPlay = (mime: string) => (mime.includes('webm') ? '' : 'maybe')
+    start(withFormats(['webm', 'opus']))
+    expect(made.some(m => m.src === '/api/renders/b/1/audio_1.0.opus')).toBe(true)
+  })
+
+  it('uses WebM alone when only WebM is playable (an Ogg-less browser)', () => {
+    canPlay = (mime: string) => (mime.includes('ogg') ? '' : 'maybe')
+    start(withFormats(['webm', 'opus']))
+    expect(made.some(m => m.src === '/api/renders/b/1/audio_1.0.webm')).toBe(true)
+    expect(get(audioStore).unsupportedMessage).toBeNull()
+  })
+
+  it('an Ogg-only render in a browser without Ogg is unsupported', () => {
+    canPlay = (mime: string) => (mime.includes('ogg') ? '' : 'maybe')
+    start(withFormats())
+    expect(get(audioStore).unsupportedMessage).toMatch(/Opus/)
   })
 })
 

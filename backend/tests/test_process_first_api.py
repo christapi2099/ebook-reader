@@ -342,6 +342,22 @@ def test_audio_range_206_last_bytes(client, renders_dir):
     assert r.status_code == 206 and r.content == data[10:20]
 
 
+def test_webm_route_serves_the_webm_file_with_its_media_type(client, renders_dir):
+    data = write_gen(renders_dir, tier="2.0")
+    webm = b"\x1aE\xdf\xa3" + bytes(range(100))
+    (renders_dir / BID / "1" / "audio_2.0.webm").write_bytes(webm)
+    r = client.get(f"/api/renders/{BID}/1/audio_2.0.webm")
+    assert r.status_code == 200 and r.content == webm
+    assert r.headers["content-type"].startswith("audio/webm") and "immutable" in r.headers["cache-control"]
+    ogg = client.get(f"/api/renders/{BID}/1/audio_2.0.opus")
+    assert ogg.content == data and ogg.headers["content-type"].startswith("audio/ogg")
+    assert r.headers["etag"] != ogg.headers["etag"]
+    r = client.get(f"/api/renders/{BID}/1/audio_2.0.webm", headers={"Range": "bytes=2-9"})
+    assert r.status_code == 206 and r.content == webm[2:10]
+    assert client.get(f"/api/renders/{BID}/1/audio_9.9.webm").status_code == 400
+    assert client.get(f"/api/renders/{BID}/1/audio_1.0.webm").status_code == 404
+
+
 def test_audio_open_ended_range_is_capped_and_resumable(client, renders_dir, monkeypatch):
     """Firefox asks for bytes=N- and reads to EOF; the server answers with a
     bounded 206 and the browser reopens at the new offset."""

@@ -49,7 +49,7 @@ import storage
 from services import render_pause
 from db.models import Book, Sentence
 from services import (
-    book_processor, render_artifacts as ra, render_jobs as rj, render_store as rs,
+    book_processor, render_artifacts as ra, render_jobs as rj, render_store as rs, webm_remux,
 )
 from services.aligner import align_sentence, distribute_by_syllables
 from services.env_config import positive_int
@@ -798,6 +798,7 @@ def _render(book_id, worker_id, synthesizer, aligner, fallback, extractor, box_p
         progress(0.95, "drift_audit")
         ra.drift_audit(base["path"], base["segments"], tier_results, tmp,
                        on_step=lambda f: progress(0.95 + 0.03 * f, "drift_audit"))
+        _add_webm_copies(tmp, tier_results, book_id)
         manifest = ra.write_manifest(
             tmp, base_segments=base["segments"], tier_results=tier_results,
             duration_ms=base["duration_ms"], voice=voice,
@@ -828,6 +829,17 @@ def _render(book_id, worker_id, synthesizer, aligner, fallback, extractor, box_p
     phase_stat("done")
     rj.release(book_id, worker_id)
     return READY
+
+
+def _add_webm_copies(tmp, tier_results, book_id) -> None:
+    """Stream-copy each audited Ogg tier into WebM (Firefox cannot play a long Ogg Opus
+    file). Best effort: a failure leaves an Ogg-only render, which still plays."""
+    if not webm_remux.enabled():
+        return
+    try:
+        webm_remux.remux_tiers([Path(info["path"]) for info in tier_results.values()])
+    except webm_remux.RemuxError as exc:
+        logger.warning("[render %s] webm copies skipped, publishing Ogg only: %s", book_id, exc)
 
 
 def _publish(book_id, tmp, rows, remap, target, fail_at) -> None:

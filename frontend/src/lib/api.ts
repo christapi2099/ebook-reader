@@ -184,6 +184,12 @@ export interface RenderManifest {
   voice: string
   fingerprint: string
   container: string
+  /**
+   * Audio containers this generation can serve, best first (`webm` = the same Opus
+   * packets in WebM, which Firefox plays correctly for very long books). Absent
+   * means Ogg Opus only.
+   */
+  audio_formats?: string[]
   timing_quality: TimingQuality
   mixed_backends: boolean
   /** The 1x timeline, once (`normalizeManifest` fills it for a schema 1 manifest). */
@@ -203,8 +209,10 @@ export async function getRenderManifest(bookId: string): Promise<RenderManifest>
 }
 
 /** URL of one immutable tier file; the browser fetches it itself. */
-export function renderAudioUrl(bookId: string, generation: number, tier: string): string {
-  return `${API_BASE}/api/renders/${encodeURIComponent(bookId)}/${generation}/audio_${encodeURIComponent(tier)}.opus`
+export type AudioFormat = 'opus' | 'webm'
+
+export function renderAudioUrl(bookId: string, generation: number, tier: string, format: AudioFormat = 'opus'): string {
+  return `${API_BASE}/api/renders/${encodeURIComponent(bookId)}/${generation}/audio_${encodeURIComponent(tier)}.${format}`
 }
 
 /** Queue a fresh render of the book (new generation; the old one keeps serving). */

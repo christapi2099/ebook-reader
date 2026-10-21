@@ -12,7 +12,7 @@ from db.database import get_session
 from storage import RENDERS_DIR
 from db.models import Book, Bookmark, Folder, MP3Export, Progress, Sentence, UserSettings
 from routers.deps import require_book
-from services import manifest_cache, render_jobs, render_stats, render_triggers
+from services import manifest_cache, render_jobs, render_stats, render_triggers, webm_remux
 import storage
 
 router = APIRouter(prefix="/library")
@@ -390,7 +390,9 @@ def get_render_manifest(book_id: str, request: Request,
     gen = book.ready_generation
     path = Path(storage.RENDERS_DIR) / book_id / str(gen) / "manifest.json"
     try:
-        cached = manifest_cache.get(book_id, gen, path)
+        # Ogg-only is the default and stays out of the cache key and the manifest.
+        formats = webm_remux.available_formats(path.parent)
+        cached = manifest_cache.get(book_id, gen, path, formats if webm_remux.FORMAT_WEBM in formats else ())
     except (OSError, ValueError):
         raise HTTPException(status_code=404, detail="Manifest missing")
     headers = {"ETag": cached.etag, "Cache-Control": "no-cache", "Vary": "Accept-Encoding",

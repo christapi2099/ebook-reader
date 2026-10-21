@@ -1,4 +1,5 @@
-"""Immutable render artifacts: ``GET /api/renders/{id}/{gen}/audio_{tier}.opus``.
+"""Immutable render artifacts: ``GET /api/renders/{id}/{gen}/audio_{tier}.opus`` (Ogg) and
+``.webm`` (the same packets in WebM, see ``services/webm_remux.py``).
 
 Every segment is validated, then the resolved path must stay inside
 RENDERS_DIR (400 otherwise). Responses are immutable for a year with an ETag;
@@ -35,8 +36,13 @@ def _bad(detail: str = "Invalid render path") -> HTTPException:
     return HTTPException(status_code=400, detail=detail)
 
 
-def resolve_audio_path(book_id: str, gen: str, tier: str) -> Path:
-    """Validate the three segments and return the confined file path, or raise 400."""
+MEDIA_TYPES = {"opus": "audio/ogg", "webm": "audio/webm"}
+
+
+def resolve_audio_path(book_id: str, gen: str, tier: str, ext: str = "opus") -> Path:
+    """Validate the segments and return the confined file path, or raise 400."""
+    if ext not in MEDIA_TYPES:
+        raise _bad()
     if not BOOK_ID_RE.fullmatch(book_id):
         raise _bad()
     if not re.fullmatch(r"[0-9]{1,9}", gen):
@@ -44,7 +50,7 @@ def resolve_audio_path(book_id: str, gen: str, tier: str) -> Path:
     if tier not in ALLOWED_TIERS:
         raise _bad()
     root = Path(storage.RENDERS_DIR).resolve()
-    path = (root / book_id / str(int(gen)) / f"audio_{tier}.opus").resolve()
+    path = (root / book_id / str(int(gen)) / f"audio_{tier}.{ext}").resolve()
     if not path.is_relative_to(root):
         raise _bad()
     return path
@@ -77,7 +83,16 @@ def _read_range(path: Path, start: int, end: int) -> Iterator[bytes]:
 
 @router.get("/{book_id}/{gen}/audio_{tier}.opus")
 def get_render_audio(book_id: str, gen: str, tier: str, request: Request):
-    path = resolve_audio_path(book_id, gen, tier)
+    return _serve_audio(book_id, gen, tier, "opus", request)
+
+
+@router.get("/{book_id}/{gen}/audio_{tier}.webm")
+def get_render_audio_webm(book_id: str, gen: str, tier: str, request: Request):
+    return _serve_audio(book_id, gen, tier, "webm", request)
+
+
+def _serve_audio(book_id: str, gen: str, tier: str, ext: str, request: Request):
+    path = resolve_audio_path(book_id, gen, tier, ext)
     try:
         st = path.stat()
     except OSError:
@@ -85,7 +100,7 @@ def get_render_audio(book_id: str, gen: str, tier: str, request: Request):
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Render audio not found")
     # (book, generation, tier) is immutable once published; size+mtime guard a rebuild.
-    etag = f'"{book_id}-{int(gen)}-{tier}-{st.st_size}-{st.st_mtime_ns}"'
+    etag = f'"{book_id}-{int(gen)}-{tier}{"" if ext == "opus" else "-" + ext}-{st.st_size}-{st.st_mtime_ns}"'
     headers = {"Cache-Control": IMMUTABLE, "ETag": etag}
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers=headers)
@@ -93,8 +108,8 @@ def get_render_audio(book_id: str, gen: str, tier: str, request: Request):
     if capped:
         start, end = capped
         return StreamingResponse(
-            _read_range(path, start, end), status_code=206, media_type="audio/ogg",
+            _read_range(path, start, end), status_code=206, media_type=MEDIA_TYPES[ext],
             headers={**headers, "Accept-Ranges": "bytes", "Content-Length": str(end - start + 1),
                      "Content-Range": f"bytes {start}-{end}/{st.st_size}"},
         )
-    return FileResponse(path, media_type="audio/ogg", headers=headers)
+    return FileResponse(path, media_type=MEDIA_TYPES[ext], headers=headers)
