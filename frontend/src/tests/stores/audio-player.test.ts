@@ -159,9 +159,55 @@ describe('render tier player', () => {
     expect(get(audioStore).currentWordIndex).toBe(1)
     audioStore.setSpeed(2)
     const fast = el('2.0')
+    fast.bufferedEnd = 5
+    await flush()
     expect(fast.currentTime).toBeCloseTo(0.25) // word 1 starts 500/2 ms
     expect(log).toContain(`pause:${url('1.0')}`)
     expect(socketCtor).not.toHaveBeenCalled()
+  })
+
+  it('the old tier keeps sounding until the new one is buffered', async () => {
+    setup()
+    audioStore.play(0)
+    el('1.0').bufferedEnd = 5
+    await flush()
+    log.length = 0
+    audioStore.setSpeed(2)
+    await flush()
+    expect(log).toEqual([])
+    expect(el('1.0').paused).toBe(false)
+    expect(get(audioStore).speed).toBe(2)
+    el('2.0').bufferedEnd = 5
+    await flush()
+    expect(el('1.0').paused).toBe(true)
+    expect(log).toContain(`play:${url('2.0')}`)
+  })
+
+  it('pausing during a pending swap lands on the chosen tier, paused', async () => {
+    setup()
+    audioStore.play(0)
+    el('1.0').bufferedEnd = 5
+    await flush()
+    audioStore.setSpeed(2)
+    audioStore.pause()
+    el('2.0').bufferedEnd = 5
+    await flush()
+    expect(el('1.0').paused).toBe(true)
+    expect(el('2.0').paused).toBe(true)
+    expect(get(audioStore).isPlaying).toBe(false)
+  })
+
+  it('switching back before the new tier is ready cancels the swap', async () => {
+    setup()
+    audioStore.play(0)
+    el('1.0').bufferedEnd = 5
+    await flush()
+    audioStore.setSpeed(2)
+    audioStore.setSpeed(1)
+    el('2.0').bufferedEnd = 5
+    await flush()
+    expect(el('1.0').paused).toBe(false)
+    expect(el('2.0').paused).toBe(true)
   })
 
   it('swap seeks to sentence start when the sentence has no word times', async () => {
@@ -170,6 +216,8 @@ describe('render tier player', () => {
     el('1.0').bufferedEnd = 5
     await flush()
     audioStore.setSpeed(2)
+    el('2.0').bufferedEnd = 5
+    await flush()
     expect(el('2.0').currentTime).toBeCloseTo(0.55)
   })
 
@@ -180,6 +228,8 @@ describe('render tier player', () => {
     await flush()
     const stale = rafQueue.splice(0)
     audioStore.setSpeed(2)
+    el('2.0').bufferedEnd = 5
+    await flush()
     el('1.0').currentTime = 1.5 // would map to sentence 1
     stale.forEach(f => f())
     expect(get(audioStore).currentIndex).toBe(0)
@@ -353,6 +403,8 @@ describe('slim manifest (schema 2): one 1x timeline, tiers divide', () => {
     el('1.0').currentTime = 0.6
     tickAll()
     audioStore.setSpeed(2)
+    el('2.0').bufferedEnd = 5
+    await flush()
     expect(el('2.0').currentTime).toBe(500 / A2 / 1000)
   })
 

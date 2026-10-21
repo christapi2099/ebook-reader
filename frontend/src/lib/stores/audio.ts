@@ -48,6 +48,10 @@ export const UNSUPPORTED_MESSAGE =
 /** Audio that must be buffered past the playhead before play() starts. */
 export const START_GATE_S = 0.3
 const GATE_POLL_MS = 50
+/** A tier swap while playing waits until the new tier has this much buffered at the target. */
+const PREWARM_S = 2
+/** Give up waiting for the new tier after this many polls (8 s) and swap anyway. */
+const PREWARM_MAX_POLLS = 160
 
 interface TierInfo {
   key: string
@@ -99,6 +103,10 @@ function createAudioStore() {
   // Bumped on every play/pause/seek; cancels a pending start gate.
   let playToken = 0
   let rafId: number | null = null
+  // A tier swap while playing keeps the old tier sounding until the new one is
+  // buffered at the target; this id (and the tier) identify that pending swap.
+  let pendingSwap = 0
+  let pendingTier: TierInfo | null = null
 
   let primed = false
   let primePromise: Promise<void> = Promise.resolve()
@@ -268,6 +276,37 @@ function createAudioStore() {
     elements = new Map()
   }
 
+  /** Makes `next` the active tier at the current word (or sentence), resuming when asked. */
+  function swapTo(next: TierInfo, resume: boolean) {
+    if (!bookId) return
+    const state = cur()
+    const oldEl = activeEl()
+    swapGen++
+    stopRaf()
+    const token = ++playToken
+    if (oldEl) {
+      volume = oldEl.volume
+      muted = oldEl.muted
+      oldEl.pause()
+    }
+    activeKey = next.key
+    const posMs = currentPositionMs(next, state.currentIndex, state.currentWordIndex)
+    const el = ensureElement(next.key)
+    el.volume = volume
+    el.muted = muted
+    el.currentTime = posMs / 1000
+    update(s => ({ ...s, sentenceDurations: sentenceDurations(next), elapsedSeconds: posMs / 1000 }))
+    if (resume) void startPlayback(el, token)
+  }
+
+  /** Finishes a pending swap at once (pause, play and resume must act on the chosen tier). */
+  function commitPendingSwap() {
+    const next = pendingTier
+    pendingSwap++
+    pendingTier = null
+    if (next && next.key !== activeKey) swapTo(next, false)
+  }
+
   function seekTo(index: number) {
     const tier = activeTier()
     const el = activeEl()
@@ -290,6 +329,8 @@ function createAudioStore() {
     load(gen: number, raw: RenderManifest) {
       if (!bookId) return
       teardownElements()
+      pendingSwap++
+      pendingTier = null
       swapGen++
       playToken++
       generation = gen
@@ -319,6 +360,7 @@ function createAudioStore() {
     prime,
 
     play(fromIndex: number) {
+      commitPendingSwap()
       if (!activeKey || get(unsupported)) return
       prime()
       const token = ++playToken
@@ -330,6 +372,7 @@ function createAudioStore() {
     },
 
     pause() {
+      commitPendingSwap()
       playToken++
       stopRaf()
       activeEl()?.pause()
@@ -337,6 +380,7 @@ function createAudioStore() {
     },
 
     resume() {
+      commitPendingSwap()
       if (!activeKey || get(unsupported)) return
       prime()
       const token = ++playToken
@@ -375,27 +419,39 @@ function createAudioStore() {
       const chosen = next?.factor ?? newSpeed
       update(s => ({ ...s, speed: chosen }))
       const oldTier = activeTier()
-      if (!next || !oldTier || next.key === activeKey) return chosen
-
-      const oldEl = activeEl()
-      const wasPlaying = state.isPlaying
-      swapGen++
-      stopRaf()
-      const token = ++playToken
-      if (oldEl) {
-        volume = oldEl.volume
-        muted = oldEl.muted
-        oldEl.pause()
+      if (!next || !oldTier || next.key === activeKey) {
+        // Back on the tier that is still sounding: drop the pending swap.
+        pendingSwap++
+        pendingTier = null
+        return chosen
       }
-      activeKey = next.key
-      const posMs = currentPositionMs(next, state.currentIndex, state.currentWordIndex)
       if (!bookId) return chosen
+      const oldEl = activeEl()
+      if (!(state.isPlaying && oldEl && !oldEl.paused)) {
+        pendingSwap++
+        pendingTier = null
+        swapTo(next, state.isPlaying)
+        return chosen
+      }
+
+      // Playing: the old tier keeps sounding while the new element loads its
+      // target (a cold seek into an unbuffered Ogg file is slow, most of all in
+      // Firefox); the swap itself then lands in buffered audio.
+      const id = ++pendingSwap
+      pendingTier = next
       const el = ensureElement(next.key)
       el.volume = volume
       el.muted = muted
-      el.currentTime = posMs / 1000
-      update(s => ({ ...s, sentenceDurations: sentenceDurations(next), elapsedSeconds: posMs / 1000 }))
-      if (wasPlaying) void startPlayback(el, token)
+      el.currentTime = currentPositionMs(next, state.currentIndex, state.currentWordIndex) / 1000
+      void (async () => {
+        for (let i = 0; i < PREWARM_MAX_POLLS && id === pendingSwap; i++) {
+          if (bufferedAhead(el) >= PREWARM_S) break
+          await new Promise<void>(r => setTimeout(r, GATE_POLL_MS))
+        }
+        if (id !== pendingSwap) return
+        pendingTier = null
+        swapTo(next, cur().isPlaying)
+      })()
       return chosen
     },
 
@@ -420,6 +476,8 @@ function createAudioStore() {
     },
 
     destroy() {
+      pendingSwap++
+      pendingTier = null
       swapGen++
       playToken++
       stopRaf()
