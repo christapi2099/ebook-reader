@@ -30,8 +30,15 @@ export interface SettingsState {
   /** Leave the `COMMON_WORDS` set unbolded (`BionicOptions.skipCommonWords`). */
   bionicSkipCommonWords: boolean
   highlightEnabled: boolean
+  /** Sentence highlight opacity, 0.1 to 1. `null` keeps each theme's own `--highlight-alpha`. */
+  highlightStrength: number | null
   theme: Theme
 }
+
+/** Bounds of the highlight strength slider (an opacity). */
+export const HIGHLIGHT_STRENGTH_RANGE = { min: 0.1, max: 1 } as const
+/** The word highlight sits this much above the sentence highlight, capped at 1. */
+const WORD_ALPHA_BOOST = 0.35
 
 /** Bounds of the minimum-word-length slider, in characters. */
 export const BIONIC_MIN_WORD_LENGTH_RANGE = { min: 1, max: 8 } as const
@@ -49,6 +56,7 @@ const DEFAULTS: SettingsState = {
   bionicMinWordLength: 3,
   bionicSkipCommonWords: true,
   highlightEnabled: true,
+  highlightStrength: null,
   theme: 'system',
 }
 
@@ -94,6 +102,23 @@ function resolveTheme(theme: Theme): 'light' | 'sepia' | 'dark' {
   return 'light'
 }
 
+function isStrength(v: unknown): v is number {
+  return typeof v === 'number' && v >= HIGHLIGHT_STRENGTH_RANGE.min && v <= HIGHLIGHT_STRENGTH_RANGE.max
+}
+
+/** Inline vars on <html> win over the per-theme values in app.css; removing them restores the theme. */
+function applyHighlightStrength(strength: number | null): void {
+  if (typeof document === 'undefined') return
+  const style = document.documentElement.style
+  if (strength === null) {
+    style.removeProperty('--highlight-alpha')
+    style.removeProperty('--word-alpha')
+    return
+  }
+  style.setProperty('--highlight-alpha', String(strength))
+  style.setProperty('--word-alpha', String(Math.min(1, strength + WORD_ALPHA_BOOST)))
+}
+
 function applyTheme(theme: Theme): void {
   if (typeof document === 'undefined') return
   document.documentElement.dataset.theme = resolveTheme(theme)
@@ -125,6 +150,9 @@ function readFromStorage(): SettingsState {
         ? parsed.bionicSkipCommonWords
         : DEFAULTS.bionicSkipCommonWords,
       highlightEnabled: typeof parsed.highlightEnabled === 'boolean' ? parsed.highlightEnabled : DEFAULTS.highlightEnabled,
+      highlightStrength: parsed.highlightStrength === null || isStrength(parsed.highlightStrength)
+        ? (parsed.highlightStrength ?? null)
+        : DEFAULTS.highlightStrength,
       theme: isValidTheme(parsed.theme) ? parsed.theme : DEFAULTS.theme,
     }
   } catch {
@@ -152,6 +180,7 @@ function createSettingsStore() {
     subscribe(s => {
       currentTheme = s.theme
       applyTheme(s.theme)
+      applyHighlightStrength(s.highlightStrength)
     })
     if (typeof matchMedia === 'function') {
       matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
@@ -174,6 +203,15 @@ function createSettingsStore() {
     setHighlightColor(color: string) {
       if (!isValidColor(color)) return
       update(s => ({ ...s, highlightColor: color }))
+    },
+
+    /** An opacity in [0.1, 1]; `null` goes back to the theme's own strength. */
+    setHighlightStrength(value: number | null) {
+      if (value !== null && !Number.isFinite(value)) return
+      const next = value === null
+        ? null
+        : Math.max(HIGHLIGHT_STRENGTH_RANGE.min, Math.min(HIGHLIGHT_STRENGTH_RANGE.max, Math.round(value * 20) / 20))
+      update(s => ({ ...s, highlightStrength: next }))
     },
 
     setTheme(theme: Theme) {

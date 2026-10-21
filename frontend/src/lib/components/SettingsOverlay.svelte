@@ -4,6 +4,7 @@
   import {
     settingsStore,
     BIONIC_MIN_WORD_LENGTH_RANGE,
+    HIGHLIGHT_STRENGTH_RANGE,
     type SettingsState,
   } from '$lib/stores/settings'
   import {
@@ -38,6 +39,24 @@
   function setColor(color: string) {
     settings.highlightColor = color
     settingsStore.setHighlightColor(color)
+  }
+
+  /** What the slider shows while no override is set: the active theme's own opacity. */
+  function themeStrength(): number {
+    if (typeof document === 'undefined') return 0.45
+    const live = Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--highlight-alpha'))
+    return Number.isFinite(live) ? live : 0.45
+  }
+
+  function handleHighlightStrength(e: Event) {
+    const val = Number((e.target as HTMLInputElement).value)
+    settingsStore.setHighlightStrength(val)
+    settings.highlightStrength = get(settingsStore).highlightStrength
+  }
+
+  function resetHighlightStrength() {
+    settingsStore.setHighlightStrength(null)
+    settings.highlightStrength = null
   }
 
   function toggleAutoscroll() {
@@ -281,6 +300,29 @@
               role="radio"
             ></button>
           {/each}
+        </div>
+      </div>
+
+      <div>
+        <label for="highlight-strength" class="block text-sm font-medium text-fg">
+          Highlight Strength: {settings.highlightStrength === null ? 'Theme default' : `${Math.round(settings.highlightStrength * 100)}%`}
+        </label>
+        <input
+          id="highlight-strength"
+          type="range"
+          min={HIGHLIGHT_STRENGTH_RANGE.min}
+          max={HIGHLIGHT_STRENGTH_RANGE.max}
+          step="0.05"
+          value={settings.highlightStrength ?? themeStrength()}
+          oninput={handleHighlightStrength}
+          class="mt-1 w-full accent-accent"
+        />
+        <div class="flex justify-between px-0.5 text-xs text-fg-subtle">
+          <span>Subtle</span>
+          {#if settings.highlightStrength !== null}
+            <button class="underline" onclick={resetHighlightStrength}>Theme default</button>
+          {/if}
+          <span>Strong</span>
         </div>
       </div>
 

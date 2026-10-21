@@ -16,6 +16,7 @@ const DEFAULTS: SettingsState = {
   bionicBoldRatio: 0.5,
   bionicMinWordLength: 3,
   bionicSkipCommonWords: true,
+  highlightStrength: null,
   theme: 'system',
 }
 
@@ -263,5 +264,42 @@ describe('reconcileVoiceForEngine', () => {
 
   it('keeps a Piper voice while Piper is live', () => {
     expect(reconcileVoiceForEngine('piper:en_GB-alba-low', piperList)).toBe('piper:en_GB-alba-low')
+  })
+
+  describe('highlight strength', () => {
+    const root = () => document.documentElement.style
+
+    it('defaults to the theme (no inline override)', () => {
+      expect(get(settingsStore).highlightStrength).toBeNull()
+      expect(root().getPropertyValue('--highlight-alpha')).toBe('')
+    })
+
+    it('sets sentence and word alpha on <html>, word 0.35 above, capped at 1', () => {
+      settingsStore.setHighlightStrength(0.5)
+      expect(root().getPropertyValue('--highlight-alpha')).toBe('0.5')
+      expect(root().getPropertyValue('--word-alpha')).toBe('0.85')
+      settingsStore.setHighlightStrength(0.9)
+      expect(root().getPropertyValue('--word-alpha')).toBe('1')
+    })
+
+    it('clamps to 0.1-1 and null restores the theme', () => {
+      settingsStore.setHighlightStrength(5)
+      expect(get(settingsStore).highlightStrength).toBe(1)
+      settingsStore.setHighlightStrength(0)
+      expect(get(settingsStore).highlightStrength).toBe(0.1)
+      settingsStore.setHighlightStrength(null)
+      expect(get(settingsStore).highlightStrength).toBeNull()
+      expect(root().getPropertyValue('--highlight-alpha')).toBe('')
+      expect(root().getPropertyValue('--word-alpha')).toBe('')
+    })
+
+    it('persists and reloads, and ignores a bad stored value', () => {
+      settingsStore.setHighlightStrength(0.7)
+      settingsStore.reloadFromStorage()
+      expect(get(settingsStore).highlightStrength).toBe(0.7)
+      localStorage.setItem('kokoro-settings', JSON.stringify({ highlightStrength: 7 }))
+      settingsStore.reloadFromStorage()
+      expect(get(settingsStore).highlightStrength).toBeNull()
+    })
   })
 })
