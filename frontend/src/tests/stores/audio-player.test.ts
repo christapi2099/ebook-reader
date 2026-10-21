@@ -7,7 +7,8 @@ vi.mock('$lib/api', () => ({
   renderAudioUrl: (b: string, g: number, t: string) => `/api/renders/${b}/${g}/audio_${t}.opus`,
 }))
 
-import { audioStore } from '$lib/stores/audio'
+import { audioStore, speedRevertStore } from '$lib/stores/audio'
+import { toastStore } from '$lib/stores/toast'
 
 const log: string[] = []
 const made: FakeAudio[] = []
@@ -149,7 +150,34 @@ describe('render tier player', () => {
     expect(log.map(l => l.split(':')[0])).toEqual(['pause', 'play'])
   })
 
-  it('tier swap seeks to the current word start with zero socket calls', async () => {
+  it('play from the sentence the pause is in resumes without a seek or replay', async () => {
+    setup()
+    audioStore.play(0)
+    el('1.0').bufferedEnd = 5
+    await flush()
+    el('1.0').currentTime = 0.6 // inside sentence 0
+    tickAll()
+    audioStore.pause()
+    log.length = 0
+    audioStore.play(0)
+    await flush()
+    expect(el('1.0').currentTime).toBe(0.6)
+    expect(log.some(l => l.startsWith('pause'))).toBe(false)
+    expect(log).toContain(`play:${url('1.0')}`)
+  })
+
+  it('play from a different sentence still seeks to its start', async () => {
+    setup()
+    audioStore.play(0)
+    el('1.0').bufferedEnd = 5
+    await flush()
+    el('1.0').currentTime = 0.6
+    audioStore.pause()
+    audioStore.play(1)
+    expect(el('1.0').currentTime).toBeCloseTo(1.1)
+  })
+
+  it('tier swap lands on the exact playhead (scaled) with zero socket calls', async () => {
     setup()
     audioStore.play(0)
     el('1.0').bufferedEnd = 5
@@ -161,9 +189,78 @@ describe('render tier player', () => {
     const fast = el('2.0')
     fast.bufferedEnd = 5
     await flush()
-    expect(fast.currentTime).toBeCloseTo(0.25) // word 1 starts 500/2 ms
+    expect(fast.currentTime).toBeCloseTo(0.3) // 0.6 s into a 1x file is 0.3 s into the 2x file
     expect(log).toContain(`pause:${url('1.0')}`)
     expect(socketCtor).not.toHaveBeenCalled()
+  })
+
+  it('reads the playhead from the element clock even when no frame ran (hidden tab)', async () => {
+    setup()
+    audioStore.play(0)
+    el('1.0').bufferedEnd = 5
+    await flush()
+    el('1.0').currentTime = 0.9 // no rAF tick: the mirror still says 0
+    audioStore.setSpeed(2)
+    el('2.0').bufferedEnd = 5
+    await flush()
+    expect(el('2.0').currentTime).toBeCloseTo(0.45)
+  })
+
+  it('does not seek again when the prewarmed element already sits on the target', async () => {
+    setup()
+    audioStore.play(0)
+    el('1.0').bufferedEnd = 5
+    await flush()
+    el('1.0').currentTime = 0.6
+    audioStore.setSpeed(2)
+    const fast = el('2.0') as any
+    let writes = 0
+    let t = fast.currentTime
+    Object.defineProperty(fast, 'currentTime', { get: () => t, set: v => { writes++; t = v } })
+    fast.readyState = 4
+    fast.bufferedEnd = 5
+    await flush()
+    expect(el('1.0').paused).toBe(true)
+    expect(writes).toBe(0)
+  })
+
+  it('abandons a swap whose tier never loads: old tier keeps playing, speed reverts, user told', async () => {
+    setup()
+    audioStore.play(0)
+    el('1.0').bufferedEnd = 5
+    await flush()
+    const reverts: (number | null)[] = []
+    const un = speedRevertStore.subscribe(v => reverts.push(v))
+    audioStore.setSpeed(2)
+    await vi.advanceTimersByTimeAsync(13000) // el('2.0') never buffers
+    expect(el('1.0').paused).toBe(false)
+    expect(get(audioStore).speed).toBe(1)
+    expect(reverts).toContain(1)
+    expect(get(toastStore).some(t => /Could not switch to 2x/.test(t.title))).toBe(true)
+    un()
+  })
+
+  it('an element error abandons the swap at once', async () => {
+    setup()
+    audioStore.play(0)
+    el('1.0').bufferedEnd = 5
+    await flush()
+    audioStore.setSpeed(2)
+    ;(el('2.0') as any).error = { code: 4 }
+    await flush()
+    expect(el('1.0').paused).toBe(false)
+    expect(get(audioStore).speed).toBe(1)
+  })
+
+  it('a sentence click on the sentence you are paused in restarts it', async () => {
+    setup()
+    audioStore.play(0)
+    el('1.0').bufferedEnd = 5
+    await flush()
+    el('1.0').currentTime = 0.6
+    audioStore.pause()
+    audioStore.play(0, true)
+    expect(el('1.0').currentTime).toBe(0)
   })
 
   it('the old tier keeps sounding until the new one is buffered', async () => {
@@ -395,7 +492,7 @@ describe('slim manifest (schema 2): one 1x timeline, tiers divide', () => {
     unsub()
   })
 
-  it('switching tiers keeps the word position via the 1x timeline', async () => {
+  it('switching tiers keeps the exact playhead via the 1x timeline', async () => {
     setupSlim()
     audioStore.play(0)
     el('1.0').bufferedEnd = 5
@@ -405,7 +502,7 @@ describe('slim manifest (schema 2): one 1x timeline, tiers divide', () => {
     audioStore.setSpeed(2)
     el('2.0').bufferedEnd = 5
     await flush()
-    expect(el('2.0').currentTime).toBe(500 / A2 / 1000)
+    expect(el('2.0').currentTime).toBeCloseTo(0.6 / A2, 6)
   })
 
   it('keeps the manifest arrays as they are (no copies of the timeline)', () => {

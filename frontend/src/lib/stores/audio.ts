@@ -1,6 +1,7 @@
 import { writable, get } from 'svelte/store'
 import { renderAudioUrl, type RenderManifest } from '$lib/api'
 import { nearestSpeed } from '$lib/utils/speed-tiers'
+import { toastStore } from '$lib/stores/toast'
 import {
   durationsOf,
   normalizeManifest,
@@ -48,16 +49,39 @@ export const UNSUPPORTED_MESSAGE =
 /** Audio that must be buffered past the playhead before play() starts. */
 export const START_GATE_S = 0.3
 const GATE_POLL_MS = 50
-/** A tier swap while playing waits until the new tier has this much buffered at the target. */
+/** A tier swap while playing waits until the new tier has this much buffered past the target. */
 const PREWARM_S = 2
-/** Give up waiting for the new tier after this many polls (8 s) and swap anyway. */
-const PREWARM_MAX_POLLS = 160
+/** Wall-clock cap on waiting for the new tier; past it the swap is abandoned, never forced. */
+const SWAP_GIVE_UP_MS = 12000
+/** While waiting, re-aim the new element at the moving target at most this often. */
+const SWAP_CHASE_MS = 1500
+/** A swap target closer than this to where the element already sits needs no new seek. */
+const SWAP_SEEK_EPSILON_S = 0.25
+
+/**
+ * Set to the speed still sounding when a swap to another tier had to be
+ * abandoned, so the page can put its speed buttons back.
+ */
+export const speedRevertStore = writable<number | null>(null)
 
 interface TierInfo {
   key: string
   factor: number
   /** This tier's times: the 1x timeline / actual_factor (or its own segments). */
   tl: Timeline
+}
+
+const DEBUG_EVENTS = ['loadstart', 'loadedmetadata', 'durationchange', 'seeking', 'seeked', 'canplay',
+  'canplaythrough', 'playing', 'pause', 'waiting', 'stalled', 'suspend', 'error', 'ended'] as const
+const DEBUG_MAX = 2000
+
+/** Off unless the reader URL has ?audioDebug=1 (or localStorage audioDebug=1). */
+function debugEnabled(): boolean {
+  try {
+    return typeof location !== 'undefined' && (/[?&]audioDebug=1\b/.test(location.search) || localStorage.getItem('audioDebug') === '1')
+  } catch {
+    return false
+  }
 }
 
 function initialState(): AudioState {
@@ -89,6 +113,29 @@ function detectUnsupported(): boolean {
 
 function createAudioStore() {
   const { subscribe, set, update } = writable<AudioState>(initialState())
+
+  // Timestamped audio events for diagnosing a real stall: `window.__audioDebug`
+  // holds them, `__audioDebug.dump()` prints a table to copy from the console.
+  const debugOn = debugEnabled()
+  const debugLog: Record<string, unknown>[] = []
+  function dbg(what: string, el?: HTMLAudioElement | null, extra: Record<string, unknown> = {}) {
+    if (!debugOn) return
+    const b = el?.buffered
+    debugLog.push({
+      t: Math.round(performance.now()), what, tier: el ? el.src.split('audio_')[1] : undefined,
+      rs: el?.readyState, ns: el?.networkState, ct: el ? +el.currentTime.toFixed(2) : undefined,
+      dur: el && Number.isFinite(el.duration) ? Math.round(el.duration) : el?.duration,
+      bufEnd: b && b.length ? Math.round(b.end(b.length - 1)) : 0, err: el?.error?.code, ...extra,
+    })
+    if (debugLog.length > DEBUG_MAX) debugLog.splice(0, debugLog.length - DEBUG_MAX)
+  }
+  if (debugOn && typeof window !== 'undefined') {
+    ;(window as unknown as Record<string, unknown>).__audioDebug = Object.assign(debugLog, {
+      dump: () => console.table(debugLog),
+      json: () => JSON.stringify(debugLog),
+    })
+    console.info('[audio] debug on: window.__audioDebug.dump() prints the event log')
+  }
 
   let bookId: string | null = null
   let generation = 0
@@ -133,6 +180,7 @@ function createAudioStore() {
     el.volume = volume
     el.muted = muted
     const mine = el
+    if (debugOn) for (const ev of DEBUG_EVENTS) el.addEventListener(ev, () => dbg(ev, mine))
     el.addEventListener('waiting', () => {
       if (elements.get(activeKey ?? '') === mine && cur().isPlaying) update(s => ({ ...s, buffering: true }))
     })
@@ -276,11 +324,45 @@ function createAudioStore() {
     elements = new Map()
   }
 
-  /** Makes `next` the active tier at the current word (or sentence), resuming when asked. */
+  /**
+   * Where the playhead of `from` sits on `to`, in ms: the same sentence at the
+   * same offset, scaled by the tiers' speed ratio. Read from the element clock
+   * (the only clock there is), not from the per-frame mirror, which stops in a
+   * hidden tab. An element that never played falls back to the sentence start.
+   */
+  function mapPosition(from: TierInfo, fromEl: HTMLAudioElement | null, to: TierInfo, fallbackIndex: number): number {
+    const t = fromEl?.currentTime ?? 0
+    if (fromEl && t > 0 && from.tl.segs.length > 0) {
+      const ms = t * 1000
+      const si = segmentAt(from.tl, ms)
+      const ni = si >= 0 ? positionOf(to.tl, from.tl.segs[si].index) : -1
+      if (si >= 0 && ni >= 0) {
+        const scale = from.tl.segs === to.tl.segs ? from.tl.div / to.tl.div : from.factor / to.factor
+        return segStartMs(to.tl, ni) + (ms - segStartMs(from.tl, si)) * scale
+      }
+    }
+    return segmentStartMs(to, fallbackIndex)
+  }
+
+  /** True when `el` has `ahead` seconds (or the rest of the file) buffered from `t`. */
+  function covers(el: HTMLAudioElement, t: number, ahead: number): boolean {
+    const b = el.buffered
+    for (let i = 0; i < (b?.length ?? 0); i++) {
+      if (b.start(i) <= t + 0.05 && b.end(i) >= t) {
+        const need = Number.isFinite(el.duration) ? Math.min(ahead, Math.max(el.duration - t, 0)) : ahead
+        return b.end(i) - t >= need
+      }
+    }
+    return false
+  }
+
+  /** Makes `next` the active tier at the exact spot now playing, resuming when asked. */
   function swapTo(next: TierInfo, resume: boolean) {
-    if (!bookId) return
+    const oldTier = activeTier()
+    if (!bookId || !oldTier) return
     const state = cur()
     const oldEl = activeEl()
+    const posMs = mapPosition(oldTier, oldEl, next, state.currentIndex)
     swapGen++
     stopRaf()
     const token = ++playToken
@@ -290,13 +372,34 @@ function createAudioStore() {
       oldEl.pause()
     }
     activeKey = next.key
-    const posMs = currentPositionMs(next, state.currentIndex, state.currentWordIndex)
+    dbg('swap-commit', oldEl, { to: next.key, posMs: Math.round(posMs), resume })
     const el = ensureElement(next.key)
     el.volume = volume
     el.muted = muted
-    el.currentTime = posMs / 1000
+    // A prewarmed element already sits on the target: seeking again would throw
+    // its loaded data away and reread the file from there.
+    if (!(Math.abs(el.currentTime - posMs / 1000) < SWAP_SEEK_EPSILON_S && el.readyState >= 1)) el.currentTime = posMs / 1000
     update(s => ({ ...s, sentenceDurations: sentenceDurations(next), elapsedSeconds: posMs / 1000 }))
     if (resume) void startPlayback(el, token)
+  }
+
+  /** Drops a swap whose tier would not load: keep the old tier, tell the user, reset the buttons. */
+  function abandonSwap(next: TierInfo) {
+    const back = activeTier()?.factor ?? cur().speed
+    const dead = elements.get(next.key)
+    dbg('swap-abandoned', dead, { to: next.key })
+    if (dead) {
+      try { dead.pause(); dead.removeAttribute('src'); dead.load?.() } catch {}
+      elements.delete(next.key)
+    }
+    pendingTier = null
+    update(s => ({ ...s, speed: back }))
+    toastStore.push({
+      tone: 'warning',
+      title: `Could not switch to ${next.factor}x`,
+      message: `This browser did not load that speed in time, so playback stays at ${back}x.`,
+    })
+    speedRevertStore.set(back)
   }
 
   /** Finishes a pending swap at once (pause, play and resume must act on the chosen tier). */
@@ -305,6 +408,16 @@ function createAudioStore() {
     pendingSwap++
     pendingTier = null
     if (next && next.key !== activeKey) swapTo(next, false)
+  }
+
+  /** True when the paused element's playhead already sits inside sentence `index`. */
+  function isInSentence(el: HTMLAudioElement, index: number): boolean {
+    const tier = activeTier()
+    if (!tier || tier.tl.segs.length === 0 || el.ended || !(el.currentTime > 0)) return false
+    const ms = el.currentTime * 1000
+    if (ms >= segEndMs(tier.tl, tier.tl.segs.length - 1)) return false
+    const at = segmentAt(tier.tl, ms)
+    return at >= 0 && tier.tl.segs[at].index === index
   }
 
   function seekTo(index: number) {
@@ -359,19 +472,25 @@ function createAudioStore() {
     /** Call from the first user gesture so later (async) play() calls are allowed. */
     prime,
 
-    play(fromIndex: number) {
+    /** `restart` forces a seek to the sentence start even when the playhead is already inside it. */
+    play(fromIndex: number, restart = false) {
+      dbg('play', activeEl(), { fromIndex, restart })
       commitPendingSwap()
       if (!activeKey || get(unsupported)) return
       prime()
       const token = ++playToken
       const el = ensureElement(activeKey)
-      el.pause()
-      update(s => ({ ...s, currentIndex: fromIndex, currentWordIndex: -1 }))
-      seekTo(fromIndex)
+      // Resuming a pause inside this very sentence continues from the exact
+      // point: no seek (a cold seek is the slow step in Firefox) and no replay.
+      const sameSpot = !restart && isInSentence(el, fromIndex)
+      if (!sameSpot) el.pause()
+      update(s => ({ ...s, currentIndex: fromIndex, currentWordIndex: sameSpot ? s.currentWordIndex : -1 }))
+      if (!sameSpot) seekTo(fromIndex)
       void startPlayback(el, token)
     },
 
     pause() {
+      dbg('pause-call', activeEl())
       commitPendingSwap()
       playToken++
       stopRaf()
@@ -436,20 +555,37 @@ function createAudioStore() {
 
       // Playing: the old tier keeps sounding while the new element loads its
       // target (a cold seek into an unbuffered Ogg file is slow, most of all in
-      // Firefox); the swap itself then lands in buffered audio.
+      // Firefox). The target keeps moving while it loads, so the wait is for the
+      // new tier to cover where the playhead is NOW, and the swap then lands in
+      // buffered audio. If it never loads, the swap is abandoned, not forced.
       const id = ++pendingSwap
       pendingTier = next
+      dbg('swap-start', oldEl, { to: next.key })
       const el = ensureElement(next.key)
       el.volume = volume
       el.muted = muted
-      el.currentTime = currentPositionMs(next, state.currentIndex, state.currentWordIndex) / 1000
+      const targetS = () => mapPosition(oldTier, oldEl, next, cur().currentIndex) / 1000
+      const started = Date.now()
+      let aimedAt = started
+      el.currentTime = targetS()
       void (async () => {
-        for (let i = 0; i < PREWARM_MAX_POLLS && id === pendingSwap; i++) {
-          if (bufferedAhead(el) >= PREWARM_S) break
+        while (id === pendingSwap) {
+          const t = targetS()
+          if (covers(el, t, PREWARM_S)) break
+          if (el.readyState >= 3 && !el.seeking && Math.abs(el.currentTime - t) < SWAP_SEEK_EPSILON_S * 2) break
+          if (el.error || Date.now() - started > SWAP_GIVE_UP_MS) {
+            abandonSwap(next)
+            return
+          }
+          if (Date.now() - aimedAt > SWAP_CHASE_MS && !covers(el, t, 0.3)) {
+            el.currentTime = t
+            aimedAt = Date.now()
+          }
           await new Promise<void>(r => setTimeout(r, GATE_POLL_MS))
         }
         if (id !== pendingSwap) return
         pendingTier = null
+        dbg('swap-ready', el, { waitedMs: Date.now() - started })
         swapTo(next, cur().isPlaying)
       })()
       return chosen

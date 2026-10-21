@@ -342,6 +342,30 @@ def test_audio_range_206_last_bytes(client, renders_dir):
     assert r.status_code == 206 and r.content == data[10:20]
 
 
+def test_audio_open_ended_range_is_capped_and_resumable(client, renders_dir, monkeypatch):
+    """Firefox asks for bytes=N- and reads to EOF; the server answers with a
+    bounded 206 and the browser reopens at the new offset."""
+    monkeypatch.setattr(renders_router, "MAX_RANGE_BYTES", 100)
+    data = write_gen(renders_dir, tier="2.0", data=bytes(range(256)) * 4)  # 1024 bytes
+    n = len(data)
+    url = f"/api/renders/{BID}/1/audio_2.0.opus"
+    r = client.get(url, headers={"Range": "bytes=0-"})
+    assert r.status_code == 206 and r.content == data[:100]
+    assert r.headers["content-range"] == f"bytes 0-99/{n}"
+    assert r.headers["content-length"] == "100"
+    assert "immutable" in r.headers["cache-control"] and r.headers["etag"]
+    r = client.get(url, headers={"Range": "bytes=500-"})
+    assert r.content == data[500:600] and r.headers["content-range"] == f"bytes 500-599/{n}"
+    # a long explicit range is cut too; a short one, the tail and EOF are untouched
+    assert client.get(url, headers={"Range": "bytes=10-900"}).content == data[10:110]
+    assert client.get(url, headers={"Range": "bytes=10-19"}).content == data[10:20]
+    assert client.get(url, headers={"Range": "bytes=-50"}).content == data[-50:]
+    r = client.get(url, headers={"Range": "bytes=950-"})
+    assert r.status_code == 206 and r.content == data[950:]
+    assert client.get(url, headers={"Range": "bytes=5000-"}).status_code == 416
+    assert client.get(url).content == data  # no Range: the whole file
+
+
 def test_progress_reports_the_page_of_the_saved_sentence(client, db_engine, seed_book):
     """The library's resume card shows this page, so it must be the saved sentence's
     page, not the book's last page (a regression: the card said "Page 91" for a

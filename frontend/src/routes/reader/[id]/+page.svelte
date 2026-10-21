@@ -12,7 +12,7 @@ import readerStore, {
   setSpeed,
   type ReaderState,
 } from '$lib/stores/reader'
-import { audioStore, type AudioState } from '$lib/stores/audio'
+import { audioStore, speedRevertStore, type AudioState } from '$lib/stores/audio'
 import { settingsStore, type SettingsState } from '$lib/stores/settings'
 import {
   createBookmark,
@@ -92,6 +92,7 @@ let currentSearchIndex = $state(-1)
 let unsubReader: () => void
 let unsubAudio: () => void
 let unsubSettings: () => void
+let unsubRevert: () => void
 
 let loadedBookId: string | null = null
 
@@ -212,6 +213,12 @@ onMount(async () => {
   unsubReader = readerStore.subscribe((v: ReaderState) => (reader = v))
   unsubAudio = audioStore.subscribe((v: AudioState) => audio = v)
   unsubSettings = settingsStore.subscribe((v: SettingsState) => (settings = v))
+  // A speed switch the browser could not load was abandoned: put the buttons back.
+  unsubRevert = speedRevertStore.subscribe((v: number | null) => {
+    if (v === null) return
+    setSpeed(v)
+    speedRevertStore.set(null)
+  })
 
   await openBook(bookId)
   loadedBookId = bookId
@@ -249,6 +256,7 @@ onDestroy(() => {
   unsubReader?.()
   unsubAudio?.()
   unsubSettings?.()
+  unsubRevert?.()
   audioStore.destroy()
   unregisterHotkeys()
   resetReader()
@@ -335,7 +343,7 @@ function handleSeek(index: number) {
   } else {
     // Auto-play from the clicked sentence and fix the stale audio.currentIndex bug
     setPlaying(true)
-    audioStore.play(index)
+    audioStore.play(index, true)
   }
   // Optimistic position; the bookmark write is debounced inside seek().
   void seek(index)

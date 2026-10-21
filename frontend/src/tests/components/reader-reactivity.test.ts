@@ -22,6 +22,7 @@ vi.mock('$lib/stores/audio', async () => {
       __set: (patch: object) => { state = { ...state, ...patch }; subs.forEach(f => f(state)) },
     },
     speedDowngradeStore: writable(null),
+    speedRevertStore: writable(null),
   }
 })
 vi.mock('$lib/api', async (importOriginal) => {
