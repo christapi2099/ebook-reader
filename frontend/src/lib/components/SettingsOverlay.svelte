@@ -324,6 +324,23 @@
           {/if}
           <span>Strong</span>
         </div>
+        <p
+          class="mt-2 rounded-lg border border-border bg-surface-sunken p-3 text-sm leading-relaxed text-fg"
+          aria-label="Highlight preview"
+          data-testid="highlight-preview"
+        >
+          The previous sentence stays plain.
+          <span
+            class="rounded-sm px-0.5"
+            style="background-color: color-mix(in oklab, {settings.highlightColor} calc(var(--highlight-alpha) * 100%), transparent)"
+          >The current sentence is
+            <span
+              class="rounded-sm"
+              style="background-color: color-mix(in oklab, {settings.highlightColor} calc(var(--word-alpha) * 100%), transparent)"
+            >highlighted</span>
+            as you read.</span>
+          The next one follows.
+        </p>
       </div>
 
       <Switch
