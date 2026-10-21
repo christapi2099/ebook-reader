@@ -148,3 +148,18 @@ def test_slim_gzip_roundtrip(tmp_path):
     p = tmp_path / "manifest.json"
     p.write_text(json.dumps(_v1()))
     assert json.loads(gzip.decompress(manifest_cache.slim_gzip(p)))["schema"] == 2
+
+
+def test_unwritable_cache_still_serves(client, db_engine, seed_book, renders_dir, monkeypatch):
+    seed_book(db_engine, ready_generation=1)
+    _publish(renders_dir, _v1())
+    root = manifest_cache.cache_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    root.chmod(0o555)
+    try:
+        r = client.get(f"/library/{BID}/render", headers={"Accept-Encoding": "gzip"})
+        assert r.status_code == 200 and r.json()["schema"] == 2
+        ident = client.get(f"/library/{BID}/render", headers={"Accept-Encoding": "identity"})
+        assert ident.status_code == 200 and ident.headers["etag"] != r.headers["etag"]
+    finally:
+        root.chmod(0o755)

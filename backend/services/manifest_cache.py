@@ -41,8 +41,9 @@ def cache_dir() -> Path:
 
 @dataclass(frozen=True)
 class CachedManifest:
-    path: Path  # gzipped slim JSON
+    path: Path | None  # gzipped slim JSON on disk; None when the cache dir is unwritable
     etag: str
+    data: bytes | None = None  # the gzip bytes in that case
 
 
 def _lock_for(p: Path) -> threading.Lock:
@@ -75,13 +76,17 @@ def get(book_id: str, gen: int, source: Path) -> CachedManifest:
         if path.is_file():  # another request built it while we waited
             return CachedManifest(path, etag)
         data = slim_gzip(source)
-        book_cache.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-        tmp.write_bytes(data)
-        os.replace(tmp, path)
-        for old in book_cache.iterdir():  # older generations / replaced sources
-            if old != path and not old.name.startswith("."):
-                old.unlink(missing_ok=True)
+        try:
+            book_cache.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+            tmp.write_bytes(data)
+            os.replace(tmp, path)
+            for old in book_cache.iterdir():  # older generations / replaced sources
+                if old != path and not old.name.startswith("."):
+                    old.unlink(missing_ok=True)
+        except OSError:  # unwritable cache dir: serve the bytes we just built, uncached
+            logger.exception("[manifest] cannot write cache for %s gen %s", book_id, gen)
+            return CachedManifest(None, etag, data)
         logger.info("[manifest] cached slim manifest %s gen %s: %d -> %d bytes gz",
                     book_id, gen, st.st_size, len(data))
     return CachedManifest(path, etag)

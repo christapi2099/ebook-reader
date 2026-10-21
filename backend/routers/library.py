@@ -395,13 +395,21 @@ def get_render_manifest(book_id: str, request: Request,
         raise HTTPException(status_code=404, detail="Manifest missing")
     headers = {"ETag": cached.etag, "Cache-Control": "no-cache", "Vary": "Accept-Encoding",
                "X-Render-Generation": str(gen)}
-    if manifest_cache.etag_matches(request.headers.get("if-none-match"), cached.etag):
+    inm = request.headers.get("if-none-match")
+    if (manifest_cache.etag_matches(inm, cached.etag)
+            or manifest_cache.etag_matches(inm, cached.etag[:-1] + '-id"')):
         return Response(status_code=304, headers=headers)
-    if manifest_cache.accepts_gzip(request.headers.get("accept-encoding")):
+    gz = manifest_cache.accepts_gzip(request.headers.get("accept-encoding"))
+    if gz and cached.path is not None:
         return FileResponse(cached.path, media_type="application/json",
                             headers={**headers, "Content-Encoding": "gzip"})
-    return Response(gzip.decompress(cached.path.read_bytes()), media_type="application/json",
-                    headers=headers)
+    raw = cached.data if cached.data is not None else cached.path.read_bytes()
+    if gz:
+        return Response(raw, media_type="application/json",
+                        headers={**headers, "Content-Encoding": "gzip"})
+    # a different body than the gzip one must not share its strong ETag
+    headers["ETag"] = cached.etag[:-1] + '-id"'
+    return Response(gzip.decompress(raw), media_type="application/json", headers=headers)
 
 
 @router.get("/{book_id}/processing")

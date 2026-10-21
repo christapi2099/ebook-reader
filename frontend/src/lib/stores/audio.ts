@@ -152,7 +152,8 @@ function createAudioStore() {
 
   async function waitForGate(el: HTMLAudioElement, token: number): Promise<boolean> {
     while (token === playToken) {
-      if (bufferedAhead(el) >= START_GATE_S) return true
+      // Firefox publishes the new buffered range ~500 ms after a seek although data is ready
+      if (bufferedAhead(el) >= START_GATE_S || (el.readyState >= 3 && !el.seeking)) return true
       await new Promise<void>(r => setTimeout(r, GATE_POLL_MS))
     }
     return false

@@ -145,7 +145,7 @@ def test_amd_with_cuda_build_reason_is_actionable(tmp_path):
     inv = inventory(tmp_path, [("amd", PCI[0])], probe_of("cuda"))
     r = inv.devices[0].reason
     assert "CUDA build" in r and "ROCm torch environment" in r
-    assert "scripts/setup-rocm-env.sh" in r and "planned" in r
+    assert "scripts/setup-rocm-env.sh" in r and "planned" not in r
 
 
 def test_nvidia_with_cpu_or_rocm_and_intel_without_xpu(tmp_path):

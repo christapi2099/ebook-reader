@@ -329,7 +329,7 @@ def _mismatch_reason(vendor: str, build: str, torch_version: str | None) -> str:
         return (
             f"AMD GPU detected, but the installed torch is a {build.upper()} build{ver}. "
             "An AMD GPU needs the ROCm torch environment "
-            "(scripts/setup-rocm-env.sh is planned, not yet available)."
+            "(run scripts/setup-rocm-env.sh, see docs/AMD_ROCM.md)."
         )
     if vendor == "nvidia":
         return (
